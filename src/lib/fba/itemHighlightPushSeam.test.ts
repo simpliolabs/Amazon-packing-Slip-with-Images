@@ -54,6 +54,29 @@
  * Pool-only (the 3 truthful pool phrases alone, before any pad filler) stays 77-87 chars for every
  * design — under 89 — so `Classic Fit` is still produced ONLY by the pad, never a coincidence of the
  * pool phrases' own wording.
+ *
+ * TASK 6 CONSEQUENCE (2026-09-06, ABSOLUTE no-repeat, PO ruling verbatim "2. No Repeat as per Amazon
+ * Ruules") — REPORTED, NOT RE-FIXTURED, per this task's own brief ("if any design HOLDS under the
+ * absolute rule on that fixture, REPORT it ... do not re-fixture; the controller decides whether the
+ * fixture pool is representative"):
+ *
+ * The "3 truthful pool phrases" this file's own margin math (above) is built on were NEVER all
+ * mutually Tier-A: `SHARED` is `['graphic novelty tee for men', 'funny tee gift idea today']` — both
+ * share the folded token `tee`. Under Task 2's (now-deleted) Tier-B fallback the second phrase still
+ * composed (it added `funny`/`gift`/`idea`/`today`, merely repeating `tee`), giving 3 pool picks
+ * (OWN + SHARED[0] + SHARED[1]) and the `poolOnly` lengths this file's comments cite (77-87). Under
+ * the absolute rule SHARED[1] is REJECTED outright, leaving only 2 mutually non-repeating pool picks
+ * (OWN + SHARED[0]) per design — below `MIN_CANDIDATES` (3) — so EVERY design in EVERY scenario below
+ * now HOLDS `under-floor-no-repeat` before the pad loop (and `Classic Fit`) is ever reached. `MARGIN`
+ * still does its OWN job (keeping `candidates.length` at 5-6, nowhere near the `too-few-candidates`
+ * cliff it was built for — confirmed via the composer's own diagnostic log, run 2026-09-06); the new
+ * cliff is a DIFFERENT gate (`too-few-picked`, via `under-floor-no-repeat`) that MARGIN was never
+ * built to address, because Task 2 (whose fallback MARGIN's sibling phrases relied on being excluded
+ * from) still allowed SHARED[1]'s repeat when this file was last re-baselined. The tests below are
+ * updated to assert the TRUE (HOLD) outcome; the pool is untouched. This also means this file's own
+ * "prove the real wire threads distinct per-design values" tests (below) can no longer demonstrate
+ * that specific proof on THIS pool, since nothing composes any more — flagged as a coverage gap for
+ * the controller, not silently patched.
  */
 import { describe, it, expect, vi } from 'vitest'
 
@@ -136,14 +159,16 @@ const POOL: AnalyzedKeyword[] = [...OWN_PHRASES, ...SHARED, ...MARGIN]
 const build = (pool: AnalyzedKeyword[]) =>
   buildItemHighlightsPerDesign({ groups: GROUPS, pool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: FAMILY_TITLE })
 
-describe('Important #6: the fixture no longer sits on the zero-margin candidate cliff', () => {
-  it('losing ONE shared phrase (the exact cliff the pre-fix fixture sat on: 3 candidates -> 2, ALL SIX designs thin-candidates/0) now leaves every design still composing — MARGIN keeps candidates at 5, safely above MIN_CANDIDATES (3)', () => {
+describe('Important #6: the fixture no longer sits on the zero-margin CANDIDATE cliff (a DIFFERENT cliff — TASK 6 CONSEQUENCE, see file header — now holds every design regardless)', () => {
+  it('losing ONE shared phrase (the exact candidate-count cliff the pre-fix fixture sat on: 3 candidates -> 2) still leaves `candidates` healthy — MARGIN keeps it at 5, safely above MIN_CANDIDATES (3) — but every design HOLDS anyway, for the absolute no-repeat reason (Task 6), not the thin-candidates reason MARGIN was built to prevent', () => {
     const minusOne = [...OWN_PHRASES, SHARED[0], ...MARGIN]   // drop SHARED[1] — the plan's own acceptance-test scenario
     const r = build(minusOne)
     for (const k of KEYS) {
       const d = r.perDesign.find((p) => p.designKey === k)!
-      expect(d.hold).toBeNull()
-      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      // TASK 6: not `thin-candidates` (MARGIN still prevents that cliff — its own job) and not
+      // `designs-unrated` (every design is rated) — specifically the absolute no-repeat hold.
+      expect(d.hold).toBe('under-floor-no-repeat')
+      expect(d.value).toBe('')
     }
   })
 })
@@ -152,44 +177,38 @@ describe('push seam wire: real buildItemHighlightsPerDesign -> real buildPerSkuI
   const r = build(POOL)
   const { values, skipped } = buildPerSkuItemHighlightMap(r.perChild, ALL_TARGETS, null)
 
-  it('every design composed a non-empty line >= 107 chars, no OpenAI call — sanity precondition for the assertions below (not itself the wire proof)', () => {
+  it('TASK 6 CONSEQUENCE (see file header): every design now HOLDS under-floor-no-repeat on this exact pool, no OpenAI call regardless — replaces the pre-Task-6 sanity precondition ("every design composed >= 107 chars"), which no longer holds here', () => {
     for (const k of KEYS) {
       const d = r.perDesign.find((p) => p.designKey === k)!
-      expect(d.hold).toBeNull()
-      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      expect(d.hold).toBe('under-floor-no-repeat')
+      expect(d.value).toBe('')
     }
     expect(create).not.toHaveBeenCalled()
   })
 
-  it('each SKU maps to ITS OWN design\'s line — six distinct values across the map, never a sibling\'s (the exact class PR #652 would have missed: this reads the map the REAL Task 1 output produced, not a hand-built one)', () => {
-    expect(skipped).toEqual([])
-    expect(values.size).toBe(ALL_TARGETS.length)               // all 7 SKUs resolved
-    expect(new Set(values.values()).size).toBe(KEYS.length)    // 6 distinct design lines
-    // Cross-check every SKU against ITS OWN design's composed value specifically (not merely
-    // "distinct from the others") — BM's two SKUs must both carry BM's line, RK's one SKU only RK's.
-    for (const g of GROUPS) {
-      const ownLine = r.perDesign.find((d) => d.designKey === g.key)!.value
-      for (const s of g.skus) expect(values.get(s.sku)).toBe(ownLine)
-    }
+  it('TASK 6 CONSEQUENCE: with every design held, the map resolves NOTHING and skips every SKU `no-line-for-design` — never a sibling\'s line (the class PR #652 would have missed still holds: a fully-held family maps to an empty pushable set, not a borrowed value). The ORIGINAL proof this test carried (six distinct per-design values thread correctly through the REAL map) cannot be demonstrated on this pool any more — flagged in the file header for the controller; not re-fixtured.', () => {
+    expect(values.size).toBe(0)
+    expect(skipped.length).toBe(ALL_TARGETS.length)
+    for (const t of ALL_TARGETS) expect(skipped).toContainEqual({ sku: t.sku, asin: t.asin, reason: NO_LINE_FOR_DESIGN })
   })
 
-  it('no mapped value contains "relaxed" for this Classic-fit blank — Task 4 SHIPPED (final fix wave, 2026-09-06, Minor #9: renamed from "NOTE (Task 4, not yet built)"): the assertion is now REAL. A "relaxed ..." phrase is PRESENT in the pool (rated a strong candidate for every design) and would otherwise win a slot on volume/fit alone — `ihTruthVerdict`\'s fit-claim rule (Task 4) is what keeps it out, proven here through the REAL wire (buildItemHighlightsPerDesign -> buildPerSkuItemHighlightMap), not phraseTruthVerdict called in isolation.', () => {
+  it('no mapped value contains "relaxed" for this Classic-fit blank — Task 4\'s fit-claim rule still excludes the adversarial phrase (truthDrops confirms `fit-claim-lie` fires), though on this now-fully-held pool the proof is vacuous over an empty map; the REAL (non-vacuous) proof that "relaxed" never ships on a Classic blank through a genuinely COMPOSING per-design wire now lives in itemHighlightPerDesign.test.ts\'s Task 5 describe block (augmented with a `.toContain(\'classic\')` pin, 2026-09-06).', () => {
     expect(GILDAN.spec.fit).toBe('Classic')
     const adversarial = kw('relaxed fit graphic tee', 9993, 3)
     const rAdv = build([adversarial, ...POOL])
     const { values: advValues } = buildPerSkuItemHighlightMap(rAdv.perChild, ALL_TARGETS, null)
     for (const v of advValues.values()) expect(v.toLowerCase()).not.toContain('relaxed')
-    // sanity: every design still composed a real line (the adversarial phrase was excluded by truth,
-    // not by starving the pool below MIN_CANDIDATES).
+    // TASK 6 CONSEQUENCE: the adversarial phrase is still excluded by TRUTH (fit-claim-lie), not by
+    // starving the pool below MIN_CANDIDATES — but every design now holds `under-floor-no-repeat`
+    // regardless (same mechanism as the rest of this file; see file header).
     for (const k of KEYS) {
       const d = rAdv.perDesign.find((p) => p.designKey === k)!
-      expect(d.hold).toBeNull()
-      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      expect(d.hold).toBe('under-floor-no-repeat')
     }
   })
 
-  it('at least one mapped value contains "Classic" — the spec-fact pad truth-fix (blank_specs.fit -> "${fit} Fit", itemHighlightComposer.ts:359-361) that must ship over the live "relaxed unisex fit" defect this plan was opened against', () => {
-    expect(Array.from(values.values()).some((v) => v.includes('Classic'))).toBe(true)
+  it('TASK 6 CONSEQUENCE: no mapped value contains "Classic" either, because nothing composes at all on this pool any more — the spec-fact pad truth-fix (blank_specs.fit -> "${fit} Fit") that must ship over the live "relaxed unisex fit" defect this plan was opened against is proven elsewhere (itemHighlightPerDesign.test.ts\'s Task 5 fixture, which DOES compose) rather than on this now-fully-held pool. Flagged for the controller — see file header.', () => {
+    expect(values.size).toBe(0)
   })
 })
 
@@ -213,11 +232,13 @@ describe('push seam wire: a held design is skipped at the map, never given a sib
     expect(skipped).toContainEqual({ sku: rkSku, asin: RK.skus[0].asin, reason: NO_LINE_FOR_DESIGN })
   })
 
-  it('the other five designs still resolve their OWN lines through the map — a hold on one design never blocks or borrows for its siblings', () => {
+  it('the other five designs are NEVER held `designs-unrated` because of RK — isolation still holds (TASK 6 CONSEQUENCE: they now separately HOLD `under-floor-no-repeat` too, same as every other scenario in this file — see file header — so this no longer proves "still resolve their OWN lines"; it proves the narrower, still-real claim that RK\'s specific unrated-ness never spreads to a sibling\'s hold REASON)', () => {
     for (const g of GROUPS.filter((g) => g.key !== 'RK')) {
-      const ownLine = r.perDesign.find((d) => d.designKey === g.key)!.value
-      expect(ownLine.length).toBeGreaterThanOrEqual(107)
-      for (const s of g.skus) expect(values.get(s.sku)).toBe(ownLine)
+      const d = r.perDesign.find((dd) => dd.designKey === g.key)!
+      expect(d.hold).not.toBe('designs-unrated')
+      expect(d.hold).toBe('under-floor-no-repeat')
+      // never borrowed RK's (or any sibling's) line, and never RK's specific hold reason
+      for (const s of g.skus) expect(values.get(s.sku)).toBeUndefined()
     }
   })
 })

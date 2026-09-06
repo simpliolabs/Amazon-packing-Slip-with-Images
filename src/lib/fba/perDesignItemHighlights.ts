@@ -34,7 +34,7 @@ import { CONTENT_CONTRACT } from './contentContract'
  *  listing page (client component) without pulling the whole server-only pipeline (`import OpenAI
  *  from 'openai'`) into the browser bundle. listingPipeline.ts re-exports both names for every
  *  existing importer — this is a relocation, not a behavior change. */
-export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec' | 'designs-unrated'
+export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec' | 'designs-unrated' | 'under-floor-no-repeat'
 export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
   'unrated-pool': 'Held: pool is unrated — run research/theme rating first',
   'thin-candidates': 'Held: too few truthful ranking phrases in the pool — harvest more keywords for this family',
@@ -47,6 +47,13 @@ export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
   // { parent_asin, per_design: true } (it rates every design's column at once, so it also clears any
   // sibling that was separately unrated).
   'designs-unrated': 'Held: this design\'s own rating share is too thin — run the per-design theme rating (keyword-pool/rerate { per_design: true }) first',
+  // TASK 6 (2026-09-06, PO verbatim "2. No Repeat as per Amazon Ruules"): distinct from `under-floor`
+  // — a repeat WOULD reach the floor here (that's how `repeatBlocked` is detected), but the PO's
+  // ruling forbids composing one absolutely (stricter than Amazon's own ≤2 cap), so the composer
+  // never tries. Never a silently shortened line and never a repeat to reach the floor — the design
+  // HOLDS and names the same PO action as `under-floor` (more/varied keywords let Tier A alone reach
+  // the floor).
+  'under-floor-no-repeat': `Held: truthful phrases + blank facts reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor only by repeating a significant word, which is never allowed (PO ruling 2026-09-06) — rate/harvest more keywords for this family`,
 }
 
 /** One entry per SKU — mirrors per_child_titles' {sku, asin, <field>, designName?, designKey?}. */

@@ -60,6 +60,7 @@ vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { c
 
 import { buildItemHighlights, buildItemHighlightsPerDesign, IH_HOLD_MESSAGES } from './listingPipeline'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
+import { ihFoldWord, IH_INSIGNIFICANT } from './productDetailAttrs'
 import { applyStickyDetails } from './stickyDetails'
 import { collapseSharedIhRows, perDesignIhRows } from './perDesignItemHighlights'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
@@ -126,6 +127,23 @@ const build = (pool: AnalyzedKeyword[], groups = GROUPS) =>
 
 const lineFor = (r: ReturnType<typeof build>, key: string): string => (r.perDesign.find((d) => d.designKey === key)?.value ?? '').toLowerCase()
 const holdFor = (r: ReturnType<typeof build>, key: string) => r.perDesign.find((d) => d.designKey === key)?.hold ?? null
+
+/** TASK 6 (2026-09-06, absolute no-repeat) test helper: an INDEPENDENT fold over the RETURNED
+ *  bytes — deliberately NOT the composer's own private `significantFolded` (itemHighlightComposer.ts)
+ *  — so this proves the wire's output obeys the PO's ruling, not merely the composer's internal
+ *  bookkeeping (`test-proves-the-mock-not-the-wire`). Mirrors the composer's own fold RULES
+ *  (`ihFoldWord` + the same gender-plural collapse) using only the exported primitives. */
+const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
+const dupedFoldedTokens = (line: string): string[] => {
+  const counts = new Map<string, number>()
+  for (const raw of line.toLowerCase().split(/[\s,]+/).filter(Boolean)) {
+    const f = ihFoldWord(raw)
+    const w = GENDER_FOLDS[f] ?? f
+    if (!w || IH_INSIGNIFICANT.has(w)) continue
+    counts.set(w, (counts.get(w) ?? 0) + 1)
+  }
+  return [...counts.entries()].filter(([, c]) => c > 1).map(([w]) => w)
+}
 
 describe('each design composes its OWN line (PO 2026-09-06, refining the shared-line ruling)', () => {
   const r = build(POOL)
@@ -295,8 +313,17 @@ describe('union-title coverage is now PER DESIGN + every sibling name stripped',
 
 describe('single-design parity (pin) + the per-design column parser', () => {
   it('buildItemHighlights ignores themeFitByDesign entirely — a single-design family is byte-identical with or without it', () => {
-    const plain = SHARED.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: 3 } as unknown as AnalyzedKeyword))
-    const withCol = SHARED.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: 3, themeFitByDesign: { RK: { fit: 0, about: 'x' } } } as unknown as AnalyzedKeyword))
+    // TASK 6 (2026-09-06, absolute no-repeat): SHARED's own phrases share `shirt`/`man`/`graphic`
+    // (see file header) so only 2 of its 10 rows ever compose as mutually non-repeating Tier A —
+    // below MIN_CANDIDATES (3) regardless of blank-spec padding. Two all-new local phrases are
+    // added (LOCAL to this test — SHARED itself is used file-wide and stays untouched) so the parity
+    // pin below still has a genuine composed value to compare, not a HOLD.
+    const EXTRA: AnalyzedKeyword[] = [
+      { keyword: 'weekend cookout vibes', searchVolume: 100, themeFit: 3 } as unknown as AnalyzedKeyword,
+      { keyword: 'holiday backyard celebration', searchVolume: 90, themeFit: 3 } as unknown as AnalyzedKeyword,
+    ]
+    const plain = [...SHARED, ...EXTRA].map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: 3 } as unknown as AnalyzedKeyword))
+    const withCol = [...SHARED, ...EXTRA].map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: 3, themeFitByDesign: { RK: { fit: 0, about: 'x' } } } as unknown as AnalyzedKeyword))
     const a = buildItemHighlights({ finalTitle: BM.titles[0], pool: plain, apparelProduct: true, blankBrand: GILDAN, netTitles: BM.titles })
     const b = buildItemHighlights({ finalTitle: BM.titles[0], pool: withCol, apparelProduct: true, blankBrand: GILDAN, netTitles: BM.titles })
     expect(a.value.length).toBeGreaterThanOrEqual(107)
@@ -386,6 +413,14 @@ describe('Task 5: per-design audience truth in the Item Highlight composer', () 
     for (const k of KEYS) {
       expect(lineFor(r, k)).not.toContain('women')
       expect(lineFor(r, k).length).toBeGreaterThanOrEqual(107)   // genuinely composed, not held
+      // TASK 6 (2026-09-06, absolute no-repeat): every design composes here (unlike T5-g's larger,
+      // repeat-heavy pool — see that describe block's own comment), so this is where the "zero
+      // repeated significant token" pin lives for a genuine six-design-under-unisex composition.
+      expect(dupedFoldedTokens(lineFor(r, k))).toEqual([])
+      // Also the non-vacuous version of itemHighlightPushSeam.test.ts's "Classic Fit ships" pin
+      // (that file's own pool no longer composes at all under Task 6 — see its file header): GILDAN
+      // is Classic-fit, so its own pad fact can only ever emit "Classic Fit", never "Relaxed Fit".
+      expect(lineFor(r, k)).toContain('classic')
     }
   })
 
@@ -438,30 +473,48 @@ describe('Task 5: per-design audience truth in the Item Highlight composer', () 
  * must be absent from every line for TWO independent reasons depending on the design (fit for RK,
  * audience for the other five), and every design must still reach the floor truthfully, on its own
  * name, with the Classic-fit blank's OWN pad fact ("Classic Fit") present and never "Relaxed".
- * GREEN BY CONSTRUCTION, not vacuous: `buildItemHighlightsPerDesign` did not even accept an
- * `audienceLean` parameter before Task 5 (see this file's Task 5 describe block above, whose own
- * pins ARE the RED/GREEN proof for the rule this test exercises) — this test's job is to prove the
- * SAME rule holds on the ordinary, larger, everyday-shaped family, not merely a dedicated small one.
+ *
+ * TASK 6 CONSEQUENCE (2026-09-06) — REPORTED, NOT RE-FIXTURED, per the task brief's own guardrail
+ * for `itemHighlightPushSeam.test.ts` (the same principle applies here: this is "a real consequence
+ * of the ruling," for the controller to judge, not a bug to paper over with a bigger pool):
+ *
+ * Under the absolute no-repeat rule this pool no longer composes for ANY of the six designs under a
+ * unisex lean — all six now HOLD `under-floor-no-repeat`. Mechanically: SHARED's own 10 phrases are
+ * almost entirely "X shirt(s)/tshirts/tops for men" boilerplate (see the SHARED definition above);
+ * under `audienceLean: 'unisex'` the forced-gender rule (Task 5) drops every bare gendered phrase as
+ * `audience-lean-lie` (9 of the 12 scoped rows per design — confirmed via the composer's own
+ * `IH_COMPOSER_NULL` diagnostic, run 2026-09-06: `"candidates":3,"picked":2,"truthDrops":
+ * {"audience-lean-lie":9}` for every design), leaving only 3 truth-clean candidates per design: that
+ * design's OWN name phrase, "novelty shirts for guys", and "statement tee shirts" — and the latter
+ * two themselves share `shirt`, so only 2 of the 3 are ever mutually Tier-A. 2 < MIN_CANDIDATES (3),
+ * so the composer holds before the pad loop even runs (Tier-A reach: 2 candidates, 0 chars composed).
+ *
+ * This is NOT a bug: Task 5's audience-truth net (removes every gendered market phrase) stacked on
+ * Task 6's absolute rule (removes the repeat that used to paper over what was left) on a keyword bank
+ * that happens to be unusually repetitive once the gendered phrases are gone. The "zero repeated
+ * significant tokens on a genuinely composing six-design family" pin the Task 6 brief also asked for
+ * now lives on the Task 5 describe block's own first test above (a smaller, still-real six-design/
+ * per-design-partition pool that DOES compose under unisex) — this fixture cannot serve as that
+ * vehicle any more. Flagging for the controller to decide whether SHARED is worth enriching with more
+ * gender-neutral phrasing; not done here (SHARED is reused file-wide by dozens of other tests whose
+ * own numbers this task must not disturb).
  */
-describe('T5-g: the realistic six-design fixture composes cleanly under a UNISEX family lean', () => {
-  it('all six designs compose >= 107 chars, no hold, no "relaxed", "Classic" present — on the SAME pool every other describe block above uses, now with audienceLean: unisex', () => {
+describe('T5-g: the realistic six-design fixture — TASK 6 CONSEQUENCE: now HOLDS under a UNISEX family lean', () => {
+  it('all six designs HOLD under-floor-no-repeat — Task 6\'s absolute rule stacked on Task 5\'s forced-gender rule leaves only 2 mutually non-repeating truthful candidates per design on this pool, below MIN_CANDIDATES (3)', () => {
     const r = buildItemHighlightsPerDesign({
       groups: GROUPS, pool: POOL, apparelProduct: true, blankBrand: GILDAN,
       familyTitleText: FAMILY_TITLE, audienceLean: 'unisex',
     })
     expect(GILDAN.spec.fit).toBe('Classic')
     for (const k of KEYS) {
-      const line = lineFor(r, k)
-      expect(holdFor(r, k)).toBeNull()
-      expect(line.length).toBeGreaterThanOrEqual(107)
-      expect(line).not.toContain('relaxed')
-      expect(line).toContain('classic')   // lineFor() lowercases; the pad's "${spec.fit} Fit" filler
+      expect(holdFor(r, k)).toBe('under-floor-no-repeat')
+      expect(lineFor(r, k)).toBe('')
     }
     // Also assert on the RETURNED BYTES directly (per_child/perDesign values, not the lowercased
-    // helper) — the promoted minor's own wording ("assert on returned bytes").
+    // helper) — matches the promoted minor's own wording ("assert on returned bytes").
     for (const d of r.perDesign) {
-      expect(d.value.length).toBeGreaterThanOrEqual(107)
-      expect(d.value.toLowerCase()).not.toContain('relaxed')
+      expect(d.hold).toBe('under-floor-no-repeat')
+      expect(d.value).toBe('')
     }
   })
 })

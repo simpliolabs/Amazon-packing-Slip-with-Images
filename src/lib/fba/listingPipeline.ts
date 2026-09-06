@@ -2371,9 +2371,14 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
   }
   // HOLD (PO 2026-08-21): no LLM draft, no spec-mash — a named reason the PO can act on. An
   // unrated pool holds BEFORE selection (the composer never volume-orders without a judgment).
+  // TASK 6 (2026-09-06): `under-floor-no-repeat` names itself straight through — distinct from the
+  // generic `under-floor`/`no-spec`/`thin-candidates` reasons, whichever composer gate it fired at
+  // (too-few-picked or the final floor check), because the true cause is the absolute no-repeat
+  // rule, not a thin pool or a missing spec.
   const hold: IhHoldReason = res.stage === 'unrated-pool' ? 'unrated-pool'
-    : res.stage === 'under-floor-after-pad' ? (blankBrand?.spec ? 'under-floor' : 'no-spec')
-      : 'thin-candidates'
+    : res.stage === 'under-floor-no-repeat' ? 'under-floor-no-repeat'
+      : res.stage === 'under-floor-after-pad' ? (blankBrand?.spec ? 'under-floor' : 'no-spec')
+        : 'thin-candidates'
   console.warn(JSON.stringify({ tag: 'IH_HOLD', reason: hold, stage: res.stage }))
   return { value: '', hold }
 }
