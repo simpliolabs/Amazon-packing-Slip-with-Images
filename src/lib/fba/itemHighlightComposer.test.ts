@@ -364,6 +364,35 @@ describe('ihTruthVerdict — fit-claim truth (Task 4, 2026-09-06: live B0DSCDZC6
     expect(ihTruthVerdict('classic fit', TRUTH_TEE)).toEqual({ ok: true })        // the pad's own emitted phrase, self-true
     expect(ihTruthVerdict('unisex fit', TRUTH_TEE)).toEqual({ ok: true })         // "unisex" carries no fit-claim word
   })
+
+  // --- FIX ROUND 1 (2026-09-06) — the Task 4 reviewer (a24c8bba) executed ihTruthVerdict directly
+  // against HEAD 2ca9798 and found all of these PASSING (`{ ok: true }`) when every one is the live
+  // lie or a variant of it. Root cause: FIT_CLAIM_RE required the fit word immediately adjacent to
+  // "fit" (`\s+fit\b`) and phraseTruthVerdict read only the FIRST match. Fixed at contentTruth.ts:546
+  // (non-adjacent match, bounded to the comma-delimited segment, separator `[\s-]+`-equivalent via a
+  // not-a-comma lazy span) and :613 (iterate every match, reject if ANY is unbacked).
+  it('REPRODUCTION: rejects "relaxed unisex fit" on the Classic-fit blank — the exact live B0DSCDZC6K string, non-adjacent ("unisex" sits between the claim word and "fit")', () => {
+    expect(ihTruthVerdict('relaxed unisex fit', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('rejects the full live IH line "cotton blend fabric, relaxed unisex fit, crew neck design, cuff sleeves" on Classic — called directly (as the reviewer did) to prove the predicate itself is comma-segment-safe; in production the composer never hands ihTruthVerdict a multi-segment string like this (candidates are single un-comma\'d 2-5 word pool keywords, itemHighlightComposer.ts:242 `ihTruthVerdict(r.keyword, truthCtx)`) — the realistic per-candidate segment is covered by the REPRODUCTION test above ("relaxed unisex fit" alone)', () => {
+    expect(ihTruthVerdict('cotton blend fabric, relaxed unisex fit, crew neck design, cuff sleeves', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('rejects the hyphenated form "relaxed-fit" on Classic', () => {
+    expect(ihTruthVerdict('relaxed-fit', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('rejects "relaxed fit oversized tee" on a Relaxed blank — the FIRST claim ("relaxed fit") matches spec.fit, but the SECOND, unbacked claim ("oversized") must still be examined, not laundered by the first match being true', () => {
+    const TRUTH_CC = { garmentFamily: 'tee' as const, spec: SPEC, allowedBrand: 'Comfort Colors', audience: ihAudienceOf('tee') }
+    expect(ihTruthVerdict('relaxed fit oversized tee', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('no false positive: "classic rock shirt" on Classic passes — the suffix ruling stands (a SUFFIX word with no "fit" anywhere in the phrase is ordinary design vocabulary, never a claim)', () => {
+    expect(ihTruthVerdict('classic rock shirt', TRUTH_TEE)).toEqual({ ok: true })
+  })
+  it('a lone "fit" with no preceding claim word is not a claim: "great fit tee" passes (the brief\'s own "crewneck fit for all sizes" example trips the UNRELATED wrong-garment-noun rule (a) — "crewneck" is its own noun class that the plain tee family does not allow, orthogonal to this rule; swapped to an equally lone-"fit" phrase that does not collide with rule (a))', () => {
+    expect(ihTruthVerdict('great fit tee', TRUTH_TEE)).toEqual({ ok: true })
+  })
+  it('SEGMENT-BOUNDED BY DESIGN: "relaxed cotton, unisex fit" passes — "relaxed" (segment 1) and "fit" (segment 2) are in DIFFERENT comma segments, so they may not bind to form a claim; each segment alone carries no claim word, so ok is the correct answer', () => {
+    expect(ihTruthVerdict('relaxed cotton, unisex fit', TRUTH_TEE)).toEqual({ ok: true })
+  })
 })
 
 describe('ihTruthVerdict — audience truth (derived from garmentFamily, never a title)', () => {

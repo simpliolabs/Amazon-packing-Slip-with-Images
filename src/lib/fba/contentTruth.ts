@@ -533,17 +533,32 @@ export function buildPhraseTruthCtx(facts: PhraseTruthFacts, field: ContentField
  * this repo's own convention for a shared word class is a local copy per module, exactly how
  * blankSpecs.ts's WEIGHT_CLASS_RE and this file's own weight-class rule (e) below each keep their own
  * "light/mid/heavy" regex rather than cross-importing). SUFFIX words double as ordinary English/
- * design vocabulary ("Classic Car Shirt", "Relaxed Weekend") — matched ONLY as the explicit "<word>
- * Fit" claim, never bare, so a genuine design phrase is never mistaken for a spec assertion. BARE
- * words are unambiguous garment cut/fit terms — matched standalone. Exactly the seven words the PO
- * named live; not invented, not the fuller title-only list (oversize/loose/cropped/crop/baggy/
- * tapered/taper stay title-only — this predicate is field-agnostic and a broader list here would
- * widen every field's fill/filter at once, which is outside what this task was asked to close).
+ * design vocabulary ("Classic Car Shirt", "Relaxed Weekend") — matched ONLY as a "<word> ... Fit"
+ * claim (the fit word and the literal word "fit" appearing TOGETHER, in either order of proximity,
+ * anywhere in the same comma-delimited segment — never bare), so a genuine design phrase is never
+ * mistaken for a spec assertion, and a fit word in one Item-Highlight segment cannot bind to an
+ * unrelated "fit" sitting in a different segment. BARE words are unambiguous garment cut/fit terms —
+ * matched standalone. Exactly the seven words the PO named live; not invented, not the fuller
+ * title-only list (oversize/loose/cropped/crop/baggy/tapered/taper stay title-only — this predicate
+ * is field-agnostic and a broader list here would widen every field's fill/filter at once, which is
+ * outside what this task was asked to close).
+ *
+ * NOT CAUGHT, ON PURPOSE (fix-round-1 self-review, 2026-09-06): a bare suffix word with no "fit"
+ * anywhere in its segment — plain "Classic Rock Shirt", or "relaxed" with `spec: null` and no "fit"
+ * beside it — is ordinary vocabulary, not a claim, and must keep passing even when `spec` is absent;
+ * only a WORD PAIRED WITH "fit" is fail-closed. Do not "fix" this into bare-word matching — the
+ * suffix/bare split exists precisely to keep it out.
+ *
+ * FIX ROUND 1 (2026-09-06): the ORIGINAL suffix pattern (`\s+fit\b`) required the claim word
+ * IMMEDIATELY adjacent to "fit", so it never matched the live string itself — "relaxed unisex fit"
+ * (a word sits between them) — nor "relaxed-fit" (hyphen, not whitespace). Fixed by letting the span
+ * between the claim word and "fit" be ANY run of non-comma characters (lazy, so it stops at the
+ * nearest "fit" and never crosses into a different comma segment) instead of a single `\s+`.
  */
 const FIT_CLAIM_SUFFIX_WORDS = ['relaxed', 'classic', 'slim', 'regular'] as const
 const FIT_CLAIM_BARE_WORDS = ['oversized', 'fitted', 'boxy'] as const
 const FIT_CLAIM_RE = new RegExp(
-  `\\b(${FIT_CLAIM_SUFFIX_WORDS.join('|')})\\s+fit\\b|\\b(${FIT_CLAIM_BARE_WORDS.join('|')})\\b`, 'i',
+  `\\b(${FIT_CLAIM_SUFFIX_WORDS.join('|')})\\b(?:(?!,).)*?\\bfit\\b|\\b(${FIT_CLAIM_BARE_WORDS.join('|')})\\b`, 'gi',
 )
 
 /* ─── THE PREDICATE ───────────────────────────────────────────────────────────────────────────── */
@@ -610,10 +625,12 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
   // the live lie shipped. The spec-fact PAD's own `${spec.fit} Fit` / `Unisex Fit` fillers never reach
   // this predicate (the composer pushes them straight onto its picks, pre-truth-stage) so they are
   // unaffected regardless; "unisex" also carries no fit-claim word.
-  const fm = phrase.match(FIT_CLAIM_RE)
-  if (fm) {
+  // FIX ROUND 1 (2026-09-06): FIT_CLAIM_RE now carries 'g' and every match is examined — a phrase
+  // can assert MORE THAN ONE fit/cut claim ("relaxed fit oversized tee": "relaxed fit" true, bare
+  // "oversized" false) and the first true match must never launder a later false one.
+  const fit = ctx.spec?.fit?.toLowerCase()
+  for (const fm of phrase.matchAll(FIT_CLAIM_RE)) {
     const claim = (fm[1] ?? fm[2] ?? '').toLowerCase()
-    const fit = ctx.spec?.fit?.toLowerCase()
     if (!fit || !fit.includes(claim)) return { ok: false, reason: 'fit-claim-lie' }
   }
   return { ok: true }
