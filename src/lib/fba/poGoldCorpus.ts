@@ -28,6 +28,46 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
 import { loadMinedTitleGolds } from '@/lib/fba/titleLearningMiner'
+import { AMAZON_TITLE_MAX } from '@/lib/fba/contentContract'
+import { GARMENT_HEAD_WORDS } from '@/lib/fba/garmentNoun'
+
+/**
+ * IDENTITY, not style: does this string look like one of OUR apparel titles?
+ *
+ * This replaces the old `^the ceo` brand-front requirement. That check was never a style rule in
+ * intent — the gate's own docstring said a non-brand-front row "is either a fragment or another
+ * surface's copy". Brand-front was a cheap PROXY for identity. Naming a garment is a better one and,
+ * unlike the brand prefix, it does not encode a title style the corpus is supposed to be free to
+ * learn. Bullets and descriptions are far longer than the band and carry sentence punctuation;
+ * backend keyword strings do not name a garment in a 40+ char title-shaped run.
+ */
+function namesAGarment(t: string): boolean {
+  return t
+    .toLowerCase()
+    .split(/[^a-z-]+/)
+    .some((w) => GARMENT_HEAD_WORDS.has(w))
+}
+
+/** Gold floor: shorter than this is a fragment, not a title someone chose. */
+export const GOLD_MIN_CHARS = 40
+
+/**
+ * Is `t` admissible as a gold? IDENTITY and PUBLISHABILITY only — never STYLE.
+ *
+ * Exported so the rule is checkable rather than buried inside an async DB read. The rule that
+ * decides what the judge learns from is the highest-leverage rule in the title system; it should be
+ * as testable as the judge itself.
+ */
+export function isAdmissibleGold(raw: string): boolean {
+  const t = (raw ?? '').trim()
+  if (t.length < GOLD_MIN_CHARS || t.length > AMAZON_TITLE_MAX) return false
+  if (!namesAGarment(t)) return false
+  // A gold must survive the ship door UNCHANGED — identity, not repair. If scrubbing alters the
+  // string at all, the seller chose a title the publish door will rewrite, and teaching the council
+  // to reproduce it trains it to fight that door.
+  if (scrubCelebrityNames(scrubTrademarks(t), 'gold:corpus') !== t) return false
+  return true
+}
 
 /**
  * SEED GOLDS — the floor, used when the DB read fails or returns nothing.
@@ -497,9 +537,33 @@ export async function loadPoGoldTitles(
    */
   const admit = (raw: string): boolean => {
     const t = (raw ?? '').trim()
-    if (t.length < 40 || t.length > 80) return false
-    if (!/^the ceo\b/i.test(t)) return false
-    if (scrubCelebrityNames(scrubTrademarks(t), 'gold:corpus') !== t) return false
+    // THE GATE ENFORCES IDENTITY AND PUBLISHABILITY. IT MUST NOT ENFORCE STYLE.
+    //
+    // REWRITTEN 2026-09-06 (title-ceiling spec, Phase 3) — this was the ROOT, and it silently ate
+    // both of the PO's 2026-09-05 rulings before they could reach anything:
+    //
+    //   was: if (t.length < 40 || t.length > 80) return false
+    //        if (!/^the ceo\b/i.test(t)) return false
+    //
+    // Style is the thing this corpus EXISTS TO MEASURE. A gate that pre-filters candidates to match
+    // yesterday's style makes the corpus structurally incapable of learning a new one — the PO could
+    // lock an 88-char gold, or a brandless one, and it was dropped here with no error, no log and no
+    // deploy, while `measureGoldShape` went on reporting the old shape forever. That is how a ruling
+    // becomes a doc note ([[rulings-must-live-in-the-scorer]]).
+    //
+    // LENGTH: the bound is now what Amazon will actually publish, not our internal working ceiling.
+    // A gold is "a title the seller could ship", and Amazon's live schema for our productType gives
+    // item_name maxLength 200 (AMAZON_TITLE_MAX). Keying this to CONTENT_CONTRACT.title.hardCap
+    // instead would recreate the trap in a new place: the PO must be able to write the golds that
+    // JUSTIFY a raise BEFORE the raise happens. The 40 floor stays as a fragment guard.
+    //
+    // BRAND-FRONT: DELETED. PO ruling 2026-09-05, verbatim: "lets remove THE CEO from Statrt of
+    // title, i know its mandatory, but i dont see any of the Competitor brands yusing it" — checked
+    // in-category and correct: of four best-selling crewneck sweatshirts, three keep their brand out
+    // of the title entirely (UNIQUEONE, LUKYCILD, FASHGL; only MOUSYA leads with it). The check's
+    // REAL job — "is this one of our titles, or a fragment / another surface's copy?" — is now done
+    // by `namesAGarment`, which tests identity without dictating word order.
+    if (!isAdmissibleGold(t)) return false
     const k = t.toLowerCase()
     if (seen.has(k)) return false
     seen.add(k)
