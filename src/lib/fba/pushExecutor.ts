@@ -53,7 +53,8 @@ import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
 // Pure data, no side effects, no cycles (see contentContract's header) — imported so the push
 // refusal can quote Amazon's ACTUAL limit instead of repeating the 75-is-Amazon's-cap falsehood.
-import { AMAZON_TITLE_MAX } from '@/lib/fba/contentContract'
+import { AMAZON_TITLE_MAX, ITEM_HIGHLIGHTS_TITLE_PRECONDITION } from '@/lib/fba/contentContract'
+import { ihHealAllowedByContract } from '@/lib/fba/titleCap'
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
 import { logAudit } from '@/lib/audit'
@@ -1259,10 +1260,44 @@ async function readbackItemName(
  *  (isItemHighlightsField). Cannot touch any other attribute; cannot fire without the exact error.
  *  Failing to heal is soft — the caller records the original failure with the auto-heal note appended.
  *
- *  UNKNOWN we cannot help: per-CHILD titles for multi-design families. `recommended_title` is the
- *  broadcast/parent title; if a family uses per_child_titles and one child needs a different ≤75 title,
- *  the auto-heal for THAT child uses the parent title (still compliant, just not per-design). Fine as a
- *  starting point; multi-design per-child auto-heal is a future refinement. */
+ *  ── HARDENED 2026-09-06 (title-ceiling spec, Phase 2b) ─────────────────────────────────────────
+ *
+ *  THE CLASS: a repair mechanism that "restores" content turns a DELIBERATE change into an
+ *  INVISIBLE revert. This is the fourth instance in this codebase — the parent lock that froze six
+ *  child titles (B0DSCDZC6K), the backend degrade-preserve gate, the Item-Highlights silent hold,
+ *  and now this. Each was individually correct; none could tell a transient failure from a
+ *  deliberate new state, and each therefore preserved the past over the present, silently.
+ *
+ *  Two ways this one did it, both closed below:
+ *
+ *  1. IT WROTE THE PARENT'S TITLE ONTO A CHILD. The previous docstring said so outright and filed
+ *     it as "fine as a starting point": `recommended_title` is the BROADCAST value, so on a
+ *     multi-design family this pushed the parent title over a child's own per-design title. That is
+ *     exactly the parent-lock defect, in the push path. `per_child_titles` has existed the whole
+ *     time; the heal now reads it and uses THIS SKU's title, falling back to the broadcast only
+ *     when the family has no per-child row — and it reports which one it used.
+ *
+ *  2. IT COULD PUSH A STALE SHORT TITLE OVER A GOOD LONG ONE. The length guard below refuses a
+ *     recommendation over the threshold, which stops the heal shipping a long title — but says
+ *     nothing about a recommendation that is merely OLD. Once we deliberately ship titles above the
+ *     Item-Highlights threshold (spec Phase 4), every such SKU 100476s, this heal fires on every
+ *     one, and any stale <=75 row would be pushed over the new title, per SKU, soft-failing to a
+ *     note nobody reads. The contract guard below makes that structurally impossible rather than
+ *     relying on the rows being fresh.
+ *
+ *  THE CONTRACT GUARD IS THE IMPORTANT ONE. Healing means CHOOSING Item Highlights over title
+ *  length. While our working cap equals the Item-Highlights precondition that choice is free and the
+ *  heal is pure benefit. The moment the cap is deliberately raised above it, the choice has already
+ *  been made the other way — by the PO, in the contract — and an automatic per-SKU heal would
+ *  silently overrule it. So the heal DISABLES ITSELF from the contract, not from a flag someone must
+ *  remember to flip. Derive, don't remember.
+ *
+ *  WHAT: read this SKU's title (per-child first), sanity-check it against the precondition, push it
+ *  as item_name for THIS ONE SKU, then the caller retries the IH push. No regeneration.
+ *
+ *  SCOPE: fires ONLY on 100476 (isItemHighlightTitleTooLongError) and ONLY on the IH attribute
+ *  (isItemHighlightsField). Cannot touch any other attribute; cannot fire without the exact error.
+ *  Failing to heal is soft — the caller records the original failure with the auto-heal note. */
 async function autoHealIhLongTitle(
   sellerId: string,
   token: string,
@@ -1271,19 +1306,46 @@ async function autoHealIhLongTitle(
   parent_asin: string,
 ): Promise<{ healed: boolean; usedTitle?: string; error?: string }> {
   try {
+    // CONTRACT GUARD — see the docstring. A raised ceiling IS the decision to forfeit Item
+    // Highlights; healing here would walk it back one SKU at a time, invisibly.
+    const contract = ihHealAllowedByContract()
+    if (!contract.allowed) return { healed: false, error: `auto-heal DISABLED by contract: ${contract.why}` }
     const supabase = await createAdminClient()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data } = await (supabase as any).from('listing_seo_recommendations')
-      .select('recommended_title')
+    const { data, error } = await (supabase as any).from('listing_seo_recommendations')
+      .select('recommended_title, per_child_titles')
       .eq('parent_asin', parent_asin)
       .maybeSingle()
-    const rec = ((data as { recommended_title?: string } | null)?.recommended_title ?? '').trim()
+    // Destructure `error` — a discarded supabase error reads as an empty result, which here would
+    // look like "no recommendation" and send the seller to re-run an audit that already ran.
+    if (error) return { healed: false, error: `recommendation read failed: ${String(error.message ?? error).slice(0, 200)}` }
+
+    const row = data as { recommended_title?: string; per_child_titles?: { sku?: string; title?: string }[] } | null
+    // THIS SKU's own title first. The broadcast value is the parent's and belongs to no child.
+    const perChild = Array.isArray(row?.per_child_titles)
+      ? row!.per_child_titles!.find((t) => (t?.sku ?? '') === sku)
+      : undefined
+    const perChildTitle = (perChild?.title ?? '').trim()
+    const broadcast = (row?.recommended_title ?? '').trim()
+    const rec = perChildTitle || broadcast
+    const source = perChildTitle ? 'per_child_titles' : 'recommended_title(broadcast)'
     if (!rec) return { healed: false, error: 'no recommended_title in listing_seo_recommendations — run an AI audit first' }
-    if (rec.length > 75) return { healed: false, usedTitle: rec, error: `recommended_title is ${rec.length}>75 — refusing to push a title Amazon will re-reject with the same 100476` }
+    if (rec.length > ITEM_HIGHLIGHTS_TITLE_PRECONDITION) {
+      return {
+        healed: false,
+        usedTitle: rec,
+        error: `${source} is ${rec.length}>${ITEM_HIGHLIGHTS_TITLE_PRECONDITION} — refusing to push a title Amazon will re-reject with the same 100476`,
+      }
+    }
+    // LOUD. This mutates a LIVE title on Amazon as a side effect of an Item-Highlights push; the
+    // seller did not ask for a title change in this action, so it must never be inferable only from
+    // its absence (#643 / in-band-fast-path class).
+    console.log(`[IH_100476_HEAL] sku=${sku} parent=${parent_asin} source=${source} len=${rec.length} title=${JSON.stringify(rec)}`)
     const prev = await patchSku(sellerId, token, productType, sku, 'item_name', rec, 'VALIDATION_PREVIEW')
     if (!prev.ok) return { healed: false, usedTitle: rec, error: `title preview rejected: ${(prev.error ?? '').slice(0, 240)}` }
     const live = await patchSku(sellerId, token, productType, sku, 'item_name', rec, 'LIVE')
     if (!live.ok) return { healed: false, usedTitle: rec, error: `title live push rejected: ${(live.error ?? '').slice(0, 240)}` }
+    console.log(`[IH_100476_HEAL] sku=${sku} HEALED — live item_name replaced from ${source}`)
     return { healed: true, usedTitle: rec }
   } catch (e) {
     return { healed: false, error: e instanceof Error ? e.message : String(e) }
