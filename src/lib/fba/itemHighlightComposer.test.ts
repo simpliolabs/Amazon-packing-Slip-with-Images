@@ -343,6 +343,87 @@ describe('ihTruthVerdict — capability claims (no BlankSpec states a capability
   })
 })
 
+describe('ihTruthVerdict — fit-claim truth (Task 4, 2026-09-06: live B0DSCDZC6K shipped "relaxed unisex fit" on a Gildan 18000, whose blank_specs.fit is Classic — a false product claim, indexed by Google)', () => {
+  it('rejects "relaxed fit tee" on the Classic-fit blank (TRUTH_TEE / GILDAN_SPEC) with a named reason', () => {
+    expect(ihTruthVerdict('relaxed fit tee', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('accepts "classic fit sweatshirt" on the SAME blank — the claim matches spec.fit', () => {
+    expect(ihTruthVerdict('classic fit sweatshirt', { ...TRUTH_TEE, garmentFamily: 'sweatshirt' })).toEqual({ ok: true })
+  })
+  it('rejects bare "oversized" on a Comfort Colors Relaxed blank — Relaxed != Oversized (the PO\'s 2026-08-20 wear-style fact "Can be worn as Oversized" is a SEPARATE, opt-in claim the composer pushes straight onto `picked` without ever asking this predicate, so it can never be conflated with this rule)', () => {
+    const TRUTH_CC = { garmentFamily: 'tee' as const, spec: SPEC, allowedBrand: 'Comfort Colors', audience: ihAudienceOf('tee') }
+    expect(ihTruthVerdict('oversized', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('a phrase with no fit word is unaffected', () => {
+    expect(ihTruthVerdict('graphic tee for men', TRUTH_TEE)).toEqual({ ok: true })
+  })
+  it('fails CLOSED: a fit claim with no spec behind it never passes — an unconfirmed blank backs no claim', () => {
+    expect(ihTruthVerdict('relaxed fit tee', { ...TRUTH_TEE, spec: null })).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('never touches the spec-fact PAD filler ("${spec.fit} Fit") or "Unisex Fit" — both bypass ihTruthVerdict entirely (composer pushes factFillers straight onto `picked`), and neither would trip this rule even if it did: the pad emits spec.fit verbatim (self-true by construction), and "unisex" is not fit vocabulary', () => {
+    expect(ihTruthVerdict('classic fit', TRUTH_TEE)).toEqual({ ok: true })        // the pad's own emitted phrase, self-true
+    expect(ihTruthVerdict('unisex fit', TRUTH_TEE)).toEqual({ ok: true })         // "unisex" carries no fit-claim word
+  })
+
+  // --- FIX ROUND 1 (2026-09-06) — the Task 4 reviewer (a24c8bba) executed ihTruthVerdict directly
+  // against HEAD 2ca9798 and found all of these PASSING (`{ ok: true }`) when every one is the live
+  // lie or a variant of it. Root cause: FIT_CLAIM_RE required the fit word immediately adjacent to
+  // "fit" (`\s+fit\b`) and phraseTruthVerdict read only the FIRST match. Fixed at contentTruth.ts:546
+  // (non-adjacent match, bounded to the comma-delimited segment, separator `[\s-]+`-equivalent via a
+  // not-a-comma lazy span) and :613 (iterate every match, reject if ANY is unbacked).
+  it('REPRODUCTION: rejects "relaxed unisex fit" on the Classic-fit blank — the exact live B0DSCDZC6K string, non-adjacent ("unisex" sits between the claim word and "fit")', () => {
+    expect(ihTruthVerdict('relaxed unisex fit', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('rejects the full live IH line "cotton blend fabric, relaxed unisex fit, crew neck design, cuff sleeves" on Classic — called directly (as the reviewer did) to prove the predicate itself is comma-segment-safe; in production the composer never hands ihTruthVerdict a multi-segment string like this (candidates are single un-comma\'d 2-5 word pool keywords, itemHighlightComposer.ts:242 `ihTruthVerdict(r.keyword, truthCtx)`) — the realistic per-candidate segment is covered by the REPRODUCTION test above ("relaxed unisex fit" alone)', () => {
+    expect(ihTruthVerdict('cotton blend fabric, relaxed unisex fit, crew neck design, cuff sleeves', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('rejects the hyphenated form "relaxed-fit" on Classic', () => {
+    expect(ihTruthVerdict('relaxed-fit', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('rejects "relaxed fit oversized tee" on a Relaxed blank — the FIRST claim ("relaxed fit") matches spec.fit, but the SECOND, unbacked claim ("oversized") must still be examined, not laundered by the first match being true', () => {
+    const TRUTH_CC = { garmentFamily: 'tee' as const, spec: SPEC, allowedBrand: 'Comfort Colors', audience: ihAudienceOf('tee') }
+    expect(ihTruthVerdict('relaxed fit oversized tee', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+
+  // --- FIX ROUND 2 (final fix wave, 2026-09-06, Important #2) — reproduced against HEAD 7c53fc2 by
+  // calling phraseTruthVerdict directly (see the wave's report): on a Relaxed blank, "relaxed oversized
+  // fit tee" returned `{ ok: true }` — the lazy span between "relaxed" and "fit" swallowed the bare
+  // word "oversized" INSIDE one match, so it was never independently judged (a TRUE claim laundered a
+  // LATER FALSE one). "relaxed fit oversized tee" and "oversized relaxed fit tee" already rejected
+  // correctly (the false claim sits outside any span). All three orderings must now agree.
+  it('Important #2: all three orderings of "relaxed"/"oversized"/"fit" on a Relaxed blank agree — none may let "oversized" be swallowed by the "relaxed ... fit" span', () => {
+    const TRUTH_CC = { garmentFamily: 'tee' as const, spec: SPEC, allowedBrand: 'Comfort Colors', audience: ihAudienceOf('tee') }
+    // REPRODUCED AS A DEFECT against HEAD 7c53fc2: this ordering alone returned { ok: true } (see the
+    // probe in the wave's report) — the fix must flip it to fit-claim-lie, matching the other two.
+    expect(ihTruthVerdict('relaxed oversized fit tee', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+    expect(ihTruthVerdict('relaxed fit oversized tee', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+    expect(ihTruthVerdict('oversized relaxed fit tee', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+
+  // --- FIX ROUND 2 (final fix wave, 2026-09-06, T4-b) — FIT_WORD_CANON (titleBand.ts:758) was never
+  // mirrored into this rule, and IH's own word list did not even recognize the informal spelling
+  // "oversize" (no trailing "d") as a fit claim at all — so a FALSE "oversize" claim on a blank whose
+  // spec does NOT back it silently shipped uncaught (the phrase never reached rule (f) in the first
+  // place). Recognizing it (mirroring titleBand's own bare-word list) plus the canon map closes that
+  // gap without widening the PO's seven-word vocabulary — "oversize" is the SAME word as the
+  // already-approved "oversized", not an eighth one.
+  it('T4-b (the defect this closes): "oversize tee" (informal spelling) on a Classic blank is now REJECTED — before this fix the word was not recognized at all, so a false claim silently passed', () => {
+    expect(ihTruthVerdict('oversize tee', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('T4-b (FIT_WORD_CANON pin, spec.fit=\'Oversized\'): "oversize tee" (informal) is accepted once the blank\'s OWN spec states the canonical spelling — GREEN both before and after by construction (see the wave\'s report: before this fix "oversize" was not a recognized claim word at all, so the phrase passed trivially; after the fix it passes for the RIGHT reason — recognized, and the canon/containment backs it)', () => {
+    expect(ihTruthVerdict('oversize tee', { ...TRUTH_TEE, spec: { ...GILDAN_SPEC, fit: 'Oversized' } })).toEqual({ ok: true })
+  })
+  it('no false positive: "classic rock shirt" on Classic passes — the suffix ruling stands (a SUFFIX word with no "fit" anywhere in the phrase is ordinary design vocabulary, never a claim)', () => {
+    expect(ihTruthVerdict('classic rock shirt', TRUTH_TEE)).toEqual({ ok: true })
+  })
+  it('a lone "fit" with no preceding claim word is not a claim: "great fit tee" passes (the brief\'s own "crewneck fit for all sizes" example trips the UNRELATED wrong-garment-noun rule (a) — "crewneck" is its own noun class that the plain tee family does not allow, orthogonal to this rule; swapped to an equally lone-"fit" phrase that does not collide with rule (a))', () => {
+    expect(ihTruthVerdict('great fit tee', TRUTH_TEE)).toEqual({ ok: true })
+  })
+  it('SEGMENT-BOUNDED BY DESIGN: "relaxed cotton, unisex fit" passes — "relaxed" (segment 1) and "fit" (segment 2) are in DIFFERENT comma segments, so they may not bind to form a claim; each segment alone carries no claim word, so ok is the correct answer', () => {
+    expect(ihTruthVerdict('relaxed cotton, unisex fit', TRUTH_TEE)).toEqual({ ok: true })
+  })
+})
+
 describe('ihTruthVerdict — audience truth (derived from garmentFamily, never a title)', () => {
   it('B0DP5H8QBT (kids_tee 64000B): women / plus-size / men / ladies / adult phrases are rejected', () => {
     expect(ihAudienceOf('kids_tee')).toBe('kids')
@@ -432,5 +513,89 @@ describe('brand waterfall INSIDE the composer (B0FKFHSCS9: 1717 by override, tit
   it('a brand-forbidden blank (Gildan, allowedBrand null) never gets a brand phrase', () => {
     const out = composeItemHighlight(POOL_WITH_BRAND, [NO_BRAND_TITLE], { spec: GILDAN_SPEC, garmentFamily: 'tee', allowedBrand: null })
     if (out) expect(out.toLowerCase()).not.toMatch(/comfort colors|gildan/)
+  })
+})
+
+/* ─── TASK 2 (2026-09-06, PO "Why is Women repeating Twice?") ──────────────────────────────────
+ *
+ * Root cause: the selection loops accepted a candidate that added only ONE new folded token
+ * ("Fall Sweatshirts for Women" adds only `fall`) ahead of an all-new candidate ("Graphic Pullover
+ * Top" / "Novelty Retro Graphic"), purely because the repeat-heavy one sorted higher on theme-fit
+ * or volume. Amazon's ≤2-per-word cap then passed the line because each repeat landed exactly
+ * twice. The fix ranks in two tiers — Tier A (every token new) fills before Tier B (repeats a used
+ * token) — in BOTH the pool-phrase loop and the spec-fact floor-pad loop, falling back to Tier B
+ * only once Tier A is exhausted and the line is still short of the fill band.
+ *
+ * NOTE: the brief's own illustrative pool ("Graphic Pullover Top" as the all-new candidate) does
+ * NOT discriminate old vs. new code with these keywords — "top" matches GARMENT_SURFACE_RE, so the
+ * PRE-EXISTING "prefer a new garment surface" pass already promotes it ahead of "Fall Sweatshirts
+ * for Women" on unmodified source (verified: `npx tsx` probe against 148aca0 produced the correct
+ * order even without this task's fix). The tests below keep the same shape (fit/volume, the
+ * `women`/`sweatshirt`/`crewneck` repeats) but swap the all-new candidate for one with NO garment
+ * surface match ("Novelty Retro Graphic"/"Weekend Adventure Look"), which genuinely isolates the
+ * tier rule this task adds. */
+describe('TASK 2: a phrase repeating a used token loses its slot to one that does not', () => {
+  it('Tier A (all-new tokens) is picked before Tier B (repeats `sweatshirt`/`women`) despite Tier B sorting higher on volume', () => {
+    const pool = [
+      { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // Tier B: adds only `fall`
+      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },        // Tier A: all new, no garment-surface head start
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // Tier B: adds `long`/`sleeve`, repeats `crewneck`
+    ]
+    const spec = { material: '100% Cotton Blend' } // pads the line into the [MIN, MAX] band
+    const out = composeItemHighlight(pool, [], { spec: spec as any })!
+    expect(out).toBeTruthy()
+    expect(out.length).toBeGreaterThanOrEqual(MIN)
+    expect(out.length).toBeLessThanOrEqual(MAX)
+    const idxTierA = out.toLowerCase().indexOf('novelty retro graphic')
+    const idxTierB = out.toLowerCase().indexOf('fall sweatshirts for women')
+    expect(idxTierA).toBeGreaterThanOrEqual(0)
+    expect(idxTierB).toBeGreaterThanOrEqual(0)
+    expect(idxTierA).toBeLessThan(idxTierB)
+    // Tier A alone ("Crewneck Sweatshirts Women" + "Novelty Retro Graphic") sums to well under the
+    // 110-char fill target, so the Tier-B fallback legitimately engages and `women` MAY repeat —
+    // that repeat is not itself a defect (Amazon's ≤2 cap still governs); the ORDER above is the rule.
+    const womenCount = (out.match(/\bwomen\b/gi) ?? []).length
+    expect(womenCount).toBeLessThanOrEqual(2)
+  })
+
+  it('the Tier-B fallback is real: it fires (and reaches the 107-char floor) when Tier A alone cannot, with no spec to pad', () => {
+    const pool = [
+      { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // Tier B
+      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },        // Tier A
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // Tier B
+      { keyword: 'sleeve detail graphic', searchVolume: 550, themeFit: 2 },        // Tier B (adds `detail`)
+    ]
+    // Tier A alone ("Crewneck Sweatshirts Women" + "Novelty Retro Graphic") is ~50 chars — nowhere
+    // near the 107 floor. No `spec` is passed, so the ONLY way this reaches MIN is the pool loop's
+    // own Tier-B fallback; if that fallback were dead, this would return null (under-floor-after-pad).
+    const out = composeItemHighlight(pool, [], {})
+    expect(out).toBeTruthy()
+    expect(out!.length).toBeGreaterThanOrEqual(MIN)
+    expect(out!.length).toBeLessThanOrEqual(MAX)
+    expect(out!.toLowerCase()).toContain('fall sweatshirts for women')
+    const idxTierA = out!.toLowerCase().indexOf('novelty retro graphic')
+    const idxTierB = out!.toLowerCase().indexOf('fall sweatshirts for women')
+    expect(idxTierA).toBeLessThan(idxTierB)
+  })
+
+  it('the spec-fact PAD loop applies the same tier rule: a repeat-token filler (`material` restating `cotton`) loses its slot to a non-repeating one (`fit`) that alone reaches the floor', () => {
+    const pool = [
+      { keyword: 'soft cotton graphic tee', searchVolume: 900, themeFit: 3 },
+      { keyword: 'retro vibes design', searchVolume: 800, themeFit: 3 },
+      { keyword: 'casual weekend style', searchVolume: 700, themeFit: 3 },
+      { keyword: 'weekend adventure look', searchVolume: 650, themeFit: 3 },
+    ]
+    // `material` is FIRST in the filler priority bank but repeats `cotton` (Tier B); `fit` is later
+    // in priority but all-new (Tier A) and, alone, sufficient to cross MIN. The Tier-A filler must
+    // be tried first and, once it reaches the floor, the Tier-B filler must never be added at all.
+    const spec = { material: '100% Cotton', fit: 'Super Relaxed' }
+    const out = composeItemHighlight(pool, [], { spec: spec as any })!
+    expect(out).toBeTruthy()
+    expect(out.length).toBeGreaterThanOrEqual(MIN)
+    expect(out.length).toBeLessThanOrEqual(MAX)
+    expect(out).toContain('Super Relaxed Fit')
+    expect(out).not.toContain('100% Cotton')
   })
 })

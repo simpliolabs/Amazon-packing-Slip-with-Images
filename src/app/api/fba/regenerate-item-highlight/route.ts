@@ -7,12 +7,14 @@
  * PO 2026-08-21) — then persists the updated product_details_improvements row. Isolated: does NOT
  * run the full pipeline. Auth is enforced by the /api/fba middleware (task #49). Never blanks the
  * field: a HOLD answers 422 with the named reason and keeps the stored value.
- * MULTI-DESIGN (PO 2026-08-21, refined the same day): composes ONE SHARED line — design names
- * stripped, every phrase rated >= 2 under EVERY design (theme_fit_by_design, migration 061; min
- * over designs) — through buildItemHighlightsPerDesign (the same producer the pipeline ships) into
- * per_child_item_highlights (identical per SKU by construction); the broadcast row becomes a
- * per-design marker with no line. Holds `designs-unrated` (422, missing keys named) until
- * keyword-pool/rerate { per_design: true } has rated the pool under every design.
+ * MULTI-DESIGN (PO ruling 2026-09-06, refining the 2026-08-21 "one shared line" ruling — Minor
+ * #10/#11, final fix wave): composes ONE LINE PER DESIGN — each design's OWN theme-fit rating
+ * (theme_fit_by_design, migration 061), never a minimum over siblings — through
+ * buildItemHighlightsPerDesign (the same producer the pipeline ships) into
+ * per_child_item_highlights (one line per SKU, per its OWN design); the broadcast row becomes a
+ * per-design marker with no line (a per-design family has no single line true of every design).
+ * A design whose OWN rated share is thin holds `designs-unrated` in ISOLATION (siblings still
+ * compose) until keyword-pool/rerate { per_design: true } has rated the pool under that design.
  * READ-ONLY identity (no vision call) — see designGroupIdentity.ts.
  */
 import { NextRequest, NextResponse } from 'next/server'
@@ -23,6 +25,7 @@ import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selection
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
 import { buildItemHighlights, buildItemHighlightsPerDesign, IH_HOLD_MESSAGES } from '@/lib/fba/listingPipeline'
+import { normalizeAudienceLean } from '@/lib/fba/contentTruth'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
@@ -119,16 +122,40 @@ export async function POST(req: NextRequest) {
       titles: [title, ...storedPct.map((t) => String(t?.title ?? ''))],
     })
 
-    // ── MULTI-DESIGN (PO 2026-08-21): ONE SHARED line through the SAME producer the pipeline
-    // ships (min-over-designs fit, all design names stripped, union of per-design titles). Groups =
+    // ── MULTI-DESIGN (PO ruling 2026-09-06): ONE LINE PER DESIGN through the SAME producer the
+    // pipeline ships (each design's OWN theme-fit rating, never a minimum over siblings; every
+    // OTHER design's name/identity is foreign to this design's line, never its own). Groups =
     // the stored per_child_titles' design keys (the ONE grouping — never a second resolver);
     // identity per design = the READ-ONLY cached vision identity of the group's first scanned
     // child (this route never spends a vision call — POST scan-identity {per_design:true}
     // populates it). The broadcast row becomes the per-design MARKER (no line).
     const pct = (Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { sku: string; asin: string; title: string; designName?: string | null; designKey?: string | null }[]
+    // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): two more columns on this SAME existing select —
+    // the family's seller-declared audience lean (migration 029) + its per-design override map
+    // (migration 070) — listingPipeline.ts:276-289 is the DB-shape source of truth this mirrors, so
+    // the two Item Highlight call sites below can apply the SAME apparel-gated rule the pipeline's
+    // own branches already do (this route's own "Invariant 1: one function ships the field on every
+    // path", :6/12/188 — a family regenerated here must not answer differently than a full audit).
+    // Error destructured and handled, not discarded ("discarded supabase errors" — a silently-empty
+    // scoreRow must not quietly read as "no lean" without a trace): best-effort, never blocks the
+    // regenerate — a read failure degrades to null leans, exactly like an absent value would.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: scoreRow } = await (supabase as any).from('listing_seo_scores').select('is_multi_design_override').eq('parent_asin', parent_asin).maybeSingle()
-    const multi = resolveMultiDesign(pct, (scoreRow as { is_multi_design_override?: boolean | null } | null)?.is_multi_design_override ?? null)
+    const { data: scoreRow, error: scoreErr } = await (supabase as any).from('listing_seo_scores')
+      .select('is_multi_design_override, audience_lean, audience_lean_by_design')
+      .eq('parent_asin', parent_asin).maybeSingle()
+    if (scoreErr) console.warn(`[regenerate-item-highlight] listing_seo_scores read failed for ${parent_asin} (is_multi_design_override/audience lean best-effort null): ${scoreErr.message}`)
+    const scoreRowTyped = scoreRow as { is_multi_design_override?: boolean | null; audience_lean?: string | null; audience_lean_by_design?: Record<string, string> | null } | null
+    const multi = resolveMultiDesign(pct, scoreRowTyped?.is_multi_design_override ?? null)
+    // RAW values only — the APPAREL GATE is applied INLINE at each call site below, matching the
+    // pipeline's own reference exactly (listingPipeline.ts:11874, :11901 fixed above: `apparelProduct
+    // ? input.audienceLean : null`), so the gate is visible at every place the field is handed to the
+    // gender rule rather than trusted to a pre-gated variable. `audienceLeanByDesign` is never itself
+    // apparel-gated — matching the pipeline reference exactly (:11875): the per-design resolver
+    // applies the family fallback, which IS gated, so an ungated map on a non-apparel family still
+    // resolves to a gated null.
+    const storedAudienceLean = (scoreRowTyped?.audience_lean ?? null) as
+      'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null
+    const storedAudienceLeanByDesign = scoreRowTyped?.audience_lean_by_design ?? undefined
     const byKey = new Map<string, { key: string; designName: string; skus: { sku: string; asin: string }[]; titles: string[] }>()
     if (multi) {
       for (const r of pct) {
@@ -153,13 +180,18 @@ export async function POST(req: NextRequest) {
       const built = buildItemHighlightsPerDesign({
         groups, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow,
         familyTitleText: title,
+        // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family/per-design lean source the
+        // pipeline's own multi-design branch reads (listingPipeline.ts:11874-11875) — resolved PER
+        // DESIGN inside buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.
+        audienceLean: apparel ? storedAudienceLean : null,
+        audienceLeanByDesign: storedAudienceLeanByDesign,
       })
       const composed = built.perDesign.filter((d) => d.value)
       if (composed.length === 0) {
         const reasons = [...new Set(built.perDesign.map((d) => d.hold).filter((h): h is NonNullable<typeof h> => !!h))]
         const missing = built.shared.missingDesigns
         return NextResponse.json({
-          error: `Shared Item Highlight HELD: ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')}${missing.length ? ` (unrated designs: ${missing.join(', ')})` : ''} — kept the existing values.`,
+          error: `Item Highlight HELD for every design (${built.perDesign.length}): ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')}${missing.length ? ` (unrated designs: ${missing.join(', ')})` : ''} — kept the existing values.`,
           hold: reasons[0] ?? 'under-floor', missing_designs: missing,
           per_design: built.perDesign.map((d) => ({ designKey: d.designKey, designName: d.designName, hold: d.hold })),
         }, { status: 422 })
@@ -187,7 +219,19 @@ export async function POST(req: NextRequest) {
 
     // Path parity (Invariant 1): the SAME inputs the pipeline hands the producer — pool, blank row,
     // the title the IH will sit beside. Deterministic; no client, no LLM.
-    const built = buildItemHighlights({ finalTitle: title, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow, netTitles: [title] })
+    const built = buildItemHighlights({
+      finalTitle: title, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow, netTitles: [title],
+      // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family lean the pipeline's own
+      // single-design branch now reads (listingPipeline.ts:11901, fixed above in this same round).
+      // NORMALIZED, not raw: `buildItemHighlights`'s `audienceLean` is `TruthAudienceLean`
+      // (unisex/women/men); `storedAudienceLean` is the raw seller enum (male/female/lean_male/
+      // lean_female/unisex) straight off the DB row — the per-design call above normalizes PER
+      // DESIGN internally (buildItemHighlightsPerDesign -> resolveDesignAudienceLean ->
+      // normalizeAudienceLean); this direct call has no per-design resolver to do it, so it
+      // normalizes the family value inline with the SAME function (contentTruth.ts), never a
+      // second rule.
+      audienceLean: apparel ? normalizeAudienceLean(storedAudienceLean) : null,
+    })
     const hl = capItemHighlightRepeats((built.value || '').trim())
     if (!hl) {
       // HOLD (PO 2026-08-21): name the reason — the PO's next action — never a generic "empty".

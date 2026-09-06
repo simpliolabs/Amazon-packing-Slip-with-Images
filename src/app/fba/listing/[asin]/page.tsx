@@ -4527,9 +4527,11 @@ export default function ListingDetailPage() {
                                   )}
                                 </div>
                               )}
-                              {/* PO 2026-08-21: ONE shared line across every design (design names stripped, every phrase
-                                 true under EVERY design) — identical per-design rows collapse into one "shared across N
-                                 designs" row naming the designs it covers. Rows that ever differ still render per design. */}
+                              {/* PO ruling 2026-09-06 (replacing the 2026-08-21 "one shared line" model): one line PER
+                                 DESIGN, each composed against its own theme-fit rating — rows ordinarily render
+                                 separately since every design's line differs; rows that happen to be byte-identical
+                                 (a single-group family, or every design held) still collapse into one "shared across N
+                                 designs" row naming the designs it covers. */}
                               <div className="mt-1 divide-y divide-slate-100 border border-slate-200 rounded-lg bg-white">
                                 {collapseSharedIhRows(ihRows).map((r, ri) => (
                                   <div key={`${ri}-${r.designs[0]?.designKey ?? ''}`} className={`px-2 py-1.5 ${r.line ? '' : 'bg-amber-50/60'}`}>

@@ -43,6 +43,7 @@ import {
   type PhraseTruthCtx,
   type PhraseTruthReason,
   type TruthGarmentFamily,
+  type TruthAudienceLean,
 } from './contentTruth'
 
 export interface ComposerPoolRow {
@@ -66,15 +67,23 @@ export type ComposerGarmentFamily = TruthGarmentFamily
  * which is why the same pool that could not compose "hooded fishing shirts" into an Item Highlight
  * shipped "Funny Work Shirts" in a SWEATSHIRT family's TITLE (PO-caught, B0DSCDZC6K). The rules,
  * lexicons and reason codes moved VERBATIM into `contentTruth.ts`; `ihTruthVerdict` is now a thin
- * wrapper that pins this composer's field ('highlights') and asserts no audience-lean rule applies
- * here — so every pin in itemHighlightComposer.test.ts holds byte-for-byte. */
+ * wrapper that pins this composer's field ('highlights').
+ *
+ * TASK 5 (2026-09-06, item-highlights-per-design plan): the forced-gender rule ('audience-lean-lie')
+ * used to be title-only and this wrapper hardcoded `audienceLean: null` to guarantee it could never
+ * fire here. Live sibling complaint on UNISEX family B0DSCDZC6K, "Why is Women repeating Twice?" —
+ * the composer had NO audience-lean rule at all, so a unisex design's own scoped pool could carry a
+ * bare "for Women"/"for Men" market phrase unchecked. `audienceLean` now flows through from the
+ * caller (each design's OWN resolved lean, from `buildItemHighlightsPerDesign` — never a new source),
+ * so every existing caller that doesn't pass it (the single-design path) stays byte-identical:
+ * `undefined` is not `'unisex'`, so contentTruth.ts's (c2) rule stays a no-op exactly as before. */
 
-/** The Item-Highlight reason set: every spine reason EXCEPT the title-only forced-gender rule,
- *  which `ihTruthVerdict` can never return (it pins field='highlights'). */
-export type IhTruthReason = Exclude<PhraseTruthReason, 'audience-lean-lie'>
+/** The Item-Highlight reason set — every spine reason, including `audience-lean-lie` since Task 5. */
+export type IhTruthReason = PhraseTruthReason
 
-/** The composer's slice of the spine ctx — no `field` (pinned) and no `audienceLean` (title-only). */
-export type IhTruthCtx = Omit<PhraseTruthCtx, 'field' | 'audienceLean'>
+/** The composer's slice of the spine ctx — no `field` (pinned to 'highlights' below); `audienceLean`
+ *  (Task 5) and `designTokens` (per-design name, already on `PhraseTruthCtx`) both flow through. */
+export type IhTruthCtx = Omit<PhraseTruthCtx, 'field'>
 
 /** Audience is a property of the BLANK FAMILY (64000B youth tee ⇒ kids), never inferred from a title. */
 export const ihAudienceOf = audienceOfGarmentFamily
@@ -85,8 +94,7 @@ export const ihAudienceOf = audienceOfGarmentFamily
  * Thin wrapper over the shared spine — see contentTruth.ts for the rules themselves.
  */
 export function ihTruthVerdict(phrase: string, ctx: IhTruthCtx): { ok: true } | { ok: false; reason: IhTruthReason } {
-  return phraseTruthVerdict(phrase, { ...ctx, field: 'highlights', audienceLean: null }) as
-    { ok: true } | { ok: false; reason: IhTruthReason }
+  return phraseTruthVerdict(phrase, { ...ctx, field: 'highlights' })
 }
 
 /** The deterministic brand phrase when no pool candidate carries the brand: "<Brand> <garment noun>". */
@@ -126,6 +134,26 @@ const significantFolded = (phrase: string): string[] =>
     .map((w) => { const f = ihFoldWord(w); return GENDER_FOLDS[f] ?? f })
     .filter((w) => w && !IH_INSIGNIFICANT.has(w))
 
+/** TASK 2 (2026-09-06, PO "Why is Women repeating Twice?"): a candidate that adds ONE new token
+ *  while repeating others used to outrank a candidate whose tokens are ALL new, merely by sorting
+ *  higher on theme-fit/volume — "Fall Sweatshirts for Women" (adds only `fall`) beat "Graphic
+ *  Pullover Top" (adds three) to a slot, and the line repeated `sweatshirts`/`women`. Amazon's ≤2
+ *  cap let it through because each repeat landed exactly twice.
+ *
+ *  Tier A = every significant token is new (zero overlap with `usedFolded`). Tier B = adds at least
+ *  one new token but repeats at least one used token (today's rule, now the FALLBACK tier). `null` =
+ *  adds nothing new — never composes, same as before this task.
+ *
+ *  Shared by BOTH selection loops (pool phrases below, spec-fact pad further down) so the tier rule
+ *  lives in exactly one place — the two loops rank different candidate shapes but must never fork
+ *  the definition of "new" vs "repeat". */
+type CandidateTier = 'A' | 'B' | null
+const classifyTier = (folded: readonly string[], usedFolded: ReadonlySet<string>): CandidateTier => {
+  const addsNew = folded.some((w) => !usedFolded.has(w))
+  if (!addsNew) return null
+  return folded.some((w) => usedFolded.has(w)) ? 'B' : 'A'
+}
+
 export interface ComposerOpts {
   spec?: Pick<BlankSpec, 'brand' | 'weightNote' | 'stretch' | 'material' | 'fit' | 'neck' | 'sleeve' | 'dye' | 'unisex'> | null
   garmentFamily?: ComposerGarmentFamily
@@ -134,6 +162,15 @@ export interface ComposerOpts {
   /** Audience of the BLANK (kids_tee ⇒ kids). Defaults to ihAudienceOf(garmentFamily); a caller
    *  whose garmentFamily is a title GUESS passes null explicitly — audience is never title-inferred. */
   audience?: 'kids' | 'adult' | null
+  /** THIS design's own resolved audience lean (Task 5, 2026-09-06) — never a new source: the
+   *  per-design caller (`buildItemHighlightsPerDesign`) resolves it via the SAME
+   *  `resolveDesignAudienceLean` the title path uses. Absent/undefined (every caller before Task 5,
+   *  and the single-design path today) ⇒ the forced-gender rule never fires, byte-identical. */
+  audienceLean?: TruthAudienceLean | null
+  /** THIS design's own name/identity tokens — the forced-gender rule's design-own-name exemption
+   *  (Task 5). NEVER the family-wide union titles/bullets/backend use: a sibling's name must stay
+   *  foreign here, the same discipline Task 1's per-design partition already enforces. */
+  designTokens?: readonly string[]
 }
 
 /** The composer's null stages — the caller maps them to a PO-facing hold reason. */
@@ -163,6 +200,10 @@ export function composeItemHighlightDetailed(
     spec: opts?.spec,
     allowedBrand: opts?.allowedBrand,
     audience: opts?.audience !== undefined ? opts.audience : ihAudienceOf(opts?.garmentFamily),
+    // Task 5: both undefined on every pre-Task-5 caller ⇒ the forced-gender rule stays a no-op,
+    // byte-identical to before.
+    audienceLean: opts?.audienceLean ?? null,
+    designTokens: opts?.designTokens,
   }
   const flatten = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
   const brandRe = opts?.allowedBrand
@@ -259,29 +300,34 @@ export function composeItemHighlightDetailed(
     if (gm) usedGarmentSurfaces.add(gm)
   }
 
-  // Two passes: first prefer candidates introducing a NEW garment surface (the variety craft),
-  // then fill remaining budget with any novel candidate.
-  for (const preferNewGarment of [true, false]) {
-    for (const c of candidates) {
-      if (picked.length >= 7 || lineLen() >= AIM) break
-      const phrase = titleCasePhrase(c.keyword)
-      if (picked.includes(phrase) || phrase === brandPick) continue
-      const folded = significantFolded(c.keyword)
-      if (!folded.some((w) => !usedFolded.has(w))) continue            // must add something new
-      const gm = c.keyword.match(GARMENT_SURFACE_RE)?.[0]?.toLowerCase().replace(/[-\s]/g, '').replace(/s$/, '')
-      if (preferNewGarment && gm && usedGarmentSurfaces.has(gm)) continue
-      if (preferNewGarment && !gm) continue
-      const nextLen = lineLen() + (picked.length ? 2 : 0) + phrase.length
-      if (nextLen > MAX) continue
-      const draft = withBrand([...picked, phrase]).join(', ')
-      if (ihRepeatViolations(draft).length > 0) continue               // Amazon's ≤2 per-word rule
-      // PO ruling 2026-08-21 (B0GWFFK1W7 "comfort colors tshirt, comfort colors graphic tee…" —
-      // "repeating CC 2 times"): the blank brand appears in AT MOST ONE picked phrase. Amazon's
-      // ≤2-per-word cap allows two; the PO does not. The reserved waterfall phrase counts as it.
-      if (brandRe && brandRe.test(phrase) && (brandPick || picked.some((pp) => brandRe.test(pp)))) continue
-      picked.push(phrase)
-      folded.forEach((w) => usedFolded.add(w))
-      if (gm) usedGarmentSurfaces.add(gm)
+  // TASK 2: Tier A (all-new candidates) fills BEFORE Tier B (repeats a used token) — never the
+  // reverse, even when a Tier-B candidate outranks a Tier-A one on fit/volume. Within each tier, the
+  // existing two-pass order holds: first prefer candidates introducing a NEW garment surface (the
+  // variety craft), then fill remaining budget with any novel-in-tier candidate. Tier B is reached
+  // only once every Tier-A candidate (both passes) has been considered.
+  for (const tier of ['A', 'B'] as const) {
+    for (const preferNewGarment of [true, false]) {
+      for (const c of candidates) {
+        if (picked.length >= 7 || lineLen() >= AIM) break
+        const phrase = titleCasePhrase(c.keyword)
+        if (picked.includes(phrase) || phrase === brandPick) continue
+        const folded = significantFolded(c.keyword)
+        if (classifyTier(folded, usedFolded) !== tier) continue        // must add something new, tier order
+        const gm = c.keyword.match(GARMENT_SURFACE_RE)?.[0]?.toLowerCase().replace(/[-\s]/g, '').replace(/s$/, '')
+        if (preferNewGarment && gm && usedGarmentSurfaces.has(gm)) continue
+        if (preferNewGarment && !gm) continue
+        const nextLen = lineLen() + (picked.length ? 2 : 0) + phrase.length
+        if (nextLen > MAX) continue
+        const draft = withBrand([...picked, phrase]).join(', ')
+        if (ihRepeatViolations(draft).length > 0) continue               // Amazon's ≤2 per-word rule
+        // PO ruling 2026-08-21 (B0GWFFK1W7 "comfort colors tshirt, comfort colors graphic tee…" —
+        // "repeating CC 2 times"): the blank brand appears in AT MOST ONE picked phrase. Amazon's
+        // ≤2-per-word cap allows two; the PO does not. The reserved waterfall phrase counts as it.
+        if (brandRe && brandRe.test(phrase) && (brandPick || picked.some((pp) => brandRe.test(pp)))) continue
+        picked.push(phrase)
+        folded.forEach((w) => usedFolded.add(w))
+        if (gm) usedGarmentSurfaces.add(gm)
+      }
     }
   }
   // A pool-sourced brand phrase IS a pool pick for the viability count; the spec phrase is not.
@@ -318,16 +364,32 @@ export function composeItemHighlightDetailed(
       sp.sleeve || '',
       sp.dye ? `${sp.dye} Fabric` : '',
     ].filter(Boolean)
-    for (const f of factFillers) {
-      if (lineLen() >= MIN) break
-      const phrase = titleCasePhrase(f)
-      if (picked.includes(phrase)) continue
-      const folded = significantFolded(f)
-      if (!folded.some((w) => !usedFolded.has(w))) continue
-      if (lineLen() + 2 + phrase.length > CONTENT_CONTRACT.itemHighlights.max) continue
-      if (ihRepeatViolations([...picked, phrase].join(', ')).length > 0) continue
-      picked.push(phrase)
-      folded.forEach((w) => usedFolded.add(w))
+    // TASK 2: same tier order as the pool loop above — a filler that merely repeats a token the
+    // line ALREADY SHOWS (pool phrases / brand / the wear-fact) loses its priority-order slot to a
+    // later, non-repeating filler whenever that non-repeating one alone can still reach the floor.
+    // Tier is judged against `usedBeforePad` — a SNAPSHOT taken here, before this bank's own picks
+    // start accumulating — not the live `usedFolded`. These six facts are independent spec truths,
+    // not competing keyword candidates: `fit` ("Relaxed Fit") and `unisex` ("Unisex Fit") share only
+    // the literal word "Fit" this bank's own templates append to both, and living off the live set
+    // would wrongly read "Unisex Fit" as a repeat OF "Relaxed Fit" the instant this same loop had
+    // just added it — demoting a PO-mandated fact (2026-08-06: unisex sizing must be explicit when
+    // true) below a lower-priority filler ("Crew Neck") for no reason a customer would recognize as
+    // "repetition". A pool phrase repeating pool/brand/wear-fact vocabulary (a real customer-visible
+    // repeat) still correctly falls to Tier B against this snapshot.
+    const usedBeforePad = new Set(usedFolded)
+    for (const tier of ['A', 'B'] as const) {
+      for (const f of factFillers) {
+        if (lineLen() >= MIN) break
+        const phrase = titleCasePhrase(f)
+        if (picked.includes(phrase)) continue
+        const folded = significantFolded(f)
+        if (!folded.some((w) => !usedFolded.has(w))) continue           // must add something new (live)
+        if (classifyTier(folded, usedBeforePad) !== tier) continue     // tier vs. the pre-pad line only
+        if (lineLen() + 2 + phrase.length > CONTENT_CONTRACT.itemHighlights.max) continue
+        if (ihRepeatViolations([...picked, phrase].join(', ')).length > 0) continue
+        picked.push(phrase)
+        folded.forEach((w) => usedFolded.add(w))
+      }
     }
   }
   why.picked = picked.length; why.lineLen = lineLen()

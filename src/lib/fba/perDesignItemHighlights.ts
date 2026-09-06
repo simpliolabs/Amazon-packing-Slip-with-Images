@@ -9,12 +9,15 @@
  * SAME model for the IH: `per_child_item_highlights` (migration 060) — a JSONB array of one entry per
  * SKU, each carrying its design's line (or '' + a named hold), labeled with designName/designKey.
  *
- * REFINED THE SAME DAY (PO 2026-08-21, "Strip the design for MULTI design that is in the NAME/title"):
- * the family ships ONE SHARED line — design names stripped, every phrase rated >= 2 under EVERY
- * design (theme_fit_by_design, migration 061, min over designs). The storage shape is unchanged: the
- * shared line is written to EVERY entry (identical by construction), so the per-SKU push seam below
- * still resolves each SKU's "own" line; `collapseSharedIhRows` folds identical rows for the UI and
- * per-design rows render only if they ever differ.
+ * REFINED (PO ruling 2026-09-06, replacing the 2026-08-21 "one shared line" model — Minor #10/#11,
+ * final fix wave): the family ships ONE LINE PER DESIGN — each design composes against its OWN
+ * theme-fit rating (theme_fit_by_design, migration 061), never a minimum over siblings, and every
+ * OTHER design's name/identity is foreign to it, never its own. The storage shape is unchanged: one
+ * entry per SKU, each carrying ITS OWN design's line (no longer identical by construction); the
+ * per-SKU push seam below still resolves each SKU's "own" line; `collapseSharedIhRows` folds rows
+ * whose (line, hold) happen to be byte-identical for the UI — ordinarily every design differs, so
+ * rows render separately; the degenerate case (a single-group family, or every design held) still
+ * collapses to one row.
  *
  * PUSH SAFETY (the invariant every seam enforces):
  *  - the broadcast IH detail row on a per-design family carries NO line (recommended_value '' and
@@ -37,9 +40,13 @@ export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
   'thin-candidates': 'Held: too few truthful ranking phrases in the pool — harvest more keywords for this family',
   'under-floor': `Held: truthful phrases + blank facts cannot reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor — harvest more keywords for this family`,
   'no-spec': 'Held: no blank spec resolved for this family — set its blank (child SKU style code or a family override)',
-  // Multi-design only (PO 2026-08-21): the shared line is a judgment under EVERY design, so it never
-  // composes from a partial one. The PO action: POST keyword-pool/rerate { parent_asin, per_design: true }.
-  'designs-unrated': 'Held: the pool is not rated against every design — run the per-design theme rating (keyword-pool/rerate { per_design: true }) first',
+  // Multi-design only (PO ruling 2026-09-06, replacing the 2026-08-21 "one shared line" model —
+  // Minor #10/#11, final fix wave): each design composes against its OWN rated share; a design
+  // whose OWN column is thin HOLDS in isolation — siblings with a healthy rating compose
+  // independently, never blocked by this one. The PO action is unchanged: POST keyword-pool/rerate
+  // { parent_asin, per_design: true } (it rates every design's column at once, so it also clears any
+  // sibling that was separately unrated).
+  'designs-unrated': 'Held: this design\'s own rating share is too thin — run the per-design theme rating (keyword-pool/rerate { per_design: true }) first',
 }
 
 /** One entry per SKU — mirrors per_child_titles' {sku, asin, <field>, designName?, designKey?}. */

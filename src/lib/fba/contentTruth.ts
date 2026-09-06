@@ -36,7 +36,11 @@ import { designScopeTokens } from './designScope'
  *  audience rule; long_sleeve_tee names its own spec phrase), plus the title-guess values. */
 export type TruthGarmentFamily = GarmentFamily | 'hat' | 'none' | null
 
-/** The content surfaces the spine gates. Only `audience-lean-lie` reads this; see the header. */
+/** The content surfaces the spine gates. Only `audience-lean-lie` reads this; see the header.
+ *  Task 5 (2026-09-06, item-highlights-per-design plan): `audience-lean-lie` now ALSO reads this on
+ *  'highlights' — the Item Highlights composer had no audience-lean rule at all before this task, so
+ *  a unisex design's own scoped pool could carry a market "for Women"/"for Men" phrase unchecked
+ *  (live: "Why is Women repeating Twice?" on UNISEX family B0DSCDZC6K). */
 export type ContentField = 'title' | 'bullets' | 'description' | 'backend' | 'highlights'
 
 export type PhraseTruthReason =
@@ -47,7 +51,8 @@ export type PhraseTruthReason =
   | 'audience-kids-on-adult'        // kids/toddler/youth/boys/girls/baby on an adult family
   | 'competitor-brand'              // another blank maker (Pro Club, Gildan…) unless it is the family's own
   | 'weight-class-lie'              // light/mid/heavyweight that the blank's weightNote does not back
-  | 'audience-lean-lie'             // a single gender asserted in the TITLE of a unisex-lean family
+  | 'fit-claim-lie'                 // relaxed/classic/slim/regular/oversized/fitted/boxy that spec.fit does not back
+  | 'audience-lean-lie'             // a single gender asserted on a unisex-lean family's TITLE or Item Highlight
 
 /** The seller's declared audience lean, normalized to what the truth rule needs. */
 export type TruthAudienceLean = 'unisex' | 'women' | 'men' | null
@@ -74,9 +79,13 @@ export interface PhraseTruthCtx {
    *  kids/adult rules blanket-strip the healthy majority's own design vocabulary to cure a defect
    *  none of them have — the standing "don't over-generalize a specific failure" directive.
    *  Absent/empty ⇒ every audience hit is foreign, i.e. EXACTLY the pre-amendment behavior (which is
-   *  what every Item-Highlight caller passes, so the IH pins hold byte-for-byte). */
+   *  what every Item-Highlight caller passed before Task 5; the single-design IH path still does).
+   *  Task 5 (2026-09-06): the PER-DESIGN Item Highlights path (`buildItemHighlightsPerDesign`) now
+   *  passes THIS design's own name here — never the family-wide union titles/bullets/backend use —
+   *  so a sibling's name is never accidentally exempted (that cross-design leak is exactly what
+   *  Task 1's foreign-token partition exists to prevent). Read by rule (c) AND (c2) below. */
   designTokens?: readonly string[]
-  /** Seller-declared lean. Only 'unisex' can trigger a rule, and only on the TITLE. */
+  /** Seller-declared lean. Only 'unisex' can trigger a rule, on the TITLE or (Task 5) Item Highlight. */
   audienceLean?: TruthAudienceLean
   /** Which surface is asking. Field-agnostic for every rule except `audience-lean-lie`. */
   field: ContentField
@@ -252,6 +261,20 @@ const foreignAudienceHits = (phrase: string, re: RegExp, design: ReadonlySet<str
  *  kids/adult audience rule's business, and a phrase naming BOTH halves is INCLUSIVE, not forced. */
 const LEAN_FEM_RE = /\b(?:wom[ae]n['’]?s?|ladies|lady)\b/i
 const LEAN_MASC_RE = /\b(?:m[ae]n['’]?s?)\b/i
+/** GLOBAL twins of the two regexes above, for Item Highlights only (Task 5) — `foreignAudienceHits`
+ *  needs every match (`matchAll`), not merely whether one exists, so it can tell a phrase's OWN
+ *  gendered hit (the design's own name — exempt) from a foreign one (a market audience claim —
+ *  still forced-gender). Kept SEPARATE from the two above rather than adding 'g' to them: those stay
+ *  single-shot `.test()` calls on the TITLE branch, and a shared global instance's mutable
+ *  `lastIndex` would make repeated `.test()` calls silently skip matches (the same gotcha
+ *  `ADULT_AUDIENCE_RE`/`KIDS_AUDIENCE_RE` above avoid by never being `.test()`'d).
+ *  FIX ROUND (final fix wave, 2026-09-06, T5-d): derived from `LEAN_FEM_RE`/`LEAN_MASC_RE`'s own
+ *  `.source` instead of re-typing the lexicon literally — a second hand-copied word list is exactly
+ *  how the title and highlight branches could drift (the fold-word lexicons in this file already
+ *  learned this lesson once). The separate-CONST reason above (shared `lastIndex`) is satisfied
+ *  either way; only the SOURCE of the word list changes, not the flags/behavior. */
+const LEAN_FEM_RE_G = new RegExp(LEAN_FEM_RE.source, 'gi')
+const LEAN_MASC_RE_G = new RegExp(LEAN_MASC_RE.source, 'gi')
 
 /** PipelineInput.audienceLean → the truth rule's view. `lean_male`/`lean_female` are SOFT
  *  re-weightings (cross-gender traffic is the point of a lean), so they are NOT unisex and never
@@ -524,6 +547,65 @@ export function buildPhraseTruthCtx(facts: PhraseTruthFacts, field: ContentField
   }
 }
 
+/**
+ * FIT/CUT CLAIM VOCABULARY (Task 4, 2026-09-06 — live B0DSCDZC6K: "relaxed unisex fit" shipped for a
+ * Gildan 18000, whose blank_specs.fit is Classic; a false product claim, indexed by Google). Mirrors
+ * titleBand.ts's FIT_CLAIM_SUFFIX_WORDS/FIT_CLAIM_BARE_WORDS (an INDEPENDENT copy, not imported —
+ * titleBand.ts already imports THIS module for `phraseTruthVerdict`, so importing back would cycle;
+ * this repo's own convention for a shared word class is a local copy per module, exactly how
+ * blankSpecs.ts's WEIGHT_CLASS_RE and this file's own weight-class rule (e) below each keep their own
+ * "light/mid/heavy" regex rather than cross-importing). SUFFIX words double as ordinary English/
+ * design vocabulary ("Classic Car Shirt", "Relaxed Weekend") — matched ONLY as a "<word> ... Fit"
+ * claim (the fit word and the literal word "fit" appearing TOGETHER, in either order of proximity,
+ * anywhere in the same comma-delimited segment — never bare), so a genuine design phrase is never
+ * mistaken for a spec assertion, and a fit word in one Item-Highlight segment cannot bind to an
+ * unrelated "fit" sitting in a different segment. BARE words are unambiguous garment cut/fit terms —
+ * matched standalone. Exactly the seven words the PO named live, PLUS `oversize` (final fix wave,
+ * T4-b — the informal spelling of the already-approved `oversized`, not an eighth word); not
+ * invented, not the fuller title-only list (loose/cropped/crop/baggy/tapered/taper stay title-only —
+ * this predicate is scoped to `field:'highlights'` only (Important #1) and a broader list here would
+ * widen that one field's fill/filter, which is outside what this task was asked to close).
+ *
+ * NOT CAUGHT, ON PURPOSE (fix-round-1 self-review, 2026-09-06): a bare suffix word with no "fit"
+ * anywhere in its segment — plain "Classic Rock Shirt", or "relaxed" with `spec: null` and no "fit"
+ * beside it — is ordinary vocabulary, not a claim, and must keep passing even when `spec` is absent;
+ * only a WORD PAIRED WITH "fit" is fail-closed. Do not "fix" this into bare-word matching — the
+ * suffix/bare split exists precisely to keep it out.
+ *
+ * FIX ROUND 1 (2026-09-06): the ORIGINAL suffix pattern (`\s+fit\b`) required the claim word
+ * IMMEDIATELY adjacent to "fit", so it never matched the live string itself — "relaxed unisex fit"
+ * (a word sits between them) — nor "relaxed-fit" (hyphen, not whitespace). Fixed by letting the span
+ * between the claim word and "fit" be ANY run of non-comma characters (lazy, so it stops at the
+ * nearest "fit" and never crosses into a different comma segment) instead of a single `\s+`.
+ *
+ * FIX ROUND 2 (final fix wave, 2026-09-06, Important #2): fix-round-1's lazy span could still cross
+ * OVER a second claim word to reach a "fit" that truthfully belongs to the FIRST word, laundering the
+ * second — "relaxed oversized fit tee" on a Relaxed blank matched suffix "relaxed" all the way through
+ * to "fit", swallowing the bare word "oversized" INSIDE that one match so it was never independently
+ * judged (`relaxed oversized fit tee` => `{ok:true}` even though "oversized" is a false claim on a
+ * Relaxed blank). The span now also refuses to cross any OTHER recognized claim word (suffix or bare),
+ * so "oversized" breaks the "relaxed ... fit" match and is left to be caught on its own by the bare
+ * alternative — all three orderings (`relaxed oversized fit`, `relaxed fit oversized`, `oversized
+ * relaxed fit`) now agree.
+ */
+const FIT_CLAIM_SUFFIX_WORDS = ['relaxed', 'classic', 'slim', 'regular'] as const
+/** FIX ROUND 2 (final fix wave, 2026-09-06, T4-b): `oversize` added alongside the already-approved
+ *  `oversized` — the SAME word, the informal spelling, not an eighth word (the seven the PO named
+ *  live are unchanged); without it `FIT_WORD_CANON` below has nothing to normalize, since a claim
+ *  spelled "oversize" never reached rule (f) at all. */
+const FIT_CLAIM_BARE_WORDS = ['oversized', 'oversize', 'fitted', 'boxy'] as const
+const FIT_CLAIM_RE = new RegExp(
+  `\\b(${FIT_CLAIM_SUFFIX_WORDS.join('|')})\\b(?:(?!,)(?!\\b(?:${[...FIT_CLAIM_SUFFIX_WORDS, ...FIT_CLAIM_BARE_WORDS].join('|')})\\b).)*?\\bfit\\b|\\b(${FIT_CLAIM_BARE_WORDS.join('|')})\\b`, 'gi',
+)
+/** Spelling variants normalize to the canonical class word BEFORE the spec-containment check, so a
+ *  blank whose `fit` states "Oversized" still backs a claim spelled "oversize" (final fix wave,
+ *  2026-09-06, T4-b). MIRRORS titleBand.ts:758's `FIT_WORD_CANON` verbatim — a local copy, not an
+ *  import (same cross-cycle reason as the word lists above). `crop`/`taper` are inert here today:
+ *  IH's own vocabulary has no `cropped`/`tapered` claim words to canonicalize (title-only, see the
+ *  vocabulary doc above) — kept for byte-parity with titleBand's map so the two never drift apart if
+ *  IH's vocabulary ever widens to match. */
+const FIT_WORD_CANON: Readonly<Record<string, string>> = { oversize: 'oversized', crop: 'cropped', taper: 'tapered' }
+
 /* ─── THE PREDICATE ───────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -559,15 +641,34 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
       return { ok: false, reason: ctx.audience === 'kids' ? 'audience-adult-on-kids' : 'audience-kids-on-adult' }
     }
   }
-  // (c2) FORCED GENDER — TITLE ONLY (PO gold pattern "no forced gender", live B0DSCDZC6K: the title
-  // said "for Women" while the family's stored audience_lean is 'unisex'). The title is a PRODUCT
-  // CLAIM; bullets/description/backend carry MARKET vocabulary, where a gendered shopper phrase is
-  // legitimate and indexes real traffic — so this is the one field-scoped rule in the spine.
+  // (c2) FORCED GENDER — TITLE + ITEM HIGHLIGHTS (PO gold pattern "no forced gender", live
+  // B0DSCDZC6K: the title said "for Women" while the family's stored audience_lean is 'unisex').
+  // The title is a PRODUCT CLAIM; bullets/description/backend still carry MARKET vocabulary, where a
+  // gendered shopper phrase is legitimate and indexes real traffic. Item Highlights (Task 5,
+  // 2026-09-06 item-highlights-per-design plan) joins the title's side of that line rather than
+  // bullets'/backend's: it is a customer-facing product-fact field the PO reads as a claim about
+  // THIS design, not a keyword-research surface — and the composer had NO audience-lean rule at all
+  // before this task, so a unisex design's own scoped pool could carry the identical bare-gender lie
+  // unchecked (the live complaint this task exists for: "Why is Women repeating Twice?").
   // A phrase naming BOTH genders ("for men and women") is inclusive, not forced.
-  if (ctx.field === 'title' && ctx.audienceLean === 'unisex') {
-    const fem = LEAN_FEM_RE.test(phrase)
-    const masc = LEAN_MASC_RE.test(phrase)
-    if (fem !== masc) return { ok: false, reason: 'audience-lean-lie' }
+  if ((ctx.field === 'title' || ctx.field === 'highlights') && ctx.audienceLean === 'unisex') {
+    if (ctx.field === 'highlights') {
+      // ITEM HIGHLIGHTS ONLY gets the design-own-name exemption (Task 5): a design whose OWN name
+      // itself carries the gender (e.g. "Mother Hustler") keeps it — reusing the SAME "claim vs.
+      // vocabulary" idiom rule (c) above already applies for kids/adult (`designWordSet` +
+      // `foreignAudienceHits`), never a second copy. TITLE is deliberately left untouched below (no
+      // exemption there): its own `designTokens` is the FAMILY-WIDE union (every sibling's name, per
+      // `buildGroupTruthCtx` in listingPipeline.ts), and widening THIS rule to read it would risk an
+      // untested behavior change on a path this task must not touch.
+      const designWords = designWordSet(ctx.designTokens)
+      const fem = foreignAudienceHits(phrase, LEAN_FEM_RE_G, designWords).length > 0
+      const masc = foreignAudienceHits(phrase, LEAN_MASC_RE_G, designWords).length > 0
+      if (fem !== masc) return { ok: false, reason: 'audience-lean-lie' }
+    } else {
+      const fem = LEAN_FEM_RE.test(phrase)
+      const masc = LEAN_MASC_RE.test(phrase)
+      if (fem !== masc) return { ok: false, reason: 'audience-lean-lie' }
+    }
   }
   // (d) competitor APPAREL brands — outside the trademark lexicon (it covers franchises, not blanks):
   // a pool row naming another maker never ships. The family's own allowed blank brand
@@ -579,6 +680,37 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
   if (wm) {
     const wt = trueWeightClass(ctx.spec)
     if (!wt || !wt.startsWith(wm[1].toLowerCase().slice(0, 3))) return { ok: false, reason: 'weight-class-lie' }
+  }
+  // (f) fit-claim truth (Task 4, live B0DSCDZC6K: "relaxed unisex fit" on a Gildan 18000/Classic
+  // blank) — a phrase asserting a FIT must match the blank's OWN spec.fit, case-insensitive
+  // containment (a multi-word spec value, e.g. "Super Relaxed", still backs a single claimed word —
+  // the same containment rule (e) above already uses for weight class). FAIL CLOSED: an unconfirmed
+  // blank (no spec.fit at all) backs no fit claim — a fit claim with nothing behind it is exactly how
+  // the live lie shipped. The spec-fact PAD's own `${spec.fit} Fit` / `Unisex Fit` fillers never reach
+  // this predicate (the composer pushes them straight onto its picks, pre-truth-stage) so they are
+  // unaffected regardless; "unisex" also carries no fit-claim word.
+  // FIX ROUND 1 (2026-09-06): FIT_CLAIM_RE now carries 'g' and every match is examined — a phrase
+  // can assert MORE THAN ONE fit/cut claim ("relaxed fit oversized tee": "relaxed fit" true, bare
+  // "oversized" false) and the first true match must never launder a later false one.
+  // FIX ROUND 2 (final fix wave, 2026-09-06, Important #1): ITEM HIGHLIGHTS ONLY. This rule used to be
+  // field-agnostic, so it reached the TITLE and BACKEND paths the plan forbade touching — and it is a
+  // SECOND fit oracle there, provably disagreeing with the title path's own (titleBand.ts:747-753
+  // `scrubUnspecdGarmentClaims`, which accepts "oversize"/"cropped"/"baggy"/"tapered"/"loose" this
+  // rule has never known about — Probe, spec.fit='Oversize': rule (f) rejected a true "oversized"
+  // while `scrubUnspecdGarmentClaims` would accept it). Gated exactly like rule (c2) above: the title
+  // path keeps its own fit oracle; unifying the two oracles into one is Phase 4 of the title
+  // programme, not this task. `highlights` is the ONE field that had NO fit oracle at all before
+  // Task 4 — this rule exists for it.
+  if (ctx.field === 'highlights') {
+    const fit = ctx.spec?.fit?.toLowerCase()
+    for (const fm of phrase.matchAll(FIT_CLAIM_RE)) {
+      const claim = (fm[1] ?? fm[2] ?? '').toLowerCase()
+      // T4-b: normalize a spelling variant (e.g. "oversize") to the canonical class word before the
+      // containment check — mirrors titleBand.ts's `fitOk`, so a blank spelled "Oversized" still
+      // backs a claim spelled "oversize".
+      const canonClaim = FIT_WORD_CANON[claim] ?? claim
+      if (!fit || !fit.includes(canonClaim)) return { ok: false, reason: 'fit-claim-lie' }
+    }
   }
   return { ok: true }
 }
