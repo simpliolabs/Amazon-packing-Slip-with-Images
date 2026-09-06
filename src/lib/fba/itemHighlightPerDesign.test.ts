@@ -285,16 +285,19 @@ describe('single-design parity (pin) + the per-design column parser', () => {
 
 describe('truth stage: a Classic-fit blank never claims "relaxed" (blank_specs-provable fit/fabric only)', () => {
   it('blank 18000/64000 (fit: Classic) — no design\'s line contains "relaxed" anywhere in this pool', () => {
-    // NOTE (verified empirically against unmodified source, 2026-09-06): `ihTruthVerdict` has no
-    // fit-claim rule keyed on the word "relaxed" against `spec.fit` — a harvested "relaxed fit tee"
-    // pool phrase with themeFit >= 2 composes through UNCHANGED on this same Classic blank (confirmed
-    // with a throwaway repro, not part of this suite). This pool simply never harvests that phrase,
-    // so this test proves the ORDINARY case (a Classic blank's own spec padding only ever emits
-    // "Classic Fit", never invents "Relaxed Fit") — not the adversarial one. Flagged in the task
-    // report; closing the adversarial gap would mean adding a fit-claim rule to contentTruth.ts,
-    // which is outside this task's scope (buildItemHighlightsPerDesign and its immediate helpers only).
+    // This pool never harvests a "relaxed ..." phrase at all, so this test proves only the ORDINARY
+    // case (a Classic blank's own spec padding only ever emits "Classic Fit", never invents "Relaxed
+    // Fit") — the adversarial case (a harvested "relaxed fit" phrase actually PRESENT in the pool) is
+    // the next test below, which is what closes Task 4's gap.
     expect(GILDAN.spec.fit).toBe('Classic')
     const r = build(POOL)
+    for (const k of KEYS) expect(lineFor(r, k)).not.toContain('relaxed')
+  })
+
+  it('Task 4 CLOSED: a harvested "relaxed fit tee" phrase PRESENT in the pool (themeFit 3 for every design — otherwise a strong composer candidate) is rejected by ihTruthVerdict\'s new fit-claim rule and never composes for ANY design — the adversarial case the note above (pre-Task-4) could only flag, not prove', () => {
+    expect(GILDAN.spec.fit).toBe('Classic')
+    const adversarial = kw('relaxed fit tee design', 9990, 3)
+    const r = build([adversarial, ...POOL])
     for (const k of KEYS) expect(lineFor(r, k)).not.toContain('relaxed')
   })
 })

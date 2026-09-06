@@ -47,6 +47,7 @@ export type PhraseTruthReason =
   | 'audience-kids-on-adult'        // kids/toddler/youth/boys/girls/baby on an adult family
   | 'competitor-brand'              // another blank maker (Pro Club, Gildan…) unless it is the family's own
   | 'weight-class-lie'              // light/mid/heavyweight that the blank's weightNote does not back
+  | 'fit-claim-lie'                 // relaxed/classic/slim/regular/oversized/fitted/boxy that spec.fit does not back
   | 'audience-lean-lie'             // a single gender asserted in the TITLE of a unisex-lean family
 
 /** The seller's declared audience lean, normalized to what the truth rule needs. */
@@ -524,6 +525,27 @@ export function buildPhraseTruthCtx(facts: PhraseTruthFacts, field: ContentField
   }
 }
 
+/**
+ * FIT/CUT CLAIM VOCABULARY (Task 4, 2026-09-06 — live B0DSCDZC6K: "relaxed unisex fit" shipped for a
+ * Gildan 18000, whose blank_specs.fit is Classic; a false product claim, indexed by Google). Mirrors
+ * titleBand.ts's FIT_CLAIM_SUFFIX_WORDS/FIT_CLAIM_BARE_WORDS (an INDEPENDENT copy, not imported —
+ * titleBand.ts already imports THIS module for `phraseTruthVerdict`, so importing back would cycle;
+ * this repo's own convention for a shared word class is a local copy per module, exactly how
+ * blankSpecs.ts's WEIGHT_CLASS_RE and this file's own weight-class rule (e) below each keep their own
+ * "light/mid/heavy" regex rather than cross-importing). SUFFIX words double as ordinary English/
+ * design vocabulary ("Classic Car Shirt", "Relaxed Weekend") — matched ONLY as the explicit "<word>
+ * Fit" claim, never bare, so a genuine design phrase is never mistaken for a spec assertion. BARE
+ * words are unambiguous garment cut/fit terms — matched standalone. Exactly the seven words the PO
+ * named live; not invented, not the fuller title-only list (oversize/loose/cropped/crop/baggy/
+ * tapered/taper stay title-only — this predicate is field-agnostic and a broader list here would
+ * widen every field's fill/filter at once, which is outside what this task was asked to close).
+ */
+const FIT_CLAIM_SUFFIX_WORDS = ['relaxed', 'classic', 'slim', 'regular'] as const
+const FIT_CLAIM_BARE_WORDS = ['oversized', 'fitted', 'boxy'] as const
+const FIT_CLAIM_RE = new RegExp(
+  `\\b(${FIT_CLAIM_SUFFIX_WORDS.join('|')})\\s+fit\\b|\\b(${FIT_CLAIM_BARE_WORDS.join('|')})\\b`, 'i',
+)
+
 /* ─── THE PREDICATE ───────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -579,6 +601,20 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
   if (wm) {
     const wt = trueWeightClass(ctx.spec)
     if (!wt || !wt.startsWith(wm[1].toLowerCase().slice(0, 3))) return { ok: false, reason: 'weight-class-lie' }
+  }
+  // (f) fit-claim truth (Task 4, live B0DSCDZC6K: "relaxed unisex fit" on a Gildan 18000/Classic
+  // blank) — a phrase asserting a FIT must match the blank's OWN spec.fit, case-insensitive
+  // containment (a multi-word spec value, e.g. "Super Relaxed", still backs a single claimed word —
+  // the same containment rule (e) above already uses for weight class). FAIL CLOSED: an unconfirmed
+  // blank (no spec.fit at all) backs no fit claim — a fit claim with nothing behind it is exactly how
+  // the live lie shipped. The spec-fact PAD's own `${spec.fit} Fit` / `Unisex Fit` fillers never reach
+  // this predicate (the composer pushes them straight onto its picks, pre-truth-stage) so they are
+  // unaffected regardless; "unisex" also carries no fit-claim word.
+  const fm = phrase.match(FIT_CLAIM_RE)
+  if (fm) {
+    const claim = (fm[1] ?? fm[2] ?? '').toLowerCase()
+    const fit = ctx.spec?.fit?.toLowerCase()
+    if (!fit || !fit.includes(claim)) return { ok: false, reason: 'fit-claim-lie' }
   }
   return { ok: true }
 }

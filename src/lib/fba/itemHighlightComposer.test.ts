@@ -343,6 +343,29 @@ describe('ihTruthVerdict — capability claims (no BlankSpec states a capability
   })
 })
 
+describe('ihTruthVerdict — fit-claim truth (Task 4, 2026-09-06: live B0DSCDZC6K shipped "relaxed unisex fit" on a Gildan 18000, whose blank_specs.fit is Classic — a false product claim, indexed by Google)', () => {
+  it('rejects "relaxed fit tee" on the Classic-fit blank (TRUTH_TEE / GILDAN_SPEC) with a named reason', () => {
+    expect(ihTruthVerdict('relaxed fit tee', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('accepts "classic fit sweatshirt" on the SAME blank — the claim matches spec.fit', () => {
+    expect(ihTruthVerdict('classic fit sweatshirt', { ...TRUTH_TEE, garmentFamily: 'sweatshirt' })).toEqual({ ok: true })
+  })
+  it('rejects bare "oversized" on a Comfort Colors Relaxed blank — Relaxed != Oversized (the PO\'s 2026-08-20 wear-style fact "Can be worn as Oversized" is a SEPARATE, opt-in claim the composer pushes straight onto `picked` without ever asking this predicate, so it can never be conflated with this rule)', () => {
+    const TRUTH_CC = { garmentFamily: 'tee' as const, spec: SPEC, allowedBrand: 'Comfort Colors', audience: ihAudienceOf('tee') }
+    expect(ihTruthVerdict('oversized', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('a phrase with no fit word is unaffected', () => {
+    expect(ihTruthVerdict('graphic tee for men', TRUTH_TEE)).toEqual({ ok: true })
+  })
+  it('fails CLOSED: a fit claim with no spec behind it never passes — an unconfirmed blank backs no claim', () => {
+    expect(ihTruthVerdict('relaxed fit tee', { ...TRUTH_TEE, spec: null })).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('never touches the spec-fact PAD filler ("${spec.fit} Fit") or "Unisex Fit" — both bypass ihTruthVerdict entirely (composer pushes factFillers straight onto `picked`), and neither would trip this rule even if it did: the pad emits spec.fit verbatim (self-true by construction), and "unisex" is not fit vocabulary', () => {
+    expect(ihTruthVerdict('classic fit', TRUTH_TEE)).toEqual({ ok: true })        // the pad's own emitted phrase, self-true
+    expect(ihTruthVerdict('unisex fit', TRUTH_TEE)).toEqual({ ok: true })         // "unisex" carries no fit-claim word
+  })
+})
+
 describe('ihTruthVerdict — audience truth (derived from garmentFamily, never a title)', () => {
   it('B0DP5H8QBT (kids_tee 64000B): women / plus-size / men / ladies / adult phrases are rejected', () => {
     expect(ihAudienceOf('kids_tee')).toBe('kids')
