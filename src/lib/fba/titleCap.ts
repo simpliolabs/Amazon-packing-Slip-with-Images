@@ -20,7 +20,37 @@
  * NOTHING in this module has side effects and it imports only the content contract (itself pure
  * data), so it is safe to import from fixtures, tests and harnesses.
  */
-import { CONTENT_CONTRACT } from './contentContract'
+import { CONTENT_CONTRACT, ITEM_HIGHLIGHTS_TITLE_PRECONDITION } from './contentContract'
+
+/**
+ * May the Amazon-100476 auto-heal shorten a LIVE title to re-earn Item Highlights?
+ *
+ * Healing means CHOOSING Item Highlights over title length. While the working cap equals the
+ * Item-Highlights precondition that choice is free, and the heal is pure benefit — it repairs SKUs
+ * whose live title was never updated to our compliant one.
+ *
+ * The moment the cap is deliberately raised above the precondition, the choice has ALREADY been
+ * made the other way, by the PO, in the contract. An automatic per-SKU heal would then overrule it
+ * one listing at a time, soft-failing to a note nobody reads, to restore a field that renders only
+ * in the browser tab. That is the class this codebase keeps hitting — a repair mechanism that
+ * "restores" content converting a deliberate change into an invisible revert (the parent lock that
+ * froze six child titles, the backend degrade gate, the Item-Highlights silent hold).
+ *
+ * DERIVED FROM THE CONTRACT, not from a flag someone has to remember to flip: raising the ceiling
+ * disables the heal by construction, in the same edit, with no second place to update.
+ */
+export function ihHealAllowedByContract(cap: number = CONTENT_CONTRACT.title.hardCap): { allowed: boolean; why: string } {
+  if (cap > ITEM_HIGHLIGHTS_TITLE_PRECONDITION) {
+    return {
+      allowed: false,
+      why:
+        `title ceiling is ${cap}, above the ${ITEM_HIGHLIGHTS_TITLE_PRECONDITION}-char Item Highlights ` +
+        `precondition — shipping longer titles is a deliberate trade, so Item Highlights is forfeited ` +
+        `by design and shortening the title to re-earn it would silently undo that decision`,
+    }
+  }
+  return { allowed: true, why: '' }
+}
 
 /** Collapse an immediately-repeated 2- or 3-word phrase ("Tee Shirt Tee Shirt" → "Tee Shirt"). */
 export function deduplicatePhrases(title: string): string {
