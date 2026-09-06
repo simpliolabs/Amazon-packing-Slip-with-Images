@@ -10,9 +10,52 @@
  *
  * NOTHING in this module has side effects; it is pure data, safe to import anywhere (no cycles).
  */
+/**
+ * AMAZON'S REAL item_name LIMIT, read from the LIVE product-type schema — not from a comment.
+ *
+ * On 2026-09-05, `GET /api/fba/listing-optimizer/push-content?parent_asin=B0DSCDZC6K&debug=1
+ * &field=details&detail_field=Item%20Name` returned, for productType SWEATSHIRT (ATVPDKIKX0DER):
+ *
+ *   "value": { "title":"Item Name", "maxLength": 200, "minLength": 0,
+ *              "examples":["Robert Graham Men's Maya Bay Short Sleeve Classic Fit Shirt, Cranberry, X-Large"] }
+ *
+ * Amazon's own worked example there is 78 characters — over the 75 this file used to call a cap.
+ * Live best-sellers in our category confirm it: B0C6TV2Z2Z ships 111 chars, B0B8Z2K3NR 110 WITH a
+ * variation twister, B0D968BB8S 88 — none rewritten, none truncated on the PDP.
+ *
+ * To re-derive this for any attribute rather than trusting this comment, hit that debug branch with
+ * `detail_field=<schema title>` and read `rawSubschema`. That is the method; this number is only its
+ * cached result.
+ */
+export const AMAZON_TITLE_MAX = 200
+
+/**
+ * WHY WE SHIP FAR UNDER Amazon's 200, and what the 75 actually is.
+ *
+ * Amazon error 100476 reads, verbatim: "Provide an Item Name that is 75 characters or less TO USE
+ * ITEM HIGHLIGHTS". It is a PRECONDITION FOR A DIFFERENT FIELD — never a cap on item_name. Every
+ * "Amazon rejects/auto-rewrites a longer title" claim in this repo traced back to this one error
+ * being misread, and it cost ~13-36 characters of the highest-attention text on every listing in
+ * the catalogue, in the category where winners write LONGEST (sweatshirt best-seller median: 88).
+ *
+ * NOTE what buying that precondition actually gets: measured across all 34 children of B0DSCDZC6K,
+ * the Item Highlights line contributes 4-5 uniquely-indexed tokens (classic, cotton, polyester,
+ * sweatshirts, fit) that the backend keywords do not already carry — and the field renders ONLY in
+ * the HTML <title>, never anywhere a shopper looks (DOM-probed on the live listing: present in
+ * document.title, absent from #centerCol and document.body.innerText).
+ *
+ * `hardCap` still equals this today so behaviour is byte-identical. Raising it is Phase 4 of
+ * docs/superpowers/specs/2026-09-05-title-ceiling-and-shape-implementation.md, and MUST come after
+ * the silent-reversal paths are closed — otherwise the 100476 auto-heal walks the raise back one
+ * SKU at a time, invisibly.
+ */
+export const ITEM_HIGHLIGHTS_TITLE_PRECONDITION = 75
+
 export const CONTENT_CONTRACT = {
   title: {
-    hardCap: 75,            // capTitle75 ceiling — Amazon auto-rewrites >75 after 2026-07-27
+    // NOT Amazon's cap — Amazon's is AMAZON_TITLE_MAX (200, from the live schema). This 75 is the
+    // price of keeping Item Highlights (error 100476); see ITEM_HIGHLIGHTS_TITLE_PRECONDITION.
+    hardCap: ITEM_HIGHLIGHTS_TITLE_PRECONDITION,
     floor: 50,              // validateTitle under-length trigger
     goldenBandLo: 70,       // scoreTitleQuality golden band low
     goldenBandHi: 75,

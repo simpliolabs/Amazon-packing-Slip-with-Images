@@ -811,19 +811,27 @@ export function scoreListingContent(
   const apparel = titleLooksApparel(title)
   if (!title) {
     titleScore = 0
-    issues.push({ field: 'title', severity: 'critical', message: 'Title is missing entirely. Go to Seller Central → Edit Listing → Vital Info. Lead with your brand, then your design/product name, then your top keyword. Aim ≤75 chars — Amazon\'s new title limit (effective July 27, 2026; all categories except media).', auto_fixable: false })
+    issues.push({ field: 'title', severity: 'critical', message: 'Title is missing entirely. Go to Seller Central → Edit Listing → Vital Info. Lead with the design/product name, then garment nouns, then your top keyword. Aim 70-90 chars (Amazon allows 200; 75 is only the threshold above which Amazon refuses Item Highlights).', auto_fixable: false })
   } else {
     const titleLen = title.length
 
     if (titleLen < 50) {
       titleScore -= 10
-      issues.push({ field: 'title', severity: 'warning', message: `Title is only ${titleLen} chars — too short to carry meaningful keywords. Aim 50-75 chars: brand + design/product name + your top keyword (Amazon's new ≤75 limit, July 27, 2026).`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: `Title is only ${titleLen} chars — too short to carry meaningful keywords. Aim 70-90 chars: design/product name + garment nouns + your top keyword (Amazon allows 200; 75 is only the Item Highlights threshold).`, auto_fixable: false })
     } else if (titleLen > 75) {
       // SCALED LENGTH PENALTY (PO 2026-06-14: a 200-char title scoring 18/22 means a human
       // team will never go fix it — anything that doesn't make the title optimized SHOULD
-      // affect the score). The Amazon July-2026 hard cap is 75 chars; anything over loses
-      // SEO control AND chars are not free (every extra word past 75 is one Amazon will
-      // auto-rewrite, undoing the keyword anchoring).
+      // affect the score).
+      //
+      // CORRECTED 2026-09-05: this comment used to say "The Amazon July-2026 hard cap is 75 chars
+      // … every extra word past 75 is one Amazon will auto-rewrite". FALSE. Amazon's real
+      // item_name limit for our productType is 200 (live schema read; the 200-char branch below is
+      // the one that was always accurate). 75 is the Item Highlights precondition — error 100476,
+      // "Provide an Item Name that is 75 characters or less TO USE ITEM HIGHLIGHTS".
+      //
+      // The PENALTY CURVE IS UNCHANGED here on purpose (Phase 1 = no behaviour change). It is
+      // re-based on the real ceiling in Phase 4 of the title-ceiling spec. Until then this docks a
+      // title for exceeding a bound that is ours, not Amazon's — flagged, not silently kept.
       // Curve: -5 base for crossing the cap + 1 extra penalty per 10 chars past 75, MAX -20.
       // 76 chars: -5  (still fixable in seconds)
       // 100 chars: -7 ("warning, ship a draft today")
@@ -837,8 +845,8 @@ export function scoreListingContent(
       const action = titleLen > 200
         ? `is EGREGIOUSLY long (${titleLen} chars). Amazon's 200-char hard limit puts you at suppression risk — fix immediately by trimming redundant phrases.`
         : titleLen > 150
-          ? `is ${titleLen} chars — far over Amazon's 75-char limit (effective July 27, 2026). Amazon will AUTO-REWRITE it, undoing your SEO. Regenerate now for a compliant ≤75-char draft.`
-          : `is ${titleLen} chars — over Amazon's 75-char limit (effective July 27, 2026). Amazon will AUTO-REWRITE the title, undoing the keyword + design-name anchoring. Regenerate for a compliant ≤75-char draft; move the extra detail into the 125-char Item Highlights field.`
+          ? `is ${titleLen} chars — approaching Amazon's real 200-char item_name limit and almost certainly padded. Regenerate to tighten it.`
+          : `is ${titleLen} chars — over our 75-char working ceiling. NOTE: 75 is NOT Amazon's limit (Amazon allows 200); it is the threshold above which Amazon refuses Item Highlights on this SKU (error 100476). So this is a trade, not a violation: a longer title is legal and indexes, but costs the Item Highlights field.`
       issues.push({ field: 'title', severity, message: `Title ${action}`, auto_fixable: false })
     }
 

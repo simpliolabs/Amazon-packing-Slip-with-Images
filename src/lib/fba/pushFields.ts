@@ -107,8 +107,8 @@ export function capForField(field: PushField, value: string): string {
 }
 
 /**
- * PHASE 4 (foundation plan): the push-boundary title gate. Amazon auto-rewrites item_name over 75
- * chars (policy 2026-07-27) and Item Highlights 100476-rejects SKUs whose live title exceeds it —
+ * The push-boundary title gate. CORRECTED 2026-09-05: Amazon does NOT rewrite item_name over 75 —
+ * its live schema allows 200. The gate is still right to exist because Item Highlights 100476-rejects SKUs whose live title exceeds it —
  * the exact class the #81 heal loop exists to clean up AFTER the fact. This gate refuses BEFORE the
  * PATCH, so the mess is never made. REFUSE, never truncate: a mid-word slice ships garbage bytes to
  * a customer-facing field (the #81 gate at pushExecutor:1133 set this precedent for the heal path;
