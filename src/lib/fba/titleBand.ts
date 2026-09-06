@@ -111,7 +111,15 @@ export function titleUnderShipFloor(len: number): boolean {
  * THE TWO BOUNDS ARE NOT THE SAME KIND OF THING, and treating them as one tier let an unrelated
  * spec-table cell silently reverse a seller ruling.
  *
- *   TITLE_BAND_HI = 75  — Amazon's, externally enforced (Amazon rewrites a longer title; error 100476)
+ *   TITLE_BAND_HI = 75  — CORRECTED 2026-09-05. This line used to read "Amazon's, externally
+ *                         enforced (Amazon rewrites a longer title; error 100476)". THAT WAS FALSE
+ *                         and it is the reason the whole catalogue ships short. Amazon's real
+ *                         item_name limit for productType SWEATSHIRT is 200 (`AMAZON_TITLE_MAX`,
+ *                         read from the LIVE schema 2026-09-05, whose own example is 78 chars).
+ *                         Error 100476 says "Provide an Item Name that is 75 characters or less TO
+ *                         USE ITEM HIGHLIGHTS" — a precondition for a DIFFERENT field, not a title
+ *                         cap. Live category best-sellers ship 88-111 unrewritten.
+ *                         So this bound is OURS too, by choice, and its cost is now known.
  *   TITLE_BAND_LO = 70  — OURS, `scoreTitleQuality`'s golden band, enforced by nothing outside this repo
  *
  * The three PO-ruling removal guards below (`enforceInclusiveAudience`, `stripVariantColorWords`,
@@ -2779,7 +2787,7 @@ export interface SettleTitleCtx {
   /** Feeds `scrubUnspecdGarmentClaims` — a market phrase must not re-leak a weight/fit claim the
    *  blank does not back. */
   spec: { fit?: string | null; weightNote?: string | null } | null | undefined
-  /** Amazon's 75-char hard cap + adjacent-phrase dedupe. Lives in listingPipeline.ts (it needs nothing
+  /** Our 75-char working cap (CORRECTED 2026-09-05 — NOT Amazon's; see AMAZON_TITLE_MAX) + adjacent-phrase dedupe. Lives in listingPipeline.ts (it needs nothing
    *  from this module) and is passed in so this file stays a zero-import leaf. */
   capTitle75: (title: string) => string
   /** Design vocabulary the color-strip net must never remove (DEFECT B) — this exit's design name(s),

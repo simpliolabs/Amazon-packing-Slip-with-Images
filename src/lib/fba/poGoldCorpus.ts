@@ -55,7 +55,7 @@ export const SEED_GOLD_TITLES: readonly string[] = [
   'THE CEO Later Gator Tee Shirt | Comfort Colors Alligator Tshirt for Women',      // 73 — 6w left
   'THE CEO Cupid Valentine Tee Shirt | Comfort Colors Graphic Tshirt for Women',    // 75 — 6w left
   // PO REVISION 2026-08-12. Was `…Meaner Tee Shirt | Funny Comfort Colors Shirt for Men Women` (78) —
-  // OVER Amazon's 75-char cap, so it could never ship, AND it was printed to the council as an
+  // OVER our 75-char working ceiling — CORRECTED 2026-09-05, Amazon's own limit is 200 — so it could never ship, AND it was printed to the council as an
   // exemplar directly beneath an instruction reading "75 characters maximum, counted exactly": a
   // contradiction inside one prompt, teaching the producer that the cap is soft. Asked to resolve it,
   // the PO rewrote it themselves to 68 — dropping the left "Shirt" (noun ×2 survives as Tee | Shirt)

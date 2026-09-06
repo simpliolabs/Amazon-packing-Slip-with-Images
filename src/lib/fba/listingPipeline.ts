@@ -2228,7 +2228,7 @@ function parseJsonLoose<T>(raw: string): T {
   }
 }
 
-// ─── 75-char HARD CAP (Amazon's new title limit, effective July 27, 2026) ──────
+// ─── 75-char WORKING CAP — CORRECTED 2026-09-05: this is OUR ceiling, not Amazon's (its schema allows 200); 75 is the Item Highlights precondition (error 100476). ──────
 // Deterministic last line of defense: never emit a title Amazon would auto-rewrite. Cuts at a
 // word boundary from the END (brand + design name + money keyword are all front-loaded by the
 // agent, so the tail holds the lowest-value supporting keyphrases), tidies dangling connectors/
@@ -3546,7 +3546,7 @@ ${baseSystem}`,
     // TITLE_COUNCIL_V3.1a Step 10 (PO Q6): adversary honors AUDIENCE MODE. Legacy critique blanket-said
     // audience is optional — this pressures personas to drop the tail on lean designs. V3.1a distinguishes:
     // OPTIONAL → drop is fine; REQUIRED → the tail is a lean-appropriate signal and MUST be preserved.
-    `You are a ruthless Amazon listing critic AND a skeptical shopper reviewing candidate titles. Attack each for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (Amazon AUTO-REWRITES longer titles from 2026-07-27), brand not at position 0, and weak click appeal. (a) AUDIENCE MODE=OPTIONAL — the audience suffix ("for Men and Women", "for Men", "for Women") is optional; REJECT any title that FORCES it AND a higher-value product-specific keyphrase from the brief is unused. (b) AUDIENCE MODE=REQUIRED — the tail matching the brief's Audience: value MUST be preserved; REJECT any title that DROPS it (unless the design phrase itself is an unambiguous gender carrier per the brief's closed lexicon). NEVER accept "for Men and Women" on a REQUIRED mode — that is a universal tail, not a lean one. (c) ${tmClause} Be specific per candidate. Do NOT tell the judge to pick a particular one — just critique.`,
+    `You are a ruthless Amazon listing critic AND a skeptical shopper reviewing candidate titles. Attack each for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (our working ceiling; it protects the Item Highlights field, it is not an Amazon rule), brand not at position 0, and weak click appeal. (a) AUDIENCE MODE=OPTIONAL — the audience suffix ("for Men and Women", "for Men", "for Women") is optional; REJECT any title that FORCES it AND a higher-value product-specific keyphrase from the brief is unused. (b) AUDIENCE MODE=REQUIRED — the tail matching the brief's Audience: value MUST be preserved; REJECT any title that DROPS it (unless the design phrase itself is an unambiguous gender carrier per the brief's closed lexicon). NEVER accept "for Men and Women" on a REQUIRED mode — that is a universal tail, not a lean one. (c) ${tmClause} Be specific per candidate. Do NOT tell the judge to pick a particular one — just critique.`,
     `Brief (the title must satisfy this):\n${baseUser}\n\nCandidate titles for the SAME product:\n${numbered}\n\nCritique EACH candidate, then list the strongest element from each.`,
     0.3, 400, ADVERSARY_MODEL, 60_000,
   )
@@ -4253,7 +4253,7 @@ Rules:
         // The corrective-retry pipe ban was deleted with the V3 flip (retired 2026-08-03): it fought
         // every PO gold that uses ` | ` (6 of 8 golds). Non-pipe rules stay because they're safety,
         // not format opinions. See docs/title-council-v3-spec.md §5.3.
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language: ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}" if it fits` : ''} then ${apparel ? 'an optional supporting keyphrase if it fits' : 'ONE supporting keyphrase if it fits'}${preferredAudience ? ` then optionally "for ${preferredAudience}" if budget remains (lowest-priority — a product-specific keyphrase outranks it, so drop the audience rather than the keyphrase)` : ''}. Front-load the mandatory keyword. ${apparel ? '50-75 chars' : 'TARGET 60-75 chars'} — HARD CAP 75 (Amazon auto-rewrites longer titles after July 27, 2026; overflow keyphrases belong in backend keywords, not here). ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language: ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}" if it fits` : ''} then ${apparel ? 'an optional supporting keyphrase if it fits' : 'ONE supporting keyphrase if it fits'}${preferredAudience ? ` then optionally "for ${preferredAudience}" if budget remains (lowest-priority — a product-specific keyphrase outranks it, so drop the audience rather than the keyphrase)` : ''}. Front-load the mandatory keyword. ${apparel ? '50-75 chars' : 'TARGET 60-75 chars'} — HARD CAP 75 (Amazon ceiling is ours and protects Item Highlights, not an Amazon rule; overflow keyphrases belong in backend keywords, not here). ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
@@ -4568,8 +4568,8 @@ ${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInc
     }
   }
 
-  // ── HARD CAP 75 — the last gate before the title leaves the agent (Amazon auto-rewrites longer
-  // titles from July 27, 2026). Everything valuable is front-loaded by now; capTitle75 trims the
+  // ── HARD CAP 75 — the last gate before the title leaves the agent. CORRECTED 2026-09-05: this is OUR ceiling, not Amazon's (its schema allows 200); 75 is the Item Highlights precondition (error 100476).
+  // Everything valuable is front-loaded by now; capTitle75 trims the
   // tail at a word boundary and never leaves a narrowed audience fragment.
   if (title.length > 75) {
     title = capTitle75(title)

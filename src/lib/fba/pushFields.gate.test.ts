@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { titlePushBlocked } from './pushFields'
 
-/* Phase 4 push-boundary title gate. Amazon auto-rewrites item_name >75 (2026-07-27 policy) and
+/* Push-boundary title gate. CORRECTED 2026-09-05: Amazon does NOT rewrite item_name >75 (its live
+   schema allows 200). The gate is still right to exist because
  * Item Highlights 100476-rejects SKUs whose live title exceeds it. The gate refuses the PATCH
  * before the mess is made — refuse, never truncate (a mid-word slice ships garbage). */
 describe('titlePushBlocked', () => {

@@ -51,6 +51,9 @@ import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerC
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
+// Pure data, no side effects, no cycles (see contentContract's header) — imported so the push
+// refusal can quote Amazon's ACTUAL limit instead of repeating the 75-is-Amazon's-cap falsehood.
+import { AMAZON_TITLE_MAX } from '@/lib/fba/contentContract'
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
 import { logAudit } from '@/lib/audit'
@@ -498,19 +501,33 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
     .filter((d) => d.raw != null) // keywords: drops SKUs whose ASIN has no per-child recommendation
   if (baseDiff.length === 0) return baseDiff
 
-  // PHASE 4 PUSH-BOUNDARY GATE: refuse a >75-char title BEFORE any PATCH is built. Amazon
-  // auto-rewrites item_name over 75 (2026-07-27 policy) and Item Highlights 100476-rejects SKUs
-  // whose live title exceeds it — the mess the #81 heal loop cleans up AFTER the fact. Refuse,
-  // never truncate (a mid-word slice ships garbage; the :1133 heal gate set the precedent). This
-  // also covers the seller's manual override, which was previously sliced at the generic 200 cap
-  // and sent. Unchanged rows never block — they are not being sent.
+  // PUSH-BOUNDARY GATE: refuse a >75-char title BEFORE any PATCH is built.
+  //
+  // CORRECTED 2026-09-05. This comment used to assert "Amazon auto-rewrites item_name over 75
+  // (2026-07-27 policy)". THAT IS FALSE and no such enforcement was ever observed. Amazon's live
+  // schema for productType SWEATSHIRT gives item_name `maxLength: 200` (AMAZON_TITLE_MAX), with a
+  // 78-char worked example, and category best-sellers ship 88-111 chars unrewritten (verified by
+  // DOM read: B0C6TV2Z2Z 111, B0B8Z2K3NR 110 with variations, B0D968BB8S 88).
+  //
+  // The gate is still CORRECT to exist, for the other half of the old comment, which was true:
+  // Item Highlights 100476-rejects SKUs whose live title exceeds 75 — the mess the #81 heal loop
+  // cleans up AFTER the fact. So this refuses to spend the Item-Highlights precondition by
+  // accident. Once the ceiling is deliberately raised (Phase 4 of the title-ceiling spec) this
+  // gate moves WITH it, and the 100476 auto-heal must be neutered FIRST or it will silently patch
+  // titles back down, one SKU at a time, to re-earn a field that renders only in the browser tab.
+  //
+  // Refuse, never truncate (a mid-word slice ships garbage; the :1133 heal gate set the
+  // precedent). This also covers the seller's manual override, which was previously sliced at the
+  // generic 200 cap and sent. Unchanged rows never block — they are not being sent.
   if (field === 'title') {
     const over = titlePushBlocked(baseDiff)
     if (over) {
       throw new Error(
-        `Title push refused: "${over.sku}" would ship ${over.chars} characters (limit 75). ` +
-        `Amazon auto-rewrites titles over 75 and rejects Item Highlights on them (100476) — ` +
-        `shorten the title or regenerate it, then push again. Nothing was sent.`,
+        `Title push refused: "${over.sku}" would ship ${over.chars} characters (our limit is 75). ` +
+        `This is NOT Amazon's cap — Amazon allows ${AMAZON_TITLE_MAX} for this product type. We ` +
+        `hold 75 because Amazon rejects Item Highlights on any SKU whose title exceeds it (error ` +
+        `100476). Shorten the title, or raise the ceiling deliberately and accept losing Item ` +
+        `Highlights. Nothing was sent.`,
       )
     }
   }
