@@ -11898,7 +11898,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           : `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): HELD for every design — ${IH_HOLD_MESSAGES[built.shared.hold ?? 'under-floor']}${built.shared.missingDesigns.length ? ` (unrated: ${built.shared.missingDesigns.join(', ')})` : ''}.`,
       })
     } else {
-      const { value: hl, hold } = buildItemHighlights({ finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles })
+      const { value: hl, hold } = buildItemHighlights({
+        finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles,
+        // TASK 5 FIX ROUND 1 (2026-09-06, Important #2): this branch — the pipeline's OWN
+        // single-design Item Highlights producer call — silently omitted the family's own audience
+        // lean, even though `input.audienceLean` is in scope in this same function (read above at
+        // this file's multi-design branch, :11874-11875, and earlier at :10435). Same field, same
+        // apparel gate, same source — never a second resolver. NORMALIZED here (not passed raw) —
+        // `buildItemHighlights`'s `audienceLean` is `TruthAudienceLean` (unisex/women/men), the
+        // truth-rule's own vocabulary; `input.audienceLean` is the RAW seller enum
+        // (male/female/lean_male/lean_female/unisex). The multi-design branch above never hits this
+        // seam directly — `buildItemHighlightsPerDesign` normalizes PER DESIGN internally
+        // (`normalizeAudienceLean(groupAudience.lean)`, :2514) before its own inner call to this
+        // same `buildItemHighlights`; this single-design branch has no per-design resolver to do
+        // that for it, so it normalizes the family value directly — same function, same rule.
+        audienceLean: apparelProduct ? normalizeAudienceLean(input.audienceLean) : null,
+      })
       // SILENT-HOLD CLASS CLOSED (2026-09-04): same fix as the multi-design branch above — a held
       // single-design family (hl === '') used to push NO row at all. Always push; carry `hold` so the
       // seller sees the field, the reason, and the Features scorer never docks it.

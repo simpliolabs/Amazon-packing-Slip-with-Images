@@ -23,6 +23,7 @@ import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selection
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
 import { buildItemHighlights, buildItemHighlightsPerDesign, IH_HOLD_MESSAGES } from '@/lib/fba/listingPipeline'
+import { normalizeAudienceLean } from '@/lib/fba/contentTruth'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
@@ -126,9 +127,32 @@ export async function POST(req: NextRequest) {
     // child (this route never spends a vision call — POST scan-identity {per_design:true}
     // populates it). The broadcast row becomes the per-design MARKER (no line).
     const pct = (Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { sku: string; asin: string; title: string; designName?: string | null; designKey?: string | null }[]
+    // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): two more columns on this SAME existing select —
+    // the family's seller-declared audience lean (migration 029) + its per-design override map
+    // (migration 070) — listingPipeline.ts:276-289 is the DB-shape source of truth this mirrors, so
+    // the two Item Highlight call sites below can apply the SAME apparel-gated rule the pipeline's
+    // own branches already do (this route's own "Invariant 1: one function ships the field on every
+    // path", :6/12/188 — a family regenerated here must not answer differently than a full audit).
+    // Error destructured and handled, not discarded ("discarded supabase errors" — a silently-empty
+    // scoreRow must not quietly read as "no lean" without a trace): best-effort, never blocks the
+    // regenerate — a read failure degrades to null leans, exactly like an absent value would.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: scoreRow } = await (supabase as any).from('listing_seo_scores').select('is_multi_design_override').eq('parent_asin', parent_asin).maybeSingle()
-    const multi = resolveMultiDesign(pct, (scoreRow as { is_multi_design_override?: boolean | null } | null)?.is_multi_design_override ?? null)
+    const { data: scoreRow, error: scoreErr } = await (supabase as any).from('listing_seo_scores')
+      .select('is_multi_design_override, audience_lean, audience_lean_by_design')
+      .eq('parent_asin', parent_asin).maybeSingle()
+    if (scoreErr) console.warn(`[regenerate-item-highlight] listing_seo_scores read failed for ${parent_asin} (is_multi_design_override/audience lean best-effort null): ${scoreErr.message}`)
+    const scoreRowTyped = scoreRow as { is_multi_design_override?: boolean | null; audience_lean?: string | null; audience_lean_by_design?: Record<string, string> | null } | null
+    const multi = resolveMultiDesign(pct, scoreRowTyped?.is_multi_design_override ?? null)
+    // RAW values only — the APPAREL GATE is applied INLINE at each call site below, matching the
+    // pipeline's own reference exactly (listingPipeline.ts:11874, :11901 fixed above: `apparelProduct
+    // ? input.audienceLean : null`), so the gate is visible at every place the field is handed to the
+    // gender rule rather than trusted to a pre-gated variable. `audienceLeanByDesign` is never itself
+    // apparel-gated — matching the pipeline reference exactly (:11875): the per-design resolver
+    // applies the family fallback, which IS gated, so an ungated map on a non-apparel family still
+    // resolves to a gated null.
+    const storedAudienceLean = (scoreRowTyped?.audience_lean ?? null) as
+      'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null
+    const storedAudienceLeanByDesign = scoreRowTyped?.audience_lean_by_design ?? undefined
     const byKey = new Map<string, { key: string; designName: string; skus: { sku: string; asin: string }[]; titles: string[] }>()
     if (multi) {
       for (const r of pct) {
@@ -153,6 +177,11 @@ export async function POST(req: NextRequest) {
       const built = buildItemHighlightsPerDesign({
         groups, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow,
         familyTitleText: title,
+        // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family/per-design lean source the
+        // pipeline's own multi-design branch reads (listingPipeline.ts:11874-11875) — resolved PER
+        // DESIGN inside buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.
+        audienceLean: apparel ? storedAudienceLean : null,
+        audienceLeanByDesign: storedAudienceLeanByDesign,
       })
       const composed = built.perDesign.filter((d) => d.value)
       if (composed.length === 0) {
@@ -187,7 +216,19 @@ export async function POST(req: NextRequest) {
 
     // Path parity (Invariant 1): the SAME inputs the pipeline hands the producer — pool, blank row,
     // the title the IH will sit beside. Deterministic; no client, no LLM.
-    const built = buildItemHighlights({ finalTitle: title, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow, netTitles: [title] })
+    const built = buildItemHighlights({
+      finalTitle: title, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow, netTitles: [title],
+      // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family lean the pipeline's own
+      // single-design branch now reads (listingPipeline.ts:11901, fixed above in this same round).
+      // NORMALIZED, not raw: `buildItemHighlights`'s `audienceLean` is `TruthAudienceLean`
+      // (unisex/women/men); `storedAudienceLean` is the raw seller enum (male/female/lean_male/
+      // lean_female/unisex) straight off the DB row — the per-design call above normalizes PER
+      // DESIGN internally (buildItemHighlightsPerDesign -> resolveDesignAudienceLean ->
+      // normalizeAudienceLean); this direct call has no per-design resolver to do it, so it
+      // normalizes the family value inline with the SAME function (contentTruth.ts), never a
+      // second rule.
+      audienceLean: apparel ? normalizeAudienceLean(storedAudienceLean) : null,
+    })
     const hl = capItemHighlightRepeats((built.value || '').trim())
     if (!hl) {
       // HOLD (PO 2026-08-21): name the reason — the PO's next action — never a generic "empty".
