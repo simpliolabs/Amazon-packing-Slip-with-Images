@@ -24,9 +24,12 @@ import {
   applyTitleTruthNet,
   audienceOfGarmentFamily,
   normalizeAudienceLean,
+  LEAN_FEM_CORE,
+  LEAN_MASC_CORE,
   type PhraseTruthCtx,
 } from './contentTruth'
 import { ihTruthVerdict } from './itemHighlightComposer'
+import { leanExcludesKeyword } from '@/lib/keyword-engine/nicheGuards'
 import {
   pooledNovelFragment,
   buildFragPool,
@@ -566,5 +569,109 @@ describe('promotion regression bar — ihTruthVerdict is a thin wrapper, not a r
     expect(audienceOfGarmentFamily('sweatshirt')).toBe('adult')
     expect(audienceOfGarmentFamily('hoodie')).toBe('adult')
     expect(audienceOfGarmentFamily(null)).toBeNull()
+  })
+})
+
+/**
+ * TASK 7 (2026-09-06, item-highlights-per-design plan). PO ruling verbatim "1. Extend", given after
+ * the final whole-branch reviewer (agent a081fa7a, read-only) probed the realistic six-design fixture
+ * under `audienceLean: 'unisex'` and observed every one of the six shipped lines leading with "Novelty
+ * Shirts for Guys" — REPRODUCED against this file's own HEAD (5144d4e, pre-Task-7):
+ * `phraseTruthVerdict('novelty shirts for guys', { ...unisex tee ctx, field: 'highlights' })` returned
+ * `{ ok: true }` (a defect) because `LEAN_MASC_RE` was `m[ae]n['’]?s?` only — `guys` was invisible to
+ * it, while `phraseTruthVerdict('novelty shirts for men', ...)` already correctly returned
+ * `audience-lean-lie` (the control).
+ *
+ * THE FIX widens the SAME shared predicate rule (c2) already consumes — `LEAN_FEM_RE`/`LEAN_MASC_RE`
+ * — with adult slang only: feminine `+gals`; masculine `+guys|guy|dudes|dude|bros|bro|gents|gent`.
+ * `girls`/`boys` deliberately stay OFF this lexicon and on the KIDS axis (rule (c), `KIDS_AUDIENCE_RE`
+ * above) — the controller's pre-stage ruling (task-7-brief.md) pinned below, so double-classifying a
+ * kids family's correct "shirts for girls" as a forced-gender lie can never recur.
+ *
+ * ONE LEXICON, not four: the core is now EXPORTED from this file as pattern STRINGS (`LEAN_FEM_CORE`/
+ * `LEAN_MASC_CORE`, not compiled RegExp) so the two other module-private copies this task found
+ * (`nicheGuards.ts:220`, `syncListingContent.ts:382` — both already independently drifted, carrying
+ * `female`/`girls?` this file never had) COMPOSE their own extra axis words onto this SAME core
+ * instead of hand-copying it. `contentTruth.ts` is a leaf module (verified before this task: neither
+ * consumer's import chain loops back to itself), so both import directly — the "preferred" path per
+ * the brief, not the enumeration-test fallback (added anyway, belt-and-suspenders, below).
+ */
+describe('Task 7: forced-gender lexicon extended with adult slang — ONE lexicon, both surfaces', () => {
+  const MASC_SLANG = ['for guys', 'guys crewneck', 'for dudes', 'dudes pullover', 'for bros', 'bros hoodie', 'for gents', 'gents sweatshirt']
+  const FEM_SLANG = ['for gals', 'gals crewneck']
+
+  it('REPRODUCTION: rejects masculine slang on the TITLE the same way "for men" already is (field:\'title\', unisex)', () => {
+    for (const p of MASC_SLANG) expect(phraseTruthVerdict(p, SWEATS)).toEqual({ ok: false, reason: 'audience-lean-lie' })
+  })
+  it('rejects masculine slang on ITEM HIGHLIGHTS too — same rule, second field (this is the PO\'s exact live instance)', () => {
+    for (const p of MASC_SLANG) expect(phraseTruthVerdict(p, { ...SWEATS, field: 'highlights' })).toEqual({ ok: false, reason: 'audience-lean-lie' })
+  })
+  it('rejects the feminine addition ("gals") the same way "for women" already is, on both fields', () => {
+    for (const p of FEM_SLANG) {
+      expect(phraseTruthVerdict(p, SWEATS)).toEqual({ ok: false, reason: 'audience-lean-lie' })
+      expect(phraseTruthVerdict(p, { ...SWEATS, field: 'highlights' })).toEqual({ ok: false, reason: 'audience-lean-lie' })
+    }
+  })
+  it('an INCLUSIVE phrase naming both slang genders is still not a forced gender', () => {
+    expect(phraseTruthVerdict('crewneck for guys and gals', SWEATS)).toEqual({ ok: true })
+  })
+  it('never fires without a declared unisex lean — a hard lean keeps ITS OWN slang vocabulary (a lean_male/lean_female SIBLING may still carry it)', () => {
+    expect(phraseTruthVerdict('for guys', { ...SWEATS, audienceLean: 'men' }).ok).toBe(true)
+    expect(phraseTruthVerdict('for gals', { ...SWEATS, audienceLean: 'women' }).ok).toBe(true)
+  })
+  it('word-boundary discipline is unchanged by the extension: germany / human / management / guyana are NOT matched', () => {
+    for (const p of ['germany flag crewneck', 'human rights pullover', 'management team hoodie', 'guyana flag sweatshirt'])
+      expect(phraseTruthVerdict(p, SWEATS)).toEqual({ ok: true })
+  })
+
+  it('KIDS/ADULT AXIS SPLIT — the controller\'s pre-stage ruling, verbatim pins (girls/boys stay OFF the gender lexicon)', () => {
+    const KIDS_UNISEX: PhraseTruthCtx = {
+      garmentFamily: 'kids_tee', spec: TEE.spec, allowedBrand: null,
+      audience: audienceOfGarmentFamily('kids_tee'), audienceLean: 'unisex', field: 'highlights',
+    }
+    // kids family + "shirts for girls" + design lean unisex → ok under (c2) (girls is not in the
+    // gender lexicon) AND ok under (c) (kids audience asserted on a kids family is not foreign).
+    expect(phraseTruthVerdict('shirts for girls', KIDS_UNISEX)).toEqual({ ok: true })
+    // adult unisex family + "novelty shirts for guys" → audience-lean-lie — the PO's exact live
+    // instance ("Novelty Shirts for Guys" on six unisex designs).
+    expect(phraseTruthVerdict('novelty shirts for guys', { ...TEE, audienceLean: 'unisex' }))
+      .toEqual({ ok: false, reason: 'audience-lean-lie' })
+    // lean_male adult family + "for guys" → ok — a hard/soft lean keeps its own gendered vocabulary
+    // (rule (c2) never fires without a declared unisex lean; unchanged by this task).
+    expect(phraseTruthVerdict('for guys', { ...SWEATS, audienceLean: 'men' })).toEqual({ ok: true })
+    // adult family + "for girls" → STILL rejected, but by rule (c) audience-kids-on-adult, NOT (c2) —
+    // unchanged behavior, pinned here so the split between the two axes is visible in one place.
+    expect(phraseTruthVerdict('for girls', SWEATS)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+  })
+
+  it('LEAN_FEM_CORE / LEAN_MASC_CORE are the exact pattern strings the ruling specified (lexicon-content pin)', () => {
+    expect(LEAN_FEM_CORE).toBe(`wom[ae]n['’]?s?|ladies|lady|gals`)
+    expect(LEAN_MASC_CORE).toBe(`m[ae]n['’]?s?|guys|guy|dudes|dude|bros|bro|gents|gent`)
+  })
+
+  /* ── ONE LEXICON: both other copies compose onto the SAME exported core, never hand-copy it ──── */
+  describe('ONE lexicon, not four — the two other copies compose onto the shared core', () => {
+    it('nicheGuards.ts leanExcludesKeyword: the new slang words exclude the SAME way the pre-existing words already did', () => {
+      // BEHAVIORAL proof against the REAL exported function (not merely a source pin) — nicheGuards.ts
+      // has zero OTHER imports (verified before this task), so importing it here carries no
+      // environment risk (no supabase/env-var dependency, unlike syncListingContent.ts below).
+      for (const kw of ['tee for guys', 'tee for dudes', 'tee for bros', 'tee for gents'])
+        expect(leanExcludesKeyword(kw, 'female'), kw).toBe(true)        // excluded, same as "tee for men"
+      expect(leanExcludesKeyword('tee for gals', 'male')).toBe(true)    // excluded, same as "tee for women"
+      expect(leanExcludesKeyword('tee for guys', 'male')).toBe(false)   // same-gender keyword is KEPT
+      expect(leanExcludesKeyword('tee for guys', null)).toBe(false)     // soft/unisex lean: no-op, unchanged
+    })
+    it('nicheGuards.ts and syncListingContent.ts import and compose the shared core — enumeration/source pin (fails if either reverts to a hand-copied literal)', () => {
+      const guards = readFileSync(join(process.cwd(), 'src', 'lib', 'keyword-engine', 'nicheGuards.ts'), 'utf8')
+      const sync = readFileSync(join(process.cwd(), 'src', 'lib', 'sync', 'syncListingContent.ts'), 'utf8')
+      for (const src of [guards, sync]) {
+        expect(src).toContain("from '@/lib/fba/contentTruth'")
+        expect(src).toContain('LEAN_FEM_CORE')
+        expect(src).toContain('LEAN_MASC_CORE')
+      }
+      // listingPipeline.ts and rankAnalysis.ts still carry their OWN independent copies of a SIMILAR
+      // but already-diverged lexicon — explicitly out of scope for Task 7 (task-7-brief.md's Code
+      // Organization names only these two consumers + the core). Documented, not silently ignored.
+    })
   })
 })

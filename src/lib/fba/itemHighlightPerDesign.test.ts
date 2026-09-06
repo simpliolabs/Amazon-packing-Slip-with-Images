@@ -404,6 +404,13 @@ describe('Task 5: per-design audience truth in the Item Highlight composer', () 
     kw('cool print clothing', 8500, 3),
     kw('trendy design gear', 8000, 3),
   ]
+  /** TASK 7 (2026-09-06, PO ruling "1. Extend"): the masculine-slang twin of `WOMEN` above — same
+   *  shape (a bare gendered market phrase, rated true for every design), but the exact live instance
+   *  the final whole-branch reviewer caught: SIX unisex designs shipping "Novelty Shirts for Guys"
+   *  because `guys` was invisible to the pre-Task-7 masculine lexicon (`m[ae]n['’]?s?` only). Deliberately
+   *  NOT reusing NEUTRAL_FILLER's own vocabulary (no shared significant word) so a HOLD here could only
+   *  be the audience rule, never an incidental Task-6 repeat collision. */
+  const MEN_SLANG = kw('motivational shirts guys', 9500, 3)
 
   it('a UNISEX family: a bare gendered market phrase ("...women") composes for NO design — not even the five whose fit is high, and not RK (whose exclusion is independently a FIT fact, proven above)', () => {
     const r = buildItemHighlightsPerDesign({
@@ -438,6 +445,34 @@ describe('Task 5: per-design audience truth in the Item Highlight composer', () 
       familyTitleText: FAMILY_TITLE, audienceLean: 'unisex',
     })
     expect(lineFor(rUnassigned, 'BD')).not.toContain('women')
+  })
+
+  it('TASK 7: a UNISEX family: a bare gendered MASCULINE SLANG market phrase ("...for guys") composes for NO design — the PO\'s exact live instance, reproduced then closed', () => {
+    const r = buildItemHighlightsPerDesign({
+      groups: GROUPS, pool: [...NEUTRAL_FILLER, MEN_SLANG], apparelProduct: true, blankBrand: GILDAN,
+      familyTitleText: FAMILY_TITLE, audienceLean: 'unisex',
+    })
+    for (const k of KEYS) {
+      expect(lineFor(r, k)).not.toContain('guys')
+      expect(lineFor(r, k)).not.toContain('men')            // no bare masculine word leaks through either
+      expect(lineFor(r, k).length).toBeGreaterThanOrEqual(107)   // genuinely composed, not held
+      expect(dupedFoldedTokens(lineFor(r, k))).toEqual([])
+    }
+  })
+
+  it('TASK 7: a lean_male-ASSIGNED design MAY carry "guys" even while the family default is unisex — the assignment wins over the family value, same precedence as the feminine case above', () => {
+    const rAssigned = buildItemHighlightsPerDesign({
+      groups: [BD], pool: [...NEUTRAL_FILLER, MEN_SLANG], apparelProduct: true, blankBrand: GILDAN,
+      familyTitleText: FAMILY_TITLE, audienceLean: 'unisex', audienceLeanByDesign: { BD: 'lean_male' },
+    })
+    expect(lineFor(rAssigned, 'BD')).toContain('motivational shirts guys')
+    // Sanity contrast: the SAME design, SAME pool, no assignment — inherits the family's unisex
+    // default and excludes it.
+    const rUnassigned = buildItemHighlightsPerDesign({
+      groups: [BD], pool: [...NEUTRAL_FILLER, MEN_SLANG], apparelProduct: true, blankBrand: GILDAN,
+      familyTitleText: FAMILY_TITLE, audienceLean: 'unisex',
+    })
+    expect(lineFor(rUnassigned, 'BD')).not.toContain('guys')
   })
 
   it('a UNISEX design whose OWN name carries the gender ("Lady Boss") keeps its own name-phrase, but still rejects an UNRELATED gendered market phrase — the exemption covers the design\'s identity, not every gendered phrase in its pool', () => {
@@ -502,22 +537,39 @@ describe('Task 5: per-design audience truth in the Item Highlight composer', () 
  * vehicle any more. Flagging for the controller to decide whether SHARED is worth enriching with more
  * gender-neutral phrasing; not done here (SHARED is reused file-wide by dozens of other tests whose
  * own numbers this task must not disturb).
+ *
+ * TASK 7 CONSEQUENCE (2026-09-06, lexicon extension, PO ruling "1. Extend") — REPORTED, NOT
+ * RE-FIXTURED, same guardrail as the Task 6 consequence directly above: extending `LEAN_MASC_RE` to
+ * recognize `guys` reclassifies SHARED's own "novelty shirts for guys" row from truth-clean into a
+ * TENTH `audience-lean-lie` drop (confirmed via the composer's own `IH_COMPOSER_NULL` diagnostic, run
+ * 2026-09-06: `"candidates":2,"picked":0,"truthDrops":{"audience-lean-lie":10}` for BD/BM/DQ/RIACG/SM;
+ * RK's own count is 9, not 10, for the same fit-1-excludes-WOMEN-first reason noted above). All SIX
+ * designs still HOLD (unchanged qualitative outcome — this pool already held before Task 7), but the
+ * HOLD REASON moves EARLIER in the composer's own gate order: only 2 truth-clean candidates remain
+ * (that design's OWN name phrase + "statement tee shirts") — 2 < MIN_CANDIDATES (3) fires the
+ * `too-few-candidates` gate (`itemHighlightComposer.ts:339`) BEFORE the repeat-filter stage the OLD
+ * 3-candidate/2-Tier-A count used to reach, so the hold reason changes from `under-floor-no-repeat` to
+ * `thin-candidates`. Tier-A reach is unchanged in spirit (2 mutually non-repeating candidates either
+ * way, still below the floor of 3) — only WHICH gate reports it changes, because one of the two
+ * candidates that used to survive to the repeat stage is now excluded earlier, on TRUTH grounds
+ * instead of on REPEAT grounds. Same non-fix as Task 6's own note: not a bug, and not re-fixtured here
+ * for the same reason (SHARED is reused file-wide; enriching it is the controller's call).
  */
-describe('T5-g: the realistic six-design fixture — TASK 6 CONSEQUENCE: now HOLDS under a UNISEX family lean', () => {
-  it('all six designs HOLD under-floor-no-repeat — Task 6\'s absolute rule stacked on Task 5\'s forced-gender rule leaves only 2 mutually non-repeating truthful candidates per design on this pool, below MIN_CANDIDATES (3)', () => {
+describe('T5-g: the realistic six-design fixture — TASK 6+7 CONSEQUENCE: now HOLDS under a UNISEX family lean', () => {
+  it('all six designs HOLD thin-candidates (Task 7: was under-floor-no-repeat before the lexicon extension) — Task 5+6+7 stacked leave only 2 truth-clean candidates per design on this pool, below MIN_CANDIDATES (3), one gate earlier than before', () => {
     const r = buildItemHighlightsPerDesign({
       groups: GROUPS, pool: POOL, apparelProduct: true, blankBrand: GILDAN,
       familyTitleText: FAMILY_TITLE, audienceLean: 'unisex',
     })
     expect(GILDAN.spec.fit).toBe('Classic')
     for (const k of KEYS) {
-      expect(holdFor(r, k)).toBe('under-floor-no-repeat')
+      expect(holdFor(r, k)).toBe('thin-candidates')
       expect(lineFor(r, k)).toBe('')
     }
     // Also assert on the RETURNED BYTES directly (per_child/perDesign values, not the lowercased
     // helper) — matches the promoted minor's own wording ("assert on returned bytes").
     for (const d of r.perDesign) {
-      expect(d.hold).toBe('under-floor-no-repeat')
+      expect(d.hold).toBe('thin-candidates')
       expect(d.value).toBe('')
     }
   })

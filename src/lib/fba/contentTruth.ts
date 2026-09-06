@@ -257,10 +257,23 @@ const isDesignOwnWord = (hit: string, design: ReadonlySet<string>): boolean => {
 const foreignAudienceHits = (phrase: string, re: RegExp, design: ReadonlySet<string>): string[] =>
   [...phrase.matchAll(re)].map((m) => m[0]).filter((h) => !isDesignOwnWord(h, design))
 
-/** The two halves of the FORCED-GENDER rule. Adult gender words only — kids words are the
- *  kids/adult audience rule's business, and a phrase naming BOTH halves is INCLUSIVE, not forced. */
-const LEAN_FEM_RE = /\b(?:wom[ae]n['’]?s?|ladies|lady)\b/i
-const LEAN_MASC_RE = /\b(?:m[ae]n['’]?s?)\b/i
+/** The two halves of the FORCED-GENDER rule, as pattern STRINGS (not compiled RegExp) — the
+ *  canonical, exported core. Adult gender words only — kids words are the kids/adult audience
+ *  rule's business, and a phrase naming BOTH halves is INCLUSIVE, not forced.
+ *  EXTENDED (Task 7, PO ruling 2026-09-06 "1. Extend", live: six unisex designs shipped "Novelty
+ *  Shirts for Guys" because `guys` was invisible to the old masculine-only lexicon) with `gals`
+ *  (feminine) and `guys|guy|dudes|dude|bros|bro|gents|gent` (masculine) — ADULT gender words only.
+ *  `girls`/`boys` deliberately stay OFF this lexicon and on the kids axis (KIDS_AUDIENCE_RE above):
+ *  adding them here would double-classify a kids family's correct "shirts for girls" as a forced-
+ *  gender lie under rule (c2) below (the controller's pre-stage ruling, see task-7-brief.md).
+ *  EXPORTED as strings — not a compiled RegExp — so the two other module-private copies of this
+ *  lexicon (nicheGuards.ts, syncListingContent.ts; both already independently drifted, carrying
+ *  `female`/`girls?` this file never had) COMPOSE their own extra axis words onto this SAME core
+ *  instead of hand-copying it — the class of drift this task exists to end. */
+export const LEAN_FEM_CORE = `wom[ae]n['’]?s?|ladies|lady|gals`
+export const LEAN_MASC_CORE = `m[ae]n['’]?s?|guys|guy|dudes|dude|bros|bro|gents|gent`
+const LEAN_FEM_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE})\\b`, 'i')
+const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b`, 'i')
 /** GLOBAL twins of the two regexes above, for Item Highlights only (Task 5) — `foreignAudienceHits`
  *  needs every match (`matchAll`), not merely whether one exists, so it can tell a phrase's OWN
  *  gendered hit (the design's own name — exempt) from a foreign one (a market audience claim —
