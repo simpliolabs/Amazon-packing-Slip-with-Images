@@ -241,6 +241,12 @@ describe('union-title coverage is now PER DESIGN + every sibling name stripped',
     expect(makeCoverageChecker(BM.titles[0])('gym motivation shirts')).toBe(false)
     const r = build([phrase, ...POOL])
     expect(lineFor(r, 'DQ')).not.toContain('gym motivation shirts')
+    // POSITIVE half (fix round 1, Important #2): the old union-of-titles model would ALSO have
+    // excluded this phrase from BM (DQ's title covering it used to poison the shared pool for every
+    // design). BM's OWN title does not cover it, so per-design coverage must let it survive into
+    // BM's line — this is the assertion that actually distinguishes per-design coverage from the
+    // union model line 2478 replaced.
+    expect(lineFor(r, 'BM')).toContain('gym motivation shirts')
   })
 
   it('a phrase naming ANY design ("beast mode shirt", "real king tee") is excluded from every OTHER design even when rated fit 3 under all of them', () => {

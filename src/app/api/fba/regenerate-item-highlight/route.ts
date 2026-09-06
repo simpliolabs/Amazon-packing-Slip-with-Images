@@ -159,7 +159,7 @@ export async function POST(req: NextRequest) {
         const reasons = [...new Set(built.perDesign.map((d) => d.hold).filter((h): h is NonNullable<typeof h> => !!h))]
         const missing = built.shared.missingDesigns
         return NextResponse.json({
-          error: `Shared Item Highlight HELD: ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')}${missing.length ? ` (unrated designs: ${missing.join(', ')})` : ''} — kept the existing values.`,
+          error: `Item Highlight HELD for every design (${built.perDesign.length}): ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')}${missing.length ? ` (unrated designs: ${missing.join(', ')})` : ''} — kept the existing values.`,
           hold: reasons[0] ?? 'under-floor', missing_designs: missing,
           per_design: built.perDesign.map((d) => ({ designKey: d.designKey, designName: d.designName, hold: d.hold })),
         }, { status: 422 })

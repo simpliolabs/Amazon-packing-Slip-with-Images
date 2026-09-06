@@ -11827,7 +11827,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // scoped to the group's own titles + the family pool minus other designs' tokens. The
       // broadcast detail row becomes a per-design MARKER with NO line — a broadcast Ship can never
       // push one design's line to every SKU (the push seam resolves per SKU from the array).
-      onProgress(`Composing the shared Item Highlight across ${designGroupContexts.length} designs...`)
+      onProgress(`Composing per-design Item Highlights across ${designGroupContexts.length} designs...`)
       const built = buildItemHighlightsPerDesign({
         groups: designGroupContexts.map((c) => ({
           key: c.key, designName: c.designName, skus: c.skus,
@@ -11857,7 +11857,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         per_design: true,
         hold: built.shared.hold,
         reason: composed > 0
-          ? `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): ONE shared line, design names stripped, every phrase rated >= 2 under EVERY design (${built.shared.designKeys.length} designs) — carried per SKU through per_child_item_highlights.`
+          ? `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): one Item Highlight line PER DESIGN, each rated under its own design (${composed} of ${built.shared.designKeys.length} designs composed) — carried per SKU through per_child_item_highlights.`
           : `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): HELD for every design — ${IH_HOLD_MESSAGES[built.shared.hold ?? 'under-floor']}${built.shared.missingDesigns.length ? ` (unrated: ${built.shared.missingDesigns.join(', ')})` : ''}.`,
       })
     } else {
