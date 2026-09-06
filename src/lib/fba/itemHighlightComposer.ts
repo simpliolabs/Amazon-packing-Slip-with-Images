@@ -196,6 +196,56 @@ export interface ComposerResult {
   stage: ComposerNullStage | null
 }
 
+/** FIX ROUND 1 (#1, PO-controller ruling 2026-09-06): `repeatBlocked` used to fire the instant ANY
+ *  Tier-B candidate merely fit the remaining budget — not when a repeat would actually have reached
+ *  the floor. Reproduced against unmodified HEAD 7fc05ae: pool ['retro sunset vibes','coastal palm
+ *  energy','retro palm','retro cactus'] has exactly one Tier-B candidate that fits budget ('retro
+ *  cactus'), so the old flag fired and named `under-floor-no-repeat` — but the best ANY repeat-
+ *  permitting selection can reach on that pool is 53 chars, nowhere near the 107 floor. The Task 6
+ *  repro pool (crewneck/fall-sweatshirts/…) is the control case: a repeat-permitting selection there
+ *  really does reach 122 chars, so `under-floor-no-repeat` is correct for it.
+ *
+ *  This shadow pass is the fix: one cheap, deterministic greedy walk over the SAME already-filtered
+ *  `candidates` (novelty check, truth stage, legal door already applied) plus the spec fact bank,
+ *  permitting a candidate the instant it adds ANY new folded token (Tier A or B — only "adds nothing
+ *  new" is excluded, matching Task 2's pre-Task-6 admission rule). It answers exactly one question —
+ *  "could a repeat-permitting selection reach MIN?" — and is discarded immediately after; it never
+ *  writes to the real `picked`/`usedFolded` and cannot change a single shipped byte.
+ *
+ *  Deliberately simplified vs. the real two-loop selection (no garment-surface-variety ordering, no
+ *  Amazon ≤2-per-word cap, no "brand appears once" rule): those refinements only affect WHICH phrases
+ *  compose, never whether 107 chars of some repeat-permitting combination is reachable at all, and
+ *  reproducing them here would duplicate the selection loop the brief asks this pass to avoid. */
+function shadowRepeatReachesFloor(
+  candidates: readonly ComposerPoolRow[],
+  basePicked: readonly string[],
+  baseUsedFolded: ReadonlySet<string>,
+  spec: ComposerOpts['spec'],
+  min: number,
+  max: number,
+): boolean {
+  let len = basePicked.reduce((n, p, i) => n + p.length + (i ? 2 : 0), 0)
+  const used = new Set(baseUsedFolded)
+  const tryAdd = (phrase: string, folded: readonly string[]) => {
+    if (len >= min || folded.every((w) => used.has(w))) return   // already at floor, or adds nothing new
+    const draftLen = len + (len ? 2 : 0) + phrase.length
+    if (draftLen > max) return
+    len = draftLen
+    folded.forEach((w) => used.add(w))
+  }
+  for (const c of candidates) {
+    if (len >= min) break
+    const phrase = titleCasePhrase(c.keyword)
+    if (!basePicked.includes(phrase)) tryAdd(phrase, significantFolded(c.keyword))
+  }
+  const factFillers = spec ? [
+    spec.material || '', spec.fit ? `${spec.fit} Fit` : '', spec.unisex === true ? 'Unisex Fit' : '',
+    spec.neck || '', spec.sleeve || '', spec.dye ? `${spec.dye} Fabric` : '',
+  ].filter(Boolean) : []
+  for (const f of factFillers) tryAdd(titleCasePhrase(f), significantFolded(f))
+  return len >= min
+}
+
 /**
  * Compose the Item Highlights line from the rated pool. Returns null when the pool cannot carry
  * the structure (the caller HOLDS the field). `titles` = every title the shipped IH will sit beside.
@@ -257,7 +307,7 @@ export function composeItemHighlightDetailed(
   // 2026-08-21: every null branch below names itself — two 6014 families returned null WITH a full
   // spec available and nobody could say which filter starved them. A silent null is a guess factory.
   const truthDrops: Partial<Record<IhTruthReason, number>> = {}
-  const why = { pool: pool.length, ratedShare: Math.round(ratedShare * 100), requireFit, needBrand, afterFit: 0, candidates: 0, picked: 0, lineLen: 0, truthDrops }
+  const why = { pool: pool.length, ratedShare: Math.round(ratedShare * 100), requireFit, needBrand, afterFit: 0, candidates: 0, picked: 0, lineLen: 0, truthDrops, repeatBlocked: false }
   const nullOut = (stage: ComposerNullStage): ComposerResult => {
     console.log(JSON.stringify({ tag: 'IH_COMPOSER_NULL', stage, ...why }))
     return { line: null, stage }
@@ -320,10 +370,11 @@ export function composeItemHighlightDetailed(
   // DELETED here, not gated behind a constant — only Tier A (every significant token new) ever
   // composes. The existing two-pass order is otherwise unchanged: first prefer candidates
   // introducing a NEW garment surface (the variety craft), then fill remaining budget with any
-  // novel candidate. `repeatBlocked` is set (never cleared) the moment a candidate that WOULD have
-  // fit the budget classifies Tier B — a signal for the caller ("the floor was reachable only via a
-  // repeat"), read once after both loops finish; it plays no part in selection.
-  let repeatBlocked = false
+  // novel candidate. `tierBFitBudgetSeen` is set (never cleared) the moment a candidate that WOULD
+  // have fit the budget classifies Tier B — a RAW signal, cheap to compute inline; it plays no part
+  // in selection and is NOT itself the hold-reason decision (FIX ROUND 1, #1 below gates it on
+  // whether a repeat-permitting selection would actually have reached the floor).
+  let tierBFitBudgetSeen = false
   for (const preferNewGarment of [true, false]) {
     for (const c of candidates) {
       if (picked.length >= 7 || lineLen() >= AIM) break
@@ -331,7 +382,7 @@ export function composeItemHighlightDetailed(
       if (picked.includes(phrase) || phrase === brandPick) continue
       const folded = significantFolded(c.keyword)
       const tier = classifyTier(folded, usedFolded)
-      if (tier === 'B' && lineLen() + (picked.length ? 2 : 0) + phrase.length <= MAX) repeatBlocked = true
+      if (tier === 'B' && lineLen() + (picked.length ? 2 : 0) + phrase.length <= MAX) tierBFitBudgetSeen = true
       if (tier !== 'A') continue                                       // absolute: no repeat, full stop
       const gm = c.keyword.match(GARMENT_SURFACE_RE)?.[0]?.toLowerCase().replace(/[-\s]/g, '').replace(/s$/, '')
       if (preferNewGarment && gm && usedGarmentSurfaces.has(gm)) continue
@@ -350,10 +401,18 @@ export function composeItemHighlightDetailed(
     }
   }
   // A pool-sourced brand phrase IS a pool pick for the viability count; the spec phrase is not.
-  // TASK 6: when the shortfall is the absolute no-repeat rule rejecting content that would have
-  // cleared this gate (repeatBlocked), name that — not the generic "pool too thin" reason — so the
-  // PO sees the true cause.
-  if (picked.length + (brandFromPool ? 1 : 0) < MIN_CANDIDATES) { why.picked = picked.length; return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'too-few-picked') }
+  // TASK 6 FIX ROUND 1 (#1): when the shortfall is the absolute no-repeat rule rejecting content
+  // that would have cleared this gate, name that — not the generic "pool too thin" reason — so the
+  // PO sees the true cause. But only when a repeat-permitting selection would ACTUALLY have reached
+  // the floor (the shadow pass): `tierBFitBudgetSeen` alone over-fires (Important #1's reproduction —
+  // a Tier-B candidate can fit the remaining budget while still leaving the line far under 107).
+  if (picked.length + (brandFromPool ? 1 : 0) < MIN_CANDIDATES) {
+    why.picked = picked.length
+    const repeatBlocked = tierBFitBudgetSeen &&
+      shadowRepeatReachesFloor(candidates, withBrand(picked), usedFolded, opts?.spec, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max)
+    why.repeatBlocked = repeatBlocked
+    return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'too-few-picked')
+  }
   if (brandPick) picked.push(brandPick)
   why.picked = picked.length
 
@@ -401,8 +460,8 @@ export function composeItemHighlightDetailed(
     const usedBeforePad = new Set(usedFolded)
     // TASK 6: the same absolute rule as the pool loop above — Tier B (vs. the FROZEN `usedBeforePad`
     // snapshot, so the exemption in the comment above is untouched) is deleted, not gated. A spec
-    // fact that repeats a POOL token is still rejected outright; `repeatBlocked` is the SAME
-    // composer-wide flag the pool loop sets (one signal, read once below).
+    // fact that repeats a POOL token is still rejected outright; `tierBFitBudgetSeen` is the SAME
+    // composer-wide raw signal the pool loop sets (one signal, read once below via the shadow pass).
     for (const f of factFillers) {
       if (lineLen() >= MIN) break
       const phrase = titleCasePhrase(f)
@@ -410,7 +469,7 @@ export function composeItemHighlightDetailed(
       const folded = significantFolded(f)
       if (!folded.some((w) => !usedFolded.has(w))) continue           // must add something new (live)
       const tier = classifyTier(folded, usedBeforePad)
-      if (tier === 'B' && lineLen() + 2 + phrase.length <= CONTENT_CONTRACT.itemHighlights.max) repeatBlocked = true
+      if (tier === 'B' && lineLen() + 2 + phrase.length <= CONTENT_CONTRACT.itemHighlights.max) tierBFitBudgetSeen = true
       if (tier !== 'A') continue                                      // absolute: no repeat, even vs. the pad snapshot
       if (lineLen() + 2 + phrase.length > CONTENT_CONTRACT.itemHighlights.max) continue
       if (ihRepeatViolations([...picked, phrase].join(', ')).length > 0) continue
@@ -419,9 +478,15 @@ export function composeItemHighlightDetailed(
     }
   }
   why.picked = picked.length; why.lineLen = lineLen()
-  // TASK 6: same repeatBlocked-aware naming as the too-few-picked gate above — the absolute
-  // no-repeat rule, not a thin pool/spec, is why the floor was missed.
-  if (lineLen() < MIN) return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'under-floor-after-pad')
+  // TASK 6 FIX ROUND 1 (#1): same shadow-gated naming as the too-few-picked gate above — the
+  // absolute no-repeat rule, not a thin pool/spec, is why the floor was missed, but only when a
+  // repeat-permitting selection would ACTUALLY have reached MIN (see shadowRepeatReachesFloor).
+  if (lineLen() < MIN) {
+    const repeatBlocked = tierBFitBudgetSeen &&
+      shadowRepeatReachesFloor(candidates, picked, usedFolded, opts?.spec, MIN, CONTENT_CONTRACT.itemHighlights.max)
+    why.repeatBlocked = repeatBlocked
+    return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'under-floor-after-pad')
+  }
 
   // Trademark door on the final bytes (defense in depth — candidates are already door-clean, but
   // the wear-fact / brand / filler joins and future edits must never reopen it).

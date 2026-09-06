@@ -484,7 +484,11 @@ describe('Task 5: per-design audience truth in the Item Highlight composer', () 
  * under `audienceLean: 'unisex'` the forced-gender rule (Task 5) drops every bare gendered phrase as
  * `audience-lean-lie` (9 of the 12 scoped rows per design — confirmed via the composer's own
  * `IH_COMPOSER_NULL` diagnostic, run 2026-09-06: `"candidates":3,"picked":2,"truthDrops":
- * {"audience-lean-lie":9}` for every design), leaving only 3 truth-clean candidates per design: that
+ * {"audience-lean-lie":9}` for BD/BM/DQ/RIACG/SM; RK's own count is 8, not 9 — RK's fit-1 rating on
+ * the WOMEN phrase (see the `WOMEN` const above) excludes that one row on FIT alone before the
+ * audience check ever runs, so it is never counted as an `audience-lean-lie` drop for RK specifically
+ * — FIX ROUND 1 (2026-09-06) correction, per the fix-round-1 findings: this comment previously said
+ * "9 for every design"), leaving only 3 truth-clean candidates per design: that
  * design's OWN name phrase, "novelty shirts for guys", and "statement tee shirts" — and the latter
  * two themselves share `shirt`, so only 2 of the 3 are ever mutually Tier-A. 2 < MIN_CANDIDATES (3),
  * so the composer holds before the pad loop even runs (Tier-A reach: 2 candidates, 0 chars composed).

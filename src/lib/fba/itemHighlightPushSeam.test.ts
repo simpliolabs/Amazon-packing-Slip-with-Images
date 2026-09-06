@@ -86,6 +86,7 @@ vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { c
 import { buildItemHighlightsPerDesign } from './listingPipeline'
 import { buildPerSkuItemHighlightMap, NO_LINE_FOR_DESIGN } from './perDesignItemHighlights'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
+import { ihFoldWord, IH_INSIGNIFICANT } from './productDetailAttrs'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
 
 const KEYS = ['BD', 'BM', 'DQ', 'RIACG', 'RK', 'SM'] as const
@@ -240,5 +241,157 @@ describe('push seam wire: a held design is skipped at the map, never given a sib
       // never borrowed RK's (or any sibling's) line, and never RK's specific hold reason
       for (const s of g.skus) expect(values.get(s.sku)).toBeUndefined()
     }
+  })
+})
+
+/**
+ * FIX ROUND 1 (2026-09-06), Important #2 + #3 (controller RULING, task-6-fix-round-1-findings.md):
+ * a SECOND scenario, with its OWN mutually token-disjoint shared bank — `POOL`/`SHARED`/`MARGIN`
+ * above are UNTOUCHED, and the hold-scenario tests above are the honest record of what the absolute
+ * rule does on THAT pool (every design HOLDS there — see the file header). This scenario restores
+ * BOTH lost proofs on a pool that actually composes:
+ *   - Important #2: the six-design zero-duplicate-folded-token pin, on a pool where a Tier-B
+ *     regression WOULD produce a duplicate (ADV2_* below) — not a pool so sparse nothing could ever
+ *     repeat.
+ *   - Important #3: the REAL `buildItemHighlightsPerDesign` output driven through the REAL
+ *     `buildPerSkuItemHighlightMap` (the wire the file's own header names as its purpose), proving six
+ *     distinct mapped values and BM's two SKUs both carrying BM's line.
+ *
+ * FIXTURE. Reuses this file's own `OWN_PHRASES` (unchanged, module-level, defined above) as each
+ * design's identity phrase. `SHARED2` is a NEW, mutually disjoint 2-phrase bank (unlike the ORIGINAL
+ * `SHARED`, whose two phrases both carried `tee` — the exact collision that sank the hold-scenario
+ * fixture under the absolute rule): 'graphic novelty print' (graphic/novelty/print) and 'funny gift
+ * idea today' (funny/gift/idea/today) share NO folded token with each other, with any `OWN_*` phrase,
+ * or with any `ADV2_*` phrase below (checked by hand and confirmed empirically — see the report's
+ * probe output). `ADV2_*` is ONE Tier-B-tempting phrase PER DESIGN: it repeats that design's OWN
+ * name tokens (e.g. `ADV2_BD` repeats `boss`/`definition` from `OWN_BD`) while adding two brand-new
+ * words ("daily grind") — high enough volume (9200, between each `OWN_*`'s ~9994-9999 and `SHARED2`'s
+ * 9000/8000) that it would rank ABOVE `SHARED2` in the composer's fit/volume sort, so a Tier-B pass
+ * would readily pick it up once `OWN_*` already established the repeat. `STRICT NAMES` (designScope.ts)
+ * keeps each `ADV2_*` foreign to every OTHER design, exactly like `OWN_*` — it is a candidate ONLY
+ * for the one design whose name it carries, so every design gets its OWN adversarial temptation.
+ * (Note: an early draft used "champion" as the adversarial filler word and every design HELD
+ * `too-few-candidates` — `champion` is Carhartt's sibling in `APPAREL_BRAND_RE`'s competitor-brand
+ * lexicon (contentTruth.ts), so `ihTruthVerdict` correctly dropped it before selection ever ran; not
+ * a repeat-rule finding, but recorded here since it cost real debugging time and the next person
+ * editing this fixture will hit the same trap if they reach for a "motivational" word.)
+ */
+describe('FIX ROUND 1 (#2 + #3): a genuinely COMPOSING six-design pool, own mutually token-disjoint shared bank — restores the lost wire-liveness + zero-duplicate proofs', () => {
+  const SHARED2: AnalyzedKeyword[] = [
+    kw('graphic novelty print', 9000, 3),
+    kw('funny gift idea today', 8000, 3),
+  ]
+  /** ONE Tier-B-tempting phrase per design — repeats that design's OWN name tokens (from `OWN_*`
+   *  above), adds two brand-new words, and STRICT NAMES keeps it foreign to every sibling design.
+   *  The absolute rule (Task 6) must reject every one of these; if it did not, the design's line
+   *  would repeat its own name token twice (see the report's OLD-vs-NEW composer demonstration). */
+  const ADV2_BD = kw('boss definition daily grind', 9200, 3)
+  const ADV2_BM = kw('beast mode daily grind', 9200, 3)
+  const ADV2_DQ = kw('dont quit daily grind', 9200, 3)
+  const ADV2_RIACG = kw('relax ceo daily grind', 9200, 3)
+  const ADV2_RK = kw('real king daily grind', 9200, 3)
+  const ADV2_SM = kw('self made daily grind', 9200, 3)
+  const ADV2_PHRASES = [ADV2_BD, ADV2_BM, ADV2_DQ, ADV2_RIACG, ADV2_RK, ADV2_SM]
+
+  const POOL2: AnalyzedKeyword[] = [...OWN_PHRASES, ...ADV2_PHRASES, ...SHARED2]
+  const r2 = build(POOL2)
+  const { values: values2, skipped: skipped2 } = buildPerSkuItemHighlightMap(r2.perChild, ALL_TARGETS, null)
+
+  /** Independent fold over the RETURNED bytes — deliberately NOT the composer's own private
+   *  `significantFolded` (itemHighlightComposer.ts) — mirrors itemHighlightPerDesign.test.ts's own
+   *  helper (same fold rules: `ihFoldWord` + the gender-plural collapse) so this proves the WIRE's
+   *  output obeys the no-repeat ruling, not merely the composer's internal bookkeeping. */
+  const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
+  const dupedFoldedTokens = (line: string): string[] => {
+    const counts = new Map<string, number>()
+    for (const raw of line.toLowerCase().split(/[\s,]+/).filter(Boolean)) {
+      const f = ihFoldWord(raw)
+      const w = GENDER_FOLDS[f] ?? f
+      if (!w || IH_INSIGNIFICANT.has(w)) continue
+      counts.set(w, (counts.get(w) ?? 0) + 1)
+    }
+    return [...counts.entries()].filter(([, c]) => c > 1).map(([w]) => w)
+  }
+
+  it('all six designs compose (no hold) — the sanity precondition every assertion below needs', () => {
+    for (const k of KEYS) {
+      const d = r2.perDesign.find((p) => p.designKey === k)!
+      expect(d.hold).toBeNull()
+      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      expect(d.value.length).toBeLessThanOrEqual(125)
+    }
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('Important #2: zero duplicate folded significant tokens in EVERY returned line (folded independently of the composer\'s own bookkeeping)', () => {
+    for (const k of KEYS) {
+      const d = r2.perDesign.find((p) => p.designKey === k)!
+      expect(dupedFoldedTokens(d.value)).toEqual([])
+    }
+  })
+
+  it('the absolute rule rejects the Tier-B-tempting ADV2 phrase for every design — each design\'s OWN name token appears exactly ONCE, never twice, even though the tempting phrase outranks SHARED2 on volume', () => {
+    const nameTokenOf: Record<string, string> = { BD: 'boss', BM: 'beast', DQ: 'quit', RIACG: 'ceo', RK: 'king', SM: 'made' }
+    for (const k of KEYS) {
+      const d = r2.perDesign.find((p) => p.designKey === k)!
+      const words = d.value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+      const token = nameTokenOf[k]
+      expect(words.filter((w) => w === token).length).toBe(1)
+      // never the adversarial phrase's own distinguishing tail either
+      expect(d.value.toLowerCase()).not.toContain('daily grind')
+    }
+  })
+
+  it('Important #3: real buildItemHighlightsPerDesign output threads through the REAL buildPerSkuItemHighlightMap — six DISTINCT mapped values, nothing skipped', () => {
+    expect(values2.size).toBe(ALL_TARGETS.length)
+    expect(skipped2.length).toBe(0)
+    const distinctLines = new Set([...values2.values()])
+    expect(distinctLines.size).toBe(KEYS.length)
+  })
+
+  it('every SKU maps to ITS OWN design\'s line, never a sibling\'s — BM\'s two SKUs both carry BM\'s line', () => {
+    for (const g of GROUPS) {
+      const d = r2.perDesign.find((p) => p.designKey === g.key)!
+      for (const s of g.skus) expect(values2.get(s.sku)).toBe(d.value)
+    }
+    // BM specifically: two SKUs, ONE design, the SAME composed value on both.
+    expect(values2.get(BM.skus[0].sku)).toBe(values2.get(BM.skus[1].sku))
+    expect(values2.get(BM.skus[0].sku)).toBe(r2.perDesign.find((p) => p.designKey === 'BM')!.value)
+  })
+
+  it('"Classic" appears in every composed line and is produced ONLY by the pad\'s `${spec.fit} Fit` — never a coincidence of pool wording (no pool phrase in POOL2 contains "classic")', () => {
+    expect(POOL2.every((k) => !/classic/i.test(k.keyword))).toBe(true)
+    for (const k of KEYS) {
+      const d = r2.perDesign.find((p) => p.designKey === k)!
+      expect(d.value.toLowerCase()).toContain('classic fit')
+    }
+  })
+
+  /**
+   * PAD-CHAIN TRACE for BD (report requirement — trace ONE design fully):
+   * candidates sorted fit(tie=3) then volume DESC: OWN_BD(9999) > ADV2_BD(9200, REJECTED — repeats
+   * boss/definition) > SHARED2[0] 'graphic novelty print'(9000) > SHARED2[1] 'funny gift idea
+   * today'(8000). None of the three surviving phrases carry a GARMENT_SURFACE_RE token, so pass 1
+   * (preferNewGarment) picks nothing; pass 2 picks all three Tier-A phrases: "Boss Definition
+   * Motivation Wear, Graphic Novelty Print, Funny Gift Idea Today" = 77 chars (pool-only, well under
+   * the 89-char ceiling past which `material` alone would cross 107 and `fit` would never be
+   * reached). `opts.spec` = GILDAN (material 'Ring-Spun Cotton', fit 'Classic', neck 'Crew Neck',
+   * sleeve 'Short Sleeve'; no `unisex`/`dye`). Pad priority order: material first — 77+2+16=95, still
+   * under 107 — then fit — 95+2+11=108, crossing the floor — so the pad loop STOPS at `fit`; neck/
+   * sleeve are never tried. Final: "Boss Definition Motivation Wear, Graphic Novelty Print, Funny
+   * Gift Idea Today, Ring-Spun Cotton, Classic Fit" (108 chars). "Classic" is verified via the exact
+   * composed value in the assertion below (never `.toBe()` on the whole string — property-only, per
+   * this file's own discipline — but pinned to `.toContain` so a regression that drops the pad chain
+   * before `fit` is caught).
+   */
+  it('BD pad-chain trace: pool-only (OWN_BD + SHARED2, ADV2_BD rejected) is 77 chars; the pad walks material (95) then fit (108, crossing the floor) — neck/sleeve never tried', () => {
+    const bd = r2.perDesign.find((p) => p.designKey === 'BD')!
+    expect(bd.value).toContain('Boss Definition Motivation Wear')
+    expect(bd.value).toContain('Graphic Novelty Print')
+    expect(bd.value).toContain('Funny Gift Idea Today')
+    expect(bd.value).toContain('Ring-Spun Cotton')
+    expect(bd.value).toContain('Classic Fit')
+    expect(bd.value).not.toContain('Crew Neck')                      // pad stopped at `fit` — 108 >= 107
+    expect(bd.value.length).toBe(108)
   })
 })

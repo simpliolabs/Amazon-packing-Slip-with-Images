@@ -13,7 +13,7 @@
  *    truth, theme-fit >= 2 on rated pools, oversized = Comfort Colors ONLY, brand waterfall INSIDE
  *    the composer (never a post-net rewrite).
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { composeItemHighlight, composeItemHighlightDetailed, ihTruthVerdict, ihAudienceOf } from './itemHighlightComposer'
 import { ensureBlankBrandInHighlights, DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { CONTENT_CONTRACT } from './contentContract'
@@ -591,10 +591,42 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     // MIN_CANDIDATES(3) too. No spec is passed, so there is no pad path either. Before Task 6 this
     // ran the pool loop's OWN Tier-B fallback to reach 107+ (the test this replaces asserted exactly
     // that); that fallback is deleted, so this now HOLDS.
+    // FIX ROUND 1 (#1): this pool is also the CORRECT-attribution control case — a repeat-permitting
+    // (Tier-B-allowed) selection here really does reach 122 chars (well past 107), so the shadow
+    // pass (`shadowRepeatReachesFloor`) confirms it and `under-floor-no-repeat` is the true reason,
+    // unlike the mis-attribution repro pool in the next test. Assert the `why` diagnostic's
+    // `repeatBlocked` (Minor #4, same finding/round) reflects that confirmation.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     const res = composeItemHighlightDetailed(pool, [], {})
     expect(res.line).toBeNull()
     expect(res.stage).toBe('under-floor-no-repeat')
+    const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(logged.repeatBlocked).toBe(true)
+    logSpy.mockRestore()
     expect(composeItemHighlight(pool, [], {})).toBeNull()
+  })
+
+  it('FIX ROUND 1 (#1, PO-controller ruling 2026-09-06): `repeatBlocked` no longer fires merely because a Tier-B candidate fits the remaining budget — the task reviewer\'s reproduction (agent aedabd84) against unmodified HEAD 7fc05ae shows the OLD wiring named `under-floor-no-repeat` here even though the BEST any repeat-permitting selection could ever reach on this pool is 53 chars, nowhere near the 107 floor', () => {
+    const pool = [
+      { keyword: 'retro sunset vibes', searchVolume: 500, themeFit: 3 },
+      { keyword: 'coastal palm energy', searchVolume: 450, themeFit: 3 },
+      { keyword: 'retro palm', searchVolume: 400, themeFit: 3 },   // repeats BOTH `retro` and `palm` — adds nothing new, never even Tier B
+      { keyword: 'retro cactus', searchVolume: 350, themeFit: 3 }, // repeats `retro`, adds `cactus` — the ONLY Tier-B candidate, and it fits the remaining budget
+    ]
+    // Tier A alone: "Retro Sunset Vibes, Coastal Palm Energy" (~40 chars, 2 picks) — under
+    // MIN_CANDIDATES(3), no spec/pad path. Composing the one Tier-B candidate ("Retro Cactus") on
+    // top only ever reaches "Retro Sunset Vibes, Coastal Palm Energy, Retro Cactus" — 53 chars — so
+    // a repeat could NEVER have reached 107 here. The pre-Fix-Round-1 wiring still named this stage
+    // `under-floor-no-repeat` because it only checked "does a Tier-B candidate fit the remaining
+    // budget", never "would it actually reach MIN". The shadow pass now catches this: the true
+    // pre-existing reason (`too-few-picked`, only 2 mutually non-repeating candidates) ships.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.line).toBeNull()
+    expect(res.stage).toBe('too-few-picked')
+    const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(logged.repeatBlocked).toBe(false)
+    logSpy.mockRestore()
   })
 
   it('the spec-fact PAD loop applies the same absolute rule: a repeat-token filler (`material` restating `cotton`) never composes; a non-repeating one (`fit`) that alone reaches the floor does', () => {

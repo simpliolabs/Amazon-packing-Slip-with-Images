@@ -48,11 +48,17 @@ export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
   // sibling that was separately unrated).
   'designs-unrated': 'Held: this design\'s own rating share is too thin — run the per-design theme rating (keyword-pool/rerate { per_design: true }) first',
   // TASK 6 (2026-09-06, PO verbatim "2. No Repeat as per Amazon Ruules"): distinct from `under-floor`
-  // — a repeat WOULD reach the floor here (that's how `repeatBlocked` is detected), but the PO's
-  // ruling forbids composing one absolutely (stricter than Amazon's own ≤2 cap), so the composer
-  // never tries. Never a silently shortened line and never a repeat to reach the floor — the design
-  // HOLDS and names the same PO action as `under-floor` (more/varied keywords let Tier A alone reach
-  // the floor).
+  // — a repeat WOULD reach the floor here, but the PO's ruling forbids composing one absolutely
+  // (stricter than Amazon's own ≤2 cap), so the composer never tries. Never a silently shortened line
+  // and never a repeat to reach the floor — the design HOLDS and names the same PO action as
+  // `under-floor` (more/varied keywords let Tier A alone reach the floor).
+  // FIX ROUND 1 (#1, 2026-09-06): the ORIGINAL wiring named this stage the moment a Tier-B candidate
+  // merely fit the remaining character budget — not when a repeat would truly have crossed the floor
+  // (reproduced: a 4-phrase pool whose best repeat-permitting reach was 53 chars, far under 107,
+  // still got this exact message). `itemHighlightComposer.ts`'s `shadowRepeatReachesFloor` now gates
+  // this stage on a cheap deterministic check that a repeat-permitting selection actually reaches
+  // `CONTENT_CONTRACT.itemHighlights.min` before this reason (and this message) can be returned — so
+  // the claim below is now guaranteed true, not merely usually true.
   'under-floor-no-repeat': `Held: truthful phrases + blank facts reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor only by repeating a significant word, which is never allowed (PO ruling 2026-09-06) — rate/harvest more keywords for this family`,
 }
 
