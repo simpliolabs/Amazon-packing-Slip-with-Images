@@ -43,6 +43,7 @@ import {
   type PhraseTruthCtx,
   type PhraseTruthReason,
   type TruthGarmentFamily,
+  type TruthAudienceLean,
 } from './contentTruth'
 
 export interface ComposerPoolRow {
@@ -66,15 +67,23 @@ export type ComposerGarmentFamily = TruthGarmentFamily
  * which is why the same pool that could not compose "hooded fishing shirts" into an Item Highlight
  * shipped "Funny Work Shirts" in a SWEATSHIRT family's TITLE (PO-caught, B0DSCDZC6K). The rules,
  * lexicons and reason codes moved VERBATIM into `contentTruth.ts`; `ihTruthVerdict` is now a thin
- * wrapper that pins this composer's field ('highlights') and asserts no audience-lean rule applies
- * here — so every pin in itemHighlightComposer.test.ts holds byte-for-byte. */
+ * wrapper that pins this composer's field ('highlights').
+ *
+ * TASK 5 (2026-09-06, item-highlights-per-design plan): the forced-gender rule ('audience-lean-lie')
+ * used to be title-only and this wrapper hardcoded `audienceLean: null` to guarantee it could never
+ * fire here. Live sibling complaint on UNISEX family B0DSCDZC6K, "Why is Women repeating Twice?" —
+ * the composer had NO audience-lean rule at all, so a unisex design's own scoped pool could carry a
+ * bare "for Women"/"for Men" market phrase unchecked. `audienceLean` now flows through from the
+ * caller (each design's OWN resolved lean, from `buildItemHighlightsPerDesign` — never a new source),
+ * so every existing caller that doesn't pass it (the single-design path) stays byte-identical:
+ * `undefined` is not `'unisex'`, so contentTruth.ts's (c2) rule stays a no-op exactly as before. */
 
-/** The Item-Highlight reason set: every spine reason EXCEPT the title-only forced-gender rule,
- *  which `ihTruthVerdict` can never return (it pins field='highlights'). */
-export type IhTruthReason = Exclude<PhraseTruthReason, 'audience-lean-lie'>
+/** The Item-Highlight reason set — every spine reason, including `audience-lean-lie` since Task 5. */
+export type IhTruthReason = PhraseTruthReason
 
-/** The composer's slice of the spine ctx — no `field` (pinned) and no `audienceLean` (title-only). */
-export type IhTruthCtx = Omit<PhraseTruthCtx, 'field' | 'audienceLean'>
+/** The composer's slice of the spine ctx — no `field` (pinned to 'highlights' below); `audienceLean`
+ *  (Task 5) and `designTokens` (per-design name, already on `PhraseTruthCtx`) both flow through. */
+export type IhTruthCtx = Omit<PhraseTruthCtx, 'field'>
 
 /** Audience is a property of the BLANK FAMILY (64000B youth tee ⇒ kids), never inferred from a title. */
 export const ihAudienceOf = audienceOfGarmentFamily
@@ -85,8 +94,7 @@ export const ihAudienceOf = audienceOfGarmentFamily
  * Thin wrapper over the shared spine — see contentTruth.ts for the rules themselves.
  */
 export function ihTruthVerdict(phrase: string, ctx: IhTruthCtx): { ok: true } | { ok: false; reason: IhTruthReason } {
-  return phraseTruthVerdict(phrase, { ...ctx, field: 'highlights', audienceLean: null }) as
-    { ok: true } | { ok: false; reason: IhTruthReason }
+  return phraseTruthVerdict(phrase, { ...ctx, field: 'highlights' })
 }
 
 /** The deterministic brand phrase when no pool candidate carries the brand: "<Brand> <garment noun>". */
@@ -154,6 +162,15 @@ export interface ComposerOpts {
   /** Audience of the BLANK (kids_tee ⇒ kids). Defaults to ihAudienceOf(garmentFamily); a caller
    *  whose garmentFamily is a title GUESS passes null explicitly — audience is never title-inferred. */
   audience?: 'kids' | 'adult' | null
+  /** THIS design's own resolved audience lean (Task 5, 2026-09-06) — never a new source: the
+   *  per-design caller (`buildItemHighlightsPerDesign`) resolves it via the SAME
+   *  `resolveDesignAudienceLean` the title path uses. Absent/undefined (every caller before Task 5,
+   *  and the single-design path today) ⇒ the forced-gender rule never fires, byte-identical. */
+  audienceLean?: TruthAudienceLean | null
+  /** THIS design's own name/identity tokens — the forced-gender rule's design-own-name exemption
+   *  (Task 5). NEVER the family-wide union titles/bullets/backend use: a sibling's name must stay
+   *  foreign here, the same discipline Task 1's per-design partition already enforces. */
+  designTokens?: readonly string[]
 }
 
 /** The composer's null stages — the caller maps them to a PO-facing hold reason. */
@@ -183,6 +200,10 @@ export function composeItemHighlightDetailed(
     spec: opts?.spec,
     allowedBrand: opts?.allowedBrand,
     audience: opts?.audience !== undefined ? opts.audience : ihAudienceOf(opts?.garmentFamily),
+    // Task 5: both undefined on every pre-Task-5 caller ⇒ the forced-gender rule stays a no-op,
+    // byte-identical to before.
+    audienceLean: opts?.audienceLean ?? null,
+    designTokens: opts?.designTokens,
   }
   const flatten = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
   const brandRe = opts?.allowedBrand

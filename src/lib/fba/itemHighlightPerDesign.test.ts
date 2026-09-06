@@ -146,10 +146,21 @@ describe('each design composes its OWN line (PO 2026-09-06, refining the shared-
     }
   })
 
-  it('a phrase fit 3 on five designs / fit 1 on RK composes for the five and is EXCLUDED only from RK — CHANGED from "excluded from the shared line always" (min-over-designs is no longer decisive)', () => {
-    expect(minFitOverDesigns(WOMEN, [...KEYS])).toBe(1)   // the old min-over-designs verdict — still 1, no longer the caller's gate
+  it('a phrase fit 3 on five designs / fit 1 on RK is excluded from RK on FIT alone — the min-over-designs verdict is still 1, no longer the caller\'s gate', () => {
+    // CHANGED (Task 5, 2026-09-06 item-highlights-per-design plan, controller-carried guardrail): this
+    // test used to ALSO assert `for (const k of ['BD','BM','DQ','RIACG','SM']) expect(lineFor(r, k))
+    // .toContain('motivational shirts women')` — correct for Task 1's contract (fit-based partition,
+    // NO audience rule existed yet). Task 5 wires the family's audience_lean into the composer, and on
+    // a UNISEX family (this is one — B0DSCDZC6K, the live complaint "Why is Women repeating Twice?")
+    // a bare gendered market phrase is now a lie regardless of fit. That inverted assertion moved to
+    // the dedicated Task 5 describe block below (smaller pool there, deliberately NOT this describe
+    // block's big SHARED bank, which is heavily "for Men" market copy and would starve every design's
+    // candidate count for a reason orthogonal to the audience rule this task adds). What's still true
+    // and still proven HERE, on the ORIGINAL fixture: RK's exclusion is a FIT fact, independent of
+    // audience — this build never sets `audienceLean`, so the forced-gender rule cannot be why RK's
+    // line lacks the phrase.
+    expect(minFitOverDesigns(WOMEN, [...KEYS])).toBe(1)
     expect(lineFor(r, 'RK')).not.toContain('motivational shirts women')
-    for (const k of ['BD', 'BM', 'DQ', 'RIACG', 'SM']) expect(lineFor(r, k)).toContain('motivational shirts women')
   })
 
   it('per-child entries carry each SKU\'s OWN design line, never a sibling\'s', () => {
@@ -315,5 +326,79 @@ describe('the broadcast Item Highlight row on a multi-design family is NEVER des
     const out2 = applyStickyDetails({ fresh, prior, acceptedByKey: null, log: () => {} })
     expect(out2.details[0].recommended_value).toBe('')
     expect(out2.details[0].current_value ?? null).toBeNull()
+  })
+})
+
+/**
+ * TASK 5 (2026-09-06, item-highlights-per-design plan, controller-added after Task 1's review):
+ * per-design audience truth. Root cause (proven by the Task 1 implementer): the Item Highlights path
+ * had NO audience-lean rule at all — `ihTruthVerdict` hardcoded `audienceLean: null`, so a UNISEX
+ * design's own scoped pool could carry a bare "for Women"/"for Men" market phrase unchecked (the live
+ * PO complaint, "Why is Women repeating Twice?", was on UNISEX family B0DSCDZC6K). The fix reuses the
+ * SAME forced-gender predicate the title path already has (`phraseTruthVerdict`'s (c2) rule,
+ * contentTruth.ts) — widened to also read `field: 'highlights'` — never a second gender rule.
+ *
+ * A DEDICATED, SMALL pool (not this file's big POOL/SHARED bank — see the comment on the test above
+ * this block) so candidate counts are easy to reason about and the assertions are not fragile against
+ * unrelated "for Men" market copy already baked into Task 1's fixture.
+ */
+describe('Task 5: per-design audience truth in the Item Highlight composer', () => {
+  /** Gender-neutral filler, rated for every design in `GROUPS` (Task 1's own six-design family) via
+   *  the module's `kw()` helper — 3 candidates is enough to clear MIN_CANDIDATES with nothing for the
+   *  forced-gender rule to act on, so any exclusion the tests below observe is provably the audience
+   *  rule, not a starved pool. */
+  const NEUTRAL_FILLER: AnalyzedKeyword[] = [
+    kw('graphic novelty apparel', 9000, 3),
+    kw('cool print clothing', 8500, 3),
+    kw('trendy design gear', 8000, 3),
+  ]
+
+  it('a UNISEX family: a bare gendered market phrase ("...women") composes for NO design — not even the five whose fit is high, and not RK (whose exclusion is independently a FIT fact, proven above)', () => {
+    const r = buildItemHighlightsPerDesign({
+      groups: GROUPS, pool: [...NEUTRAL_FILLER, WOMEN], apparelProduct: true, blankBrand: GILDAN,
+      familyTitleText: FAMILY_TITLE, audienceLean: 'unisex',
+    })
+    for (const k of KEYS) {
+      expect(lineFor(r, k)).not.toContain('women')
+      expect(lineFor(r, k).length).toBeGreaterThanOrEqual(107)   // genuinely composed, not held
+    }
+  })
+
+  it('a lean_female-ASSIGNED design MAY carry "Women" even while the family default is unisex — the assignment wins over the family value (resolveDesignAudienceLean\'s own precedence, reused unchanged)', () => {
+    const rAssigned = buildItemHighlightsPerDesign({
+      groups: [BD], pool: [...NEUTRAL_FILLER, WOMEN], apparelProduct: true, blankBrand: GILDAN,
+      familyTitleText: FAMILY_TITLE, audienceLean: 'unisex', audienceLeanByDesign: { BD: 'lean_female' },
+    })
+    expect(lineFor(rAssigned, 'BD')).toContain('motivational shirts women')
+    // Sanity contrast: the SAME design, SAME pool, no assignment — inherits the family's unisex
+    // default and excludes it (this is the property the test above already proves for all six; kept
+    // here as a one-line same-inputs contrast so the precedence itself is visible in one place).
+    const rUnassigned = buildItemHighlightsPerDesign({
+      groups: [BD], pool: [...NEUTRAL_FILLER, WOMEN], apparelProduct: true, blankBrand: GILDAN,
+      familyTitleText: FAMILY_TITLE, audienceLean: 'unisex',
+    })
+    expect(lineFor(rUnassigned, 'BD')).not.toContain('women')
+  })
+
+  it('a UNISEX design whose OWN name carries the gender ("Lady Boss") keeps its own name-phrase, but still rejects an UNRELATED gendered market phrase — the exemption covers the design\'s identity, not every gendered phrase in its pool', () => {
+    // Single-group family (Task 1\'s own "single-design parity" pin already proves
+    // `buildItemHighlightsPerDesign` with ONE group is valid) — rated for ONLY this design's key, so
+    // a phrase carrying "Lady"/"Women" can never be misread as leaking from a sibling's rating.
+    const LADY_BOSS = { key: 'LB', designName: 'Lady Boss', skus: [{ sku: 'LB64000L-BK', asin: 'B0LB000001' }], titles: ['THE CEO Lady Boss Tee'] }
+    const kwLB = (keyword: string, searchVolume: number): AnalyzedKeyword =>
+      ({ keyword, searchVolume, themeFit: 3, themeFitByDesign: { LB: { fit: 3, about: 'apparel' } } } as unknown as AnalyzedKeyword)
+    const pool = [
+      kwLB('graphic novelty apparel', 9000),
+      kwLB('cool print clothing', 8500),
+      kwLB('trendy design gear', 8000),
+      kwLB('lady boss motivation apparel', 9999),   // carries the design's OWN name — exempt
+      kwLB('motivational shirts women', 9990),      // a market phrase, NOT the design's name — still a lie
+    ]
+    const r = buildItemHighlightsPerDesign({
+      groups: [LADY_BOSS], pool, apparelProduct: true, blankBrand: GILDAN,
+      familyTitleText: FAMILY_TITLE, audienceLean: 'unisex',
+    })
+    expect(lineFor(r, 'LB')).toContain('lady boss motivation apparel')
+    expect(lineFor(r, 'LB')).not.toContain('motivational shirts women')
   })
 })

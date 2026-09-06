@@ -77,6 +77,7 @@ import {
   resolveGarmentAudience,
   type PhraseTruthCtx,
   type TruthGarmentFamily,
+  type TruthAudienceLean,
 } from '@/lib/fba/contentTruth'
 import { buildForeignDesignTokens, designScopeTokens, fillNormTok, isForeignToDesign } from '@/lib/fba/designScope'
 import { IH_HOLD_MESSAGES, type IhHoldReason, type PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
@@ -2321,6 +2322,14 @@ export interface ItemHighlightsInput {
    *  title_source='manual' (the fresh finalTitle is discarded at persist on locked listings), plus
    *  every per-child title on a multi-design family. null = [finalTitle]. */
   netTitles: (string | null | undefined)[] | null
+  /** THE design's own resolved audience lean (Task 5, 2026-09-06) — absent on every caller before
+   *  this task, and still absent on the single-design call site below, so both stay byte-identical.
+   *  Only `buildItemHighlightsPerDesign` passes this, resolved via `resolveDesignAudienceLean` (the
+   *  SAME resolver the title path uses — never a second source of lean). */
+  audienceLean?: TruthAudienceLean | null
+  /** THIS design's own name/identity tokens — the forced-gender rule's design-own-name exemption.
+   *  NEVER the family-wide union; see `ComposerOpts.designTokens` (itemHighlightComposer.ts). */
+  designTokens?: readonly string[]
 }
 
 /**
@@ -2347,6 +2356,9 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
       audience: ihAudienceOf(blankBrand?.garmentFamily ?? null),
       // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
       allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
+      // Task 5: threaded straight through — undefined on every caller that doesn't set it.
+      audienceLean: input.audienceLean,
+      designTokens: input.designTokens,
     },
   )
   if (res.line) {
@@ -2390,6 +2402,13 @@ export interface PerDesignItemHighlightsInput {
   blankBrand: BlankSpecRow | null
   /** Family-level title text whose tokens are niche (never foreign): canonical + prior title. */
   familyTitleText: string
+  /** Seller-declared FAMILY lean (PipelineInput.audienceLean) — the fallback every unassigned design
+   *  inherits. Task 5 (2026-09-06): resolved PER DESIGN below via `resolveDesignAudienceLean`, the
+   *  SAME resolver + precedence the title path uses (audienceAssignment.ts) — never a new source. */
+  audienceLean?: AudienceLean
+  /** PER-DESIGN seller-declared lean override (PipelineInput.audienceLeanByDesign, migration 070),
+   *  {designKey: lean}. Absent/empty key ⇒ pure family fallback, same precedence as the title path. */
+  audienceLeanByDesign?: Record<string, string> | null
 }
 
 export interface PerDesignItemHighlight {
@@ -2483,7 +2502,20 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
       console.log(JSON.stringify({ tag: 'IH_PER_DESIGN', design: g.key, pool: pool.length, scoped: scoped.length, len: 0, hold: 'designs-unrated' }))
       return { designKey: g.key, designName: g.designName, skus: g.skus, value: '', hold: 'designs-unrated' as IhHoldReason, foreignDropped, missingDesigns }
     }
-    const r = buildItemHighlights({ finalTitle: titles[0] ?? '', pool: scoped, apparelProduct, blankBrand, netTitles: titles.length ? titles : null })
+    // TASK 5 (2026-09-06): THIS design's own resolved audience lean — an assignment
+    // (audienceLeanByDesign) wins, else the family's own value — via the SAME resolver +
+    // precedence the title path uses (audienceAssignment.ts, PO 2026-08-26). Never a new source of
+    // lean, never a family-wide read: an unassigned neutral sibling must not inherit "unisex" from a
+    // gendered sibling's OWN assignment, and a gendered sibling must not inherit the family default.
+    const groupAudience = resolveDesignAudienceLean(g.key, input.audienceLeanByDesign, input.audienceLean ?? null)
+    console.log(JSON.stringify({ tag: 'IH_DESIGN_AUDIENCE_TRUTH', design: g.key, decision: groupAudience.source, lean: groupAudience.lean ?? null, familyLean: input.audienceLean ?? null }))
+    const r = buildItemHighlights({
+      finalTitle: titles[0] ?? '', pool: scoped, apparelProduct, blankBrand, netTitles: titles.length ? titles : null,
+      audienceLean: normalizeAudienceLean(groupAudience.lean),
+      // THIS design's own name only (never the family union) — a sibling's name stays foreign to
+      // the forced-gender rule's exemption exactly as it already does to the pool partition above.
+      designTokens: [g.designName],
+    })
     console.log(JSON.stringify({ tag: 'IH_PER_DESIGN', design: g.key, pool: pool.length, scoped: scoped.length, len: r.value.length, hold: r.hold }))
     return { designKey: g.key, designName: g.designName, skus: g.skus, value: r.value, hold: r.hold, foreignDropped }
   })
@@ -11836,6 +11868,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         })),
         pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow,
         familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`,
+        // TASK 5 (2026-09-06): same family/per-design lean source the title path reads
+        // (input.audienceLean / input.audienceLeanByDesign) — resolved per design INSIDE
+        // buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.
+        audienceLean: apparelProduct ? input.audienceLean : null,
+        audienceLeanByDesign: input.audienceLeanByDesign,
       })
       perChildItemHighlights = built.perChild
       const composed = built.perDesign.filter((d) => d.value).length

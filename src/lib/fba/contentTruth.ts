@@ -36,7 +36,11 @@ import { designScopeTokens } from './designScope'
  *  audience rule; long_sleeve_tee names its own spec phrase), plus the title-guess values. */
 export type TruthGarmentFamily = GarmentFamily | 'hat' | 'none' | null
 
-/** The content surfaces the spine gates. Only `audience-lean-lie` reads this; see the header. */
+/** The content surfaces the spine gates. Only `audience-lean-lie` reads this; see the header.
+ *  Task 5 (2026-09-06, item-highlights-per-design plan): `audience-lean-lie` now ALSO reads this on
+ *  'highlights' — the Item Highlights composer had no audience-lean rule at all before this task, so
+ *  a unisex design's own scoped pool could carry a market "for Women"/"for Men" phrase unchecked
+ *  (live: "Why is Women repeating Twice?" on UNISEX family B0DSCDZC6K). */
 export type ContentField = 'title' | 'bullets' | 'description' | 'backend' | 'highlights'
 
 export type PhraseTruthReason =
@@ -48,7 +52,7 @@ export type PhraseTruthReason =
   | 'competitor-brand'              // another blank maker (Pro Club, Gildan…) unless it is the family's own
   | 'weight-class-lie'              // light/mid/heavyweight that the blank's weightNote does not back
   | 'fit-claim-lie'                 // relaxed/classic/slim/regular/oversized/fitted/boxy that spec.fit does not back
-  | 'audience-lean-lie'             // a single gender asserted in the TITLE of a unisex-lean family
+  | 'audience-lean-lie'             // a single gender asserted on a unisex-lean family's TITLE or Item Highlight
 
 /** The seller's declared audience lean, normalized to what the truth rule needs. */
 export type TruthAudienceLean = 'unisex' | 'women' | 'men' | null
@@ -75,9 +79,13 @@ export interface PhraseTruthCtx {
    *  kids/adult rules blanket-strip the healthy majority's own design vocabulary to cure a defect
    *  none of them have — the standing "don't over-generalize a specific failure" directive.
    *  Absent/empty ⇒ every audience hit is foreign, i.e. EXACTLY the pre-amendment behavior (which is
-   *  what every Item-Highlight caller passes, so the IH pins hold byte-for-byte). */
+   *  what every Item-Highlight caller passed before Task 5; the single-design IH path still does).
+   *  Task 5 (2026-09-06): the PER-DESIGN Item Highlights path (`buildItemHighlightsPerDesign`) now
+   *  passes THIS design's own name here — never the family-wide union titles/bullets/backend use —
+   *  so a sibling's name is never accidentally exempted (that cross-design leak is exactly what
+   *  Task 1's foreign-token partition exists to prevent). Read by rule (c) AND (c2) below. */
   designTokens?: readonly string[]
-  /** Seller-declared lean. Only 'unisex' can trigger a rule, and only on the TITLE. */
+  /** Seller-declared lean. Only 'unisex' can trigger a rule, on the TITLE or (Task 5) Item Highlight. */
   audienceLean?: TruthAudienceLean
   /** Which surface is asking. Field-agnostic for every rule except `audience-lean-lie`. */
   field: ContentField
@@ -253,6 +261,15 @@ const foreignAudienceHits = (phrase: string, re: RegExp, design: ReadonlySet<str
  *  kids/adult audience rule's business, and a phrase naming BOTH halves is INCLUSIVE, not forced. */
 const LEAN_FEM_RE = /\b(?:wom[ae]n['’]?s?|ladies|lady)\b/i
 const LEAN_MASC_RE = /\b(?:m[ae]n['’]?s?)\b/i
+/** GLOBAL twins of the two regexes above, for Item Highlights only (Task 5) — `foreignAudienceHits`
+ *  needs every match (`matchAll`), not merely whether one exists, so it can tell a phrase's OWN
+ *  gendered hit (the design's own name — exempt) from a foreign one (a market audience claim —
+ *  still forced-gender). Kept SEPARATE from the two above rather than adding 'g' to them: those stay
+ *  single-shot `.test()` calls on the TITLE branch, and a shared global instance's mutable
+ *  `lastIndex` would make repeated `.test()` calls silently skip matches (the same gotcha
+ *  `ADULT_AUDIENCE_RE`/`KIDS_AUDIENCE_RE` above avoid by never being `.test()`'d). */
+const LEAN_FEM_RE_G = /\b(?:wom[ae]n['’]?s?|ladies|lady)\b/gi
+const LEAN_MASC_RE_G = /\b(?:m[ae]n['’]?s?)\b/gi
 
 /** PipelineInput.audienceLean → the truth rule's view. `lean_male`/`lean_female` are SOFT
  *  re-weightings (cross-gender traffic is the point of a lean), so they are NOT unisex and never
@@ -596,15 +613,34 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
       return { ok: false, reason: ctx.audience === 'kids' ? 'audience-adult-on-kids' : 'audience-kids-on-adult' }
     }
   }
-  // (c2) FORCED GENDER — TITLE ONLY (PO gold pattern "no forced gender", live B0DSCDZC6K: the title
-  // said "for Women" while the family's stored audience_lean is 'unisex'). The title is a PRODUCT
-  // CLAIM; bullets/description/backend carry MARKET vocabulary, where a gendered shopper phrase is
-  // legitimate and indexes real traffic — so this is the one field-scoped rule in the spine.
+  // (c2) FORCED GENDER — TITLE + ITEM HIGHLIGHTS (PO gold pattern "no forced gender", live
+  // B0DSCDZC6K: the title said "for Women" while the family's stored audience_lean is 'unisex').
+  // The title is a PRODUCT CLAIM; bullets/description/backend still carry MARKET vocabulary, where a
+  // gendered shopper phrase is legitimate and indexes real traffic. Item Highlights (Task 5,
+  // 2026-09-06 item-highlights-per-design plan) joins the title's side of that line rather than
+  // bullets'/backend's: it is a customer-facing product-fact field the PO reads as a claim about
+  // THIS design, not a keyword-research surface — and the composer had NO audience-lean rule at all
+  // before this task, so a unisex design's own scoped pool could carry the identical bare-gender lie
+  // unchecked (the live complaint this task exists for: "Why is Women repeating Twice?").
   // A phrase naming BOTH genders ("for men and women") is inclusive, not forced.
-  if (ctx.field === 'title' && ctx.audienceLean === 'unisex') {
-    const fem = LEAN_FEM_RE.test(phrase)
-    const masc = LEAN_MASC_RE.test(phrase)
-    if (fem !== masc) return { ok: false, reason: 'audience-lean-lie' }
+  if ((ctx.field === 'title' || ctx.field === 'highlights') && ctx.audienceLean === 'unisex') {
+    if (ctx.field === 'highlights') {
+      // ITEM HIGHLIGHTS ONLY gets the design-own-name exemption (Task 5): a design whose OWN name
+      // itself carries the gender (e.g. "Mother Hustler") keeps it — reusing the SAME "claim vs.
+      // vocabulary" idiom rule (c) above already applies for kids/adult (`designWordSet` +
+      // `foreignAudienceHits`), never a second copy. TITLE is deliberately left untouched below (no
+      // exemption there): its own `designTokens` is the FAMILY-WIDE union (every sibling's name, per
+      // `buildGroupTruthCtx` in listingPipeline.ts), and widening THIS rule to read it would risk an
+      // untested behavior change on a path this task must not touch.
+      const designWords = designWordSet(ctx.designTokens)
+      const fem = foreignAudienceHits(phrase, LEAN_FEM_RE_G, designWords).length > 0
+      const masc = foreignAudienceHits(phrase, LEAN_MASC_RE_G, designWords).length > 0
+      if (fem !== masc) return { ok: false, reason: 'audience-lean-lie' }
+    } else {
+      const fem = LEAN_FEM_RE.test(phrase)
+      const masc = LEAN_MASC_RE.test(phrase)
+      if (fem !== masc) return { ok: false, reason: 'audience-lean-lie' }
+    }
   }
   // (d) competitor APPAREL brands — outside the trademark lexicon (it covers franchises, not blanks):
   // a pool row naming another maker never ships. The family's own allowed blank brand

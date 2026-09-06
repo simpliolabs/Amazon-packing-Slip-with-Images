@@ -96,7 +96,14 @@ describe('(c) audience-lean-lie — a unisex family forces no gender on its TITL
       expect(phraseTruthVerdict(p, SWEATS)).toEqual({ ok: false, reason: 'audience-lean-lie' })
   })
   it('ALLOWS the same phrase on bullets/description/backend — they carry MARKET vocabulary', () => {
-    for (const field of ['bullets', 'description', 'backend', 'highlights'] as const)
+    // CHANGED (Task 5, 2026-09-06 item-highlights-per-design plan): this loop used to ALSO include
+    // 'highlights', pinning the PRE-Task-5 state where `ihTruthVerdict` hardcoded `audienceLean:
+    // null` so the rule could never fire there regardless of what `phraseTruthVerdict` itself did.
+    // Item Highlights joins the TITLE's side of this line now (see the (c3) describe block below) —
+    // it is a customer-facing product-fact field, not a keyword-research surface like bullets/
+    // description/backend remain. Moved deliberately, not weakened: 'highlights' is asserted
+    // OPPOSITE below, with its own design-own-name exemption.
+    for (const field of ['bullets', 'description', 'backend'] as const)
       expect(phraseTruthVerdict('womens sweatshirt', { ...SWEATS, field })).toEqual({ ok: true })
   })
   it('an INCLUSIVE phrase naming both genders is not a forced gender', () => {
@@ -112,6 +119,50 @@ describe('(c) audience-lean-lie — a unisex family forces no gender on its TITL
     expect(normalizeAudienceLean('female')).toBe('women')
     expect(normalizeAudienceLean('lean_male')).toBe('men')
     expect(normalizeAudienceLean(null)).toBeNull()
+  })
+})
+
+/* ── DEFECT (c) EXTENDED: Item Highlights (Task 5, 2026-09-06 item-highlights-per-design plan) ──
+ *
+ * Root cause (proven by the Task 1 implementer, not guessed): the Item Highlights composer had NO
+ * audience-lean rule at all — `ihTruthVerdict` hardcoded `audienceLean: null` so this rule could
+ * never fire there regardless of what the SHARED predicate itself did. Live: "Why is Women repeating
+ * Twice?" on UNISEX family B0DSCDZC6K. Item Highlights joins the TITLE's side of the (c2) rule (a
+ * customer-facing product-fact field, not a keyword-research surface) — the SAME predicate, widened
+ * to a second field, never a second rule. Unlike the title, `ihTruthVerdict` threads a design-own-
+ * name exemption (per-design `designTokens`, never the family-wide union the title uses).
+ */
+describe('(c2 extended) audience-lean-lie now ALSO fires on Item Highlights — same rule, second field', () => {
+  it('rejects a single-gender phrase for `field: "highlights"` when audienceLean is unisex — same verdict as the TITLE', () => {
+    for (const p of ['for women', 'womens sweatshirt', 'for men', 'mens crewneck', 'ladies pullover'])
+      expect(phraseTruthVerdict(p, { ...SWEATS, field: 'highlights' })).toEqual({ ok: false, reason: 'audience-lean-lie' })
+  })
+  it('an INCLUSIVE phrase naming both genders is still not a forced gender on `highlights`', () => {
+    expect(phraseTruthVerdict('for men and women', { ...SWEATS, field: 'highlights' })).toEqual({ ok: true })
+  })
+  it('never fires without a declared unisex lean, same as the title', () => {
+    for (const lean of ['women', 'men', null] as const)
+      expect(phraseTruthVerdict('womens sweatshirt', { ...SWEATS, field: 'highlights', audienceLean: lean }).ok).toBe(true)
+  })
+  it('the DESIGN-OWN-NAME exemption applies ONLY to `highlights` (Task 5), never to the title (unchanged, family-wide `designTokens` there)', () => {
+    // "Mother Hustler" carries no LEAN_FEM_RE/LEAN_MASC_RE word, so use a design whose name actually
+    // does: "Lady Boss" ("lady" matches the same lexicon "womens"/"ladies" use).
+    const withLadyBossName = { ...SWEATS, designTokens: ['Lady Boss'] }
+    expect(phraseTruthVerdict('lady boss sweatshirt', { ...withLadyBossName, field: 'highlights' })).toEqual({ ok: true })
+    // The exemption is about the CLAIM matching the design's own name, not "any gendered word is now
+    // fine for this design" — an UNRELATED gendered phrase in the same design's pool still lies.
+    expect(phraseTruthVerdict('womens sweatshirt', { ...withLadyBossName, field: 'highlights' }))
+      .toEqual({ ok: false, reason: 'audience-lean-lie' })
+    // TITLE is untouched: this task must not change title behavior, so the SAME designTokens here
+    // does NOT exempt the title (it never read designTokens for this rule before, and still doesn't).
+    expect(phraseTruthVerdict('lady boss sweatshirt', { ...withLadyBossName, field: 'title' }))
+      .toEqual({ ok: false, reason: 'audience-lean-lie' })
+  })
+  it('ihTruthVerdict (the composer\'s own wrapper) reflects the same rule end-to-end — `audience-lean-lie` is no longer excluded from its reason type', () => {
+    expect(ihTruthVerdict('womens sweatshirt', { ...SWEATS, audienceLean: 'unisex' }))
+      .toEqual({ ok: false, reason: 'audience-lean-lie' })
+    // Every caller before Task 5 passed no `audienceLean` at all — still a no-op, byte-identical.
+    expect(ihTruthVerdict('womens sweatshirt', { ...SWEATS, audienceLean: undefined }).ok).toBe(true)
   })
 })
 
