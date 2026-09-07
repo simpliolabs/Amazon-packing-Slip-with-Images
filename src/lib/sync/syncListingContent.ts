@@ -389,7 +389,11 @@ interface ScoringContext {
 // there). Composing onto the core (not hand-copying it) is what stops this file's copy from
 // drifting the way it already had (this file used to carry female/girls? that contentTruth.ts never
 // did). nicheGuards.ts (~:220) composes the same way. listingPipeline.ts and rankAnalysis.ts still
-// carry their OWN independent copies — out of scope for Task 7 (task-7-brief.md's Code Organization).
+// carry their OWN independent copies — out of scope for Task 7 (M1 fix, 2026-09-06: cites the
+// brief's "ONE lexicon, not four" paragraph and the controller's pre-stage ruling — both name only
+// these two consumers + the core; a prior version of this comment cited a "task-7-brief.md's Code
+// Organization" section that does not exist, caught by task-7-review-findings.md M1). Every
+// remaining copy is now enumerated and classified in `genderLexiconSingleSource.test.ts`'s ALLOWLIST.
 const LEAN_FEM_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE})\\b|\\bfemale\\b|\\bgirls?\\b`, 'i')
 const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b|\\bmale\\b|\\bboys?\\b`, 'i')
 function leanExcludesKeyword(kw: string, hardLean: 'male' | 'female' | null | undefined): boolean {
