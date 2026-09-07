@@ -102,7 +102,7 @@ vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { c
 import { buildItemHighlightsPerDesign } from './listingPipeline'
 import { buildPerSkuItemHighlightMap, perDesignIhRows, NO_LINE_FOR_DESIGN, type PerChildItemHighlight } from './perDesignItemHighlights'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
-import { ihFoldWord, IH_INSIGNIFICANT } from './productDetailAttrs'
+import { ihFoldWord, IH_INSIGNIFICANT, classifyStoredIhLine } from './productDetailAttrs'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
 
 const KEYS = ['BD', 'BM', 'DQ', 'RIACG', 'RK', 'SM'] as const
@@ -237,6 +237,13 @@ describe('push seam wire: real buildItemHighlightsPerDesign -> real buildPerSkuI
   it('TASK 8 CONSEQUENCE: every mapped value DOES contain "Classic" — the spec-fact pad truth-fix (blank_specs.fit -> "${fit} Fit") that must ship over the live "relaxed unisex fit" defect this plan was opened against, now provable on THIS pool again since it composes.', () => {
     expect(values.size).toBe(ALL_TARGETS.length)
     for (const v of values.values()) expect(v.toLowerCase()).toContain('classic fit')
+  })
+
+  it('TASK 8 ROUND 2 (R1): composer/seam agreement is a PROPERTY over the acceptance seam pool — every one of the six composed values classifies "ok" at the seam\'s own classifier, not merely byte-identical to the recorded lines', () => {
+    expect(values.size).toBeGreaterThan(0)
+    for (const [sku, value] of values) {
+      expect(classifyStoredIhLine(value), `${sku}: "${value}"`).toBe('ok')
+    }
   })
 })
 
@@ -426,6 +433,13 @@ describe('FIX ROUND 1 (#2 + #3): a genuinely COMPOSING six-design pool, own mutu
     expect(bd.value).toContain('Classic Fit')
     expect(bd.value).not.toContain('Crew Neck')                      // pad stopped at `fit` — 108 >= 107
     expect(bd.value.length).toBe(108)
+  })
+
+  it('TASK 8 ROUND 2 (R1): composer/seam agreement PROPERTY over POOL2\'s six composed values too — a second, independently-built composing pool, not just the acceptance seam\'s own', () => {
+    expect(values2.size).toBeGreaterThan(0)
+    for (const [sku, value] of values2) {
+      expect(classifyStoredIhLine(value), `${sku}: "${value}"`).toBe('ok')
+    }
   })
 })
 

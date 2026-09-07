@@ -41,6 +41,19 @@ const GATOR_POOL = [
 ]
 const OPTS = { spec: SPEC, garmentFamily: 'tee' as const, allowedBrand: 'Comfort Colors' }
 
+/** TASK 8 / TASK 8 ROUND 2: the ORIGINAL Task 6/final-review repro pool + a CC-unisex spec, named
+ *  ONCE so the Blocking-fixture pin (below) and the round-2 composer/seam PROPERTY test read the
+ *  exact same fixture object — a second hand-copy of this literal is exactly the class of drift
+ *  this task exists to close. */
+const TASK8_REPRO_POOL = [
+  { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
+  { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // sweatshirt ok (2nd), women OVER (2nd) -> Tier B, rejected
+  { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },
+  { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // crewneck's legal 2nd mention
+  { keyword: 'sleeve detail graphic', searchVolume: 550, themeFit: 2 },        // sleeve OVER (2nd), graphic OVER (2nd) -> Tier B, rejected
+]
+const TASK8_REPRO_SPEC = { material: '100% Cotton Blend', fit: 'Relaxed', unisex: true, neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed' }
+
 describe('composeItemHighlight — Architecture A under the 85% floor', () => {
   it('composes verbatim pool phrases + true spec fillers, in the [MIN, MAX] band', () => {
     const out = composeItemHighlight(GATOR_POOL, GATOR_TITLES, OPTS)!
@@ -583,14 +596,8 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
   })
 
   it('TASK 8 PIN: the ORIGINAL Task 6/final-review repro pool (5 phrases: crewneck sweatshirts women / fall sweatshirts for women / novelty retro graphic / long sleeve crewneck / sleeve detail graphic), WITH a spec so it actually composes — crewneck/sweatshirt (garment nouns) may appear TWICE; women/sleeve (not garment nouns) may appear only ONCE; asserted on the returned bytes, not a property proxy', () => {
-    const pool = [
-      { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
-      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // sweatshirt ok (2nd), women OVER (2nd) -> Tier B, rejected
-      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },
-      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // crewneck's legal 2nd mention
-      { keyword: 'sleeve detail graphic', searchVolume: 550, themeFit: 2 },        // sleeve OVER (2nd), graphic OVER (2nd) -> Tier B, rejected
-    ]
-    const spec = { material: '100% Cotton Blend', fit: 'Relaxed', unisex: true, neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed' }
+    const pool = TASK8_REPRO_POOL
+    const spec = TASK8_REPRO_SPEC
     const res = composeItemHighlightDetailed(pool, [], { spec: spec as any })
     // Verified via an `npx tsx` probe against the real composer (task-8-report.md).
     expect(res.line).toBe('Crewneck Sweatshirts Women, Novelty Retro Graphic, Long Sleeve Crewneck, 100% Cotton Blend, Relaxed Fit, Unisex Fit')
@@ -699,6 +706,43 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     expect(out.length).toBeLessThanOrEqual(MAX)
     expect(out).toContain('Super Relaxed Fit')
     expect(out).not.toContain('100% Cotton')
+  })
+})
+
+/* ─── TASK 8 ROUND 2 (2026-09-07, controller RULING, R1) ──────────────────────────────────────────
+ * Fix round 1 closed ONE instance of "the composer ships a line the push seam refuses" (the `fit`
+ * boilerplate collision). The reviewer's Blocking finding was explicit that the invariant is a
+ * PROPERTY — "for EVERY composed line", not a single fixture — so this is a general assertion over
+ * every scenario this file (and the acceptance seam / realistic fixtures in the sibling test files)
+ * already composes, not merely the one fixture that happened to trip it. `composedCount` guards
+ * against a vacuous pass (`test-proves-the-mock-not-the-wire`): the property is worthless if every
+ * scenario secretly HOLDS. */
+describe('TASK 8 ROUND 2 (R1): composer/seam agreement is a PROPERTY over every composed fixture line, not a single example', () => {
+  it('every non-null line composeItemHighlightDetailed returns across this file\'s own composing scenarios classifies "ok" at the push seam (classifyStoredIhLine)', () => {
+    const scenarios: { name: string; pool: any[]; titles: string[]; opts?: any }[] = [
+      { name: 'GATOR_POOL + SPEC (CC, unisex false)', pool: GATOR_POOL, titles: GATOR_TITLES, opts: OPTS },
+      { name: 'GATOR_POOL + GILDAN_SPEC (Classic, brand not in copy)', pool: GATOR_POOL, titles: GATOR_TITLES, opts: { spec: GILDAN_SPEC, garmentFamily: 'tee', allowedBrand: null } },
+      {
+        name: 'small pool + SPEC.unisex=true (PO 2026-08-06 pad-exemption pin: Relaxed Fit + Unisex Fit co-exist)',
+        pool: [
+          { keyword: 'rodeo outfit women', searchVolume: 400, themeFit: 3 },
+          { keyword: 'hello darlin shirt', searchVolume: 350, themeFit: 3 },
+          { keyword: 'cowgirl graphic tops', searchVolume: 300, themeFit: 3 },
+        ],
+        titles: ['THE CEO Darlin Tee | Comfort Colors Shirt'],
+        opts: { spec: { ...SPEC, unisex: true }, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' },
+      },
+      { name: 'TASK 8/reviewer Blocking fixture: Task 6 repro pool + CC-unisex spec', pool: TASK8_REPRO_POOL, titles: [], opts: { spec: TASK8_REPRO_SPEC } },
+    ]
+    let composedCount = 0
+    for (const s of scenarios) {
+      const res = composeItemHighlightDetailed(s.pool, s.titles, s.opts)
+      if (!res.line) continue
+      composedCount++
+      expect(classifyStoredIhLine(res.line), `${s.name}: "${res.line}"`).toBe('ok')
+    }
+    // Never a vacuous property: at least one scenario above must have actually composed a line.
+    expect(composedCount).toBeGreaterThan(0)
   })
 })
 

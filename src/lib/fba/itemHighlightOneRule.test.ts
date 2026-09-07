@@ -28,6 +28,9 @@ import {
   IH_GARMENT_HEAD_FOLDED,
   ihRepeatBudget,
   classifyStoredIhLine,
+  ihSpecFactFillers,
+  IH_PAD_FILLER_DESCRIPTORS,
+  deriveIhBoilerplateBudget,
 } from './productDetailAttrs'
 import { GARMENT_HEAD_WORDS } from './garmentNoun'
 
@@ -166,5 +169,78 @@ describe('TASK 8: classifyStoredIhLine honors the garment exemption', () => {
 
   it('the LIVE stored falsehood\'s neighbour stays refused: "Crewneck Sweatshirts Women, Fall Sweatshirts for Women, Graphic Crewneck, 50% Cotton / 50% Polyester, Classic Fit" (women twice)', () => {
     expect(classifyStoredIhLine('Crewneck Sweatshirts Women, Fall Sweatshirts for Women, Graphic Crewneck, 50% Cotton / 50% Polyester, Classic Fit')).toBe('repeat-in-stored-line')
+  })
+})
+
+/* ─── TASK 8 ROUND 2 (2026-09-07, controller RULING, task-8-round-2-findings.md, R1): fix round 1's
+ * `IH_BOILERPLATE_BUDGET_2 = new Set(['fit'])` was a REMEMBERED fact about the pad-bank templates —
+ * "fit is the only word two templates append" — not something derived from the templates
+ * themselves. `ihSpecFactFillers` is now the ONE pad bank (moved verbatim from the composer, which
+ * used to hand-write it TWICE — the shadow reachability pass and the live pad loop). The budget set
+ * is COMPUTED by folding every suffix word a template appends and keeping any suffix appended by
+ * >= 2 templates — expressed as a static `{ key, suffix, build }` descriptor list so the count is
+ * computable without ever needing a spec value. These pins prove DERIVATION, not memorization: they
+ * perturb the descriptor list (never the real templates) and show the budget set tracks the
+ * perturbation automatically — exactly the property a hand-written `Set(['fit'])` could not have. */
+describe('TASK 8 ROUND 2 (R1): the pad bank is ONE definition; its boilerplate repeat budget is COMPUTED from it, never hand-written', () => {
+  it('ihSpecFactFillers is the ONE pad bank — same order, same conditions, same byte output the composer used to hand-write in two places', () => {
+    const spec = { material: '100% Ring-Spun Cotton', fit: 'Relaxed', unisex: true, neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed' }
+    expect(ihSpecFactFillers(spec)).toEqual([
+      '100% Ring-Spun Cotton', 'Relaxed Fit', 'Unisex Fit', 'Crew Neck', 'Short Sleeve', 'Garment-Dyed Fabric',
+    ])
+  })
+
+  it('ihSpecFactFillers is total: null/undefined/empty spec all yield no fillers, never a throw', () => {
+    expect(ihSpecFactFillers(null)).toEqual([])
+    expect(ihSpecFactFillers(undefined)).toEqual([])
+    expect(ihSpecFactFillers({})).toEqual([])
+  })
+
+  it('ihSpecFactFillers omits a falsy field (no invented facts) — unisex=false or missing never yields "Unisex Fit"; a missing fit never yields a bare "Fit"', () => {
+    expect(ihSpecFactFillers({ material: 'Cotton', unisex: false })).toEqual(['Cotton'])
+    expect(ihSpecFactFillers({ fit: '', neck: 'Crew Neck' })).toEqual(['Crew Neck'])
+  })
+
+  it('DERIVATION PIN: today\'s real descriptor list derives exactly {fit} — the SAME set fix round 1 hand-wrote, now COMPUTED', () => {
+    expect(deriveIhBoilerplateBudget(IH_PAD_FILLER_DESCRIPTORS)).toEqual(new Set(['fit']))
+  })
+
+  it('a suffix appended by exactly ONE template ("fabric", the dye filler) stays at the default budget — never promoted on its own', () => {
+    const derived = deriveIhBoilerplateBudget(IH_PAD_FILLER_DESCRIPTORS)
+    expect(derived.has('fabric')).toBe(false)
+    expect(ihRepeatBudget('fabric')).toBe(1)
+  })
+
+  const budgetFor = (folded: string, boilerplate2: ReadonlySet<string>): number =>
+    IH_GARMENT_HEAD_FOLDED.has(folded) || boilerplate2.has(folded) ? IH_MAX_WORD_REPEATS : 1
+
+  it('PERTURBATION PIN: a THIRD descriptor appending "Fit" still derives budget IH_MAX_WORD_REPEATS (2) for "fit" — never 3. A local hand-written Set could not have proven this; it would have had to be told', () => {
+    const perturbed = [...IH_PAD_FILLER_DESCRIPTORS, { key: 'probe', suffix: 'Fit', build: () => '' }]
+    const derived = deriveIhBoilerplateBudget(perturbed)
+    expect(derived.has('fit')).toBe(true)
+    expect(budgetFor('fit', derived)).toBe(IH_MAX_WORD_REPEATS)
+  })
+
+  it('PERTURBATION PIN: a brand-new suffix appended by TWO templates gains budget IH_MAX_WORD_REPEATS automatically — the day a template appends another shared suffix, the seam and composer cannot silently disagree, because both read this ONE derivation', () => {
+    const perturbed = [
+      ...IH_PAD_FILLER_DESCRIPTORS,
+      { key: 'probeA', suffix: 'Blend', build: () => '' },
+      { key: 'probeB', suffix: 'Blend', build: () => '' },
+    ]
+    const derived = deriveIhBoilerplateBudget(perturbed)
+    expect(derived.has('blend')).toBe(true)
+    expect(budgetFor('blend', derived)).toBe(IH_MAX_WORD_REPEATS)
+  })
+
+  it('a NEW suffix appended only ONCE in the same perturbed list stays at budget 1', () => {
+    const perturbed = [...IH_PAD_FILLER_DESCRIPTORS, { key: 'probeC', suffix: 'Weave', build: () => '' }]
+    const derived = deriveIhBoilerplateBudget(perturbed)
+    expect(derived.has('weave')).toBe(false)
+  })
+
+  it('a descriptor with no suffix (material/neck/sleeve) never contributes to the boilerplate budget, however many share no suffix', () => {
+    const noSuffixOnly = IH_PAD_FILLER_DESCRIPTORS.filter((d) => d.suffix === null)
+    expect(noSuffixOnly.length).toBeGreaterThanOrEqual(2)
+    expect(deriveIhBoilerplateBudget(noSuffixOnly)).toEqual(new Set())
   })
 })

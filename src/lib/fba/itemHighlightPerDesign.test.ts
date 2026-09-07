@@ -60,7 +60,7 @@ vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { c
 
 import { buildItemHighlights, buildItemHighlightsPerDesign, IH_HOLD_MESSAGES } from './listingPipeline'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
-import { ihFoldWord, IH_INSIGNIFICANT } from './productDetailAttrs'
+import { ihFoldWord, IH_INSIGNIFICANT, classifyStoredIhLine } from './productDetailAttrs'
 import { applyStickyDetails } from './stickyDetails'
 import { collapseSharedIhRows, perDesignIhRows } from './perDesignItemHighlights'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
@@ -231,6 +231,17 @@ describe('each design composes its OWN line (PO 2026-09-06, refining the shared-
     expect(rows).toHaveLength(KEYS.length)
     const collapsed = collapseSharedIhRows(rows)
     expect(collapsed.length).toBe(KEYS.length)   // nothing to fold — every line is distinct
+  })
+
+  it('TASK 8 ROUND 2 (R1): composer/seam agreement PROPERTY on this file\'s own realistic six-design fixture — every composed design line classifies "ok" at the push seam\'s classifier', () => {
+    let composedCount = 0
+    for (const k of KEYS) {
+      const line = lineFor(r, k)
+      if (!line) continue
+      composedCount++
+      expect(classifyStoredIhLine(line), `${k}: "${line}"`).toBe('ok')
+    }
+    expect(composedCount).toBe(KEYS.length)   // this fixture composes for all six — never a vacuous check
   })
 })
 
@@ -578,5 +589,12 @@ describe('T5-g: the realistic six-design fixture — TASK 6+7 CONSEQUENCE: now H
       expect(d.hold).toBe('thin-candidates')
       expect(d.value).toBe('')
     }
+    // TASK 8 ROUND 2 (R1) NOTE: this is the fixture named "the realistic fixture" in the round-2
+    // findings' composer/seam-agreement property. It composes ZERO lines (all six HOLD, as asserted
+    // above) — unchanged since Task 7 (see this file's own header) — so it contributes nothing to
+    // that property here BY CONSTRUCTION, not because the property was skipped for it. The property
+    // is checked non-vacuously against this file's OTHER realistic fixture (Task 1's own six-design
+    // POOL/GILDAN family, which DOES compose) in the "each design composes its OWN line" describe
+    // block above, and against the acceptance seam + Blocking fixtures in the sibling test files.
   })
 })
