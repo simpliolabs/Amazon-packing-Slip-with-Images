@@ -33,7 +33,7 @@
  */
 import { CONTENT_CONTRACT } from './contentContract'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
-import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations, GENDER_FOLDS, significantFolded, lineHasSignificantRepeat, ihRepeatBudget } from './productDetailAttrs'
+import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations, GENDER_FOLDS, significantFolded, ihRepeatBudget } from './productDetailAttrs'
 import { scrubTrademarks } from './trademarkGuard'
 import { type BlankSpec } from './blankSpecs'
 import {

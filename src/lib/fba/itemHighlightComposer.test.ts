@@ -18,6 +18,7 @@ import { composeItemHighlight, composeItemHighlightDetailed, ihTruthVerdict, ihA
 import { ensureBlankBrandInHighlights, DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { CONTENT_CONTRACT } from './contentContract'
 import { scrubTrademarks } from './trademarkGuard'
+import { classifyStoredIhLine } from './productDetailAttrs'
 
 const MIN = CONTENT_CONTRACT.itemHighlights.min
 const MAX = CONTENT_CONTRACT.itemHighlights.max
@@ -601,6 +602,16 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     expect((line.match(/\bsleeve\b/gi) ?? []).length).toBe(1)        // not a garment noun — budget 1
     expect(line.toLowerCase()).not.toContain('fall sweatshirts for women')
     expect(line.toLowerCase()).not.toContain('sleeve detail graphic')
+    // FIX ROUND 1 (Blocking finding, reviewer task-8-review-findings.md): this exact line carries
+    // `fit` TWICE ("Relaxed Fit" + "Unisex Fit") — the pad loop's `usedBeforePad` snapshot (PO
+    // 2026-08-06, "pad exemption still holds" per the task-8 brief) legitimately lets these two
+    // INDEPENDENT spec facts co-exist even though they share the composer's own appended "Fit"
+    // boilerplate word. The composer is not the bug — `classifyStoredIhLine` disagreeing with it
+    // is: before this fix it classified this composer-produced line `repeat-in-stored-line` and the
+    // push seam refused a value the composer just legitimately shipped. `fit` now carries the SAME
+    // bounded budget-2 exemption as the garment head noun (`ihRepeatBudget`), so the seam agrees.
+    expect((line.match(/\bfit\b/gi) ?? []).length).toBe(2)
+    expect(classifyStoredIhLine(line)).toBe('ok')
   })
 
   it('TASK 8 PIN: a THIRD garment-noun mention is still rejected (Amazon\'s own cap, `ihRepeatViolations`) even by the repeat-permitting SHADOW — a pool whose floor is reachable only via `crewneck` a third time HOLDS. Three mutually-disjoint Tier-A phrases reach only 86 chars (well under the 107 floor); the only remaining candidate needs crewneck a 3rd time to fit the char budget, so `tierBFitBudgetSeen` fires, but the shadow\'s OWN `admitCandidate` call still runs `ihRepeatViolations` and refuses it — the shadow can never "reach the floor" through a violation the real loop could not ship either, so this reports the pre-existing reason (`under-floor-after-pad`, no spec pad bank here), never a false `under-floor-no-repeat`', () => {

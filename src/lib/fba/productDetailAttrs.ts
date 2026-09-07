@@ -439,8 +439,30 @@ export const ihFoldWord = (w: string): string => {
  * therefore the push seam's refusal and the card's pre-flight reason). Never write the literal `2`
  * anywhere else — `IH_MAX_WORD_REPEATS` above is the one constant. */
 export const IH_GARMENT_HEAD_FOLDED: ReadonlySet<string> = new Set([...GARMENT_HEAD_WORDS].map(ihFoldWord))
+
+/* ── FIX ROUND 1 (2026-09-07, Blocking finding, reviewer task-8-review-findings.md) ────────────
+ * The garment head noun is not the ONLY word this codebase already lets repeat by design: the
+ * spec-fact PAD bank (`composeItemHighlightDetailed`, `usedBeforePad` snapshot, PO ruling
+ * 2026-08-06 "unisex sizing must be explicit") deliberately lets `${spec.fit} Fit` ("Relaxed Fit")
+ * and `Unisex Fit` co-exist even though both are independent facts — they share only the literal
+ * word "Fit" the pad's own templates append to each. Task 8's brief calls this out verbatim as a
+ * standing invariant ("Pad exemption still holds: Classic Fit + Unisex Fit co-exist") — NOT
+ * something this round may remove, and not something either fact's wording (both phrases are used
+ * verbatim elsewhere, `handoff/SELLER_PROFILE.md` included) should change to dodge.
+ *
+ * Before this fix, that co-existence was real ONLY inside the composer's own selection loop:
+ * `lineHasSignificantRepeat`/`classifyStoredIhLine` (the push seam's and the card's byte-only
+ * classifiers, which cannot see which fact a word came from) had no such exemption, so a line the
+ * composer had just legitimately shipped — "…, Relaxed Fit, Unisex Fit" — was refused at the seam
+ * the composer's own producer/consumer unification (Task 8) exists to prevent. `fit` is the ONLY
+ * word that can ever diverge this way (the pad's own two-template design, not general pool
+ * content — no pool phrase in this codebase's fixtures carries a bare "fit"), so it gets the SAME
+ * bounded, Amazon's-own-cap budget as the garment head noun — never unlimited, never a second
+ * hand-maintained list, routed through this ONE function so every consumer (composer tier/admission
+ * AND the stored-line classifier) agrees by construction. */
+const IH_BOILERPLATE_BUDGET_2 = new Set(['fit'])
 export function ihRepeatBudget(folded: string): number {
-  return IH_GARMENT_HEAD_FOLDED.has(folded) ? IH_MAX_WORD_REPEATS : 1
+  return IH_GARMENT_HEAD_FOLDED.has(folded) || IH_BOILERPLATE_BUDGET_2.has(folded) ? IH_MAX_WORD_REPEATS : 1
 }
 
 /** Words that never count toward the repeat cap. Union of both historical sets — see the block
