@@ -129,10 +129,11 @@ const lineFor = (r: ReturnType<typeof build>, key: string): string => (r.perDesi
 const holdFor = (r: ReturnType<typeof build>, key: string) => r.perDesign.find((d) => d.designKey === key)?.hold ?? null
 
 /** TASK 6 (2026-09-06, absolute no-repeat) test helper: an INDEPENDENT fold over the RETURNED
- *  bytes — deliberately NOT the composer's own private `significantFolded` (itemHighlightComposer.ts)
- *  — so this proves the wire's output obeys the PO's ruling, not merely the composer's internal
- *  bookkeeping (`test-proves-the-mock-not-the-wire`). Mirrors the composer's own fold RULES
- *  (`ihFoldWord` + the same gender-plural collapse) using only the exported primitives. */
+ *  bytes — deliberately NOT the production `significantFolded` (`productDetailAttrs.ts` as of
+ *  round 2, F1; was `itemHighlightComposer.ts`) — so this proves the wire's output obeys the PO's
+ *  ruling, not merely the production fold's own bookkeeping (`test-proves-the-mock-not-the-wire`).
+ *  Mirrors the same fold RULES (`ihFoldWord` + the same gender-plural collapse) using only the
+ *  exported primitives. */
 const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
 const dupedFoldedTokens = (line: string): string[] => {
   const counts = new Map<string, number>()

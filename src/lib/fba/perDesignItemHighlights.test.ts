@@ -4,7 +4,26 @@
  * never a broadcast value (there is none to give: the map has no broadcast input by construction).
  */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignIhRows, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight } from './perDesignItemHighlights'
+
+/* ─── FIX WAVE 2 ROUND 2 (F1, controller RULING, final-fix-wave-2-round-2-findings.md) ────────────
+ * `perDesignItemHighlights.ts` is imported by the CLIENT page (`fba/listing/[asin]/page.tsx`,
+ * 'use client'). Fix wave 2 (I-2b) imported `lineHasSignificantRepeat` from
+ * `itemHighlightComposer.ts` — the generation path (contentTruth -> blankSpecs -> a lazy supabase
+ * client) — so the client page transitively reached the composer. The predicate moved to
+ * `productDetailAttrs.ts` (already a leaf `page.tsx` imports directly), and this module now imports
+ * ONLY `contentContract` + `productDetailAttrs`. Pinned on the file's own `import` lines — not a
+ * runtime behavior test, a STRUCTURAL one: the next value-level import added here is RED the moment
+ * it lands, regardless of whether tree-shaking would have hidden it from the bundle. */
+describe('F1 (round 2, controller RULING): perDesignItemHighlights.ts stays client-safe by construction', () => {
+  it('imports ONLY contentContract + productDetailAttrs — no value-level import reaches itemHighlightComposer/listingPipeline/blankSpecs/a supabase client', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'perDesignItemHighlights.ts'), 'utf8')
+    const modules = src.split(/\r?\n/).filter((l) => /^import /.test(l)).map((l) => l.match(/from '([^']+)'/)?.[1])
+    expect(modules).toEqual(['./contentContract', './productDetailAttrs'])
+  })
+})
 
 // FIX WAVE 2 (I-2, 2026-09-06): BOTH lines originally repeated a folded significant word (`men`
 // twice in BM_LINE; `graphic`/`tee` twice in RK_LINE) — harmless before this fix (this describe

@@ -297,10 +297,11 @@ describe('FIX ROUND 1 (#2 + #3): a genuinely COMPOSING six-design pool, own mutu
   const r2 = build(POOL2)
   const { values: values2, skipped: skipped2 } = buildPerSkuItemHighlightMap(r2.perChild, ALL_TARGETS, null)
 
-  /** Independent fold over the RETURNED bytes — deliberately NOT the composer's own private
-   *  `significantFolded` (itemHighlightComposer.ts) — mirrors itemHighlightPerDesign.test.ts's own
-   *  helper (same fold rules: `ihFoldWord` + the gender-plural collapse) so this proves the WIRE's
-   *  output obeys the no-repeat ruling, not merely the composer's internal bookkeeping. */
+  /** Independent fold over the RETURNED bytes — deliberately NOT the production `significantFolded`
+   *  (`productDetailAttrs.ts` as of round 2, F1; was `itemHighlightComposer.ts`) — mirrors
+   *  itemHighlightPerDesign.test.ts's own helper (same fold rules: `ihFoldWord` + the gender-plural
+   *  collapse) so this proves the WIRE's output obeys the no-repeat ruling, not merely the
+   *  production fold's own bookkeeping. */
   const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
   const dupedFoldedTokens = (line: string): string[] => {
     const counts = new Map<string, number>()

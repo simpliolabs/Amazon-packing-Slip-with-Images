@@ -27,10 +27,12 @@
  *    never handed another design's line, and never the broadcast value.
  */
 import { CONTENT_CONTRACT } from './contentContract'
-// FIX WAVE 2 (I-2b, 2026-09-06): the composer's OWN fold/repeat check — reused verbatim at the push
-// seam rather than a second tokenizer (coherence INVARIANT 1). No cycle: itemHighlightComposer.ts
-// never imports this module.
-import { lineHasSignificantRepeat } from './itemHighlightComposer'
+// FIX WAVE 2 ROUND 2 (F1, controller RULING, 2026-09-06): moved from `itemHighlightComposer.ts`
+// (the generation path — reaches `contentTruth` -> `blankSpecs` -> a lazy supabase client) to
+// `productDetailAttrs.ts` (a leaf `page.tsx` already imports directly): this module is imported by
+// the CLIENT page, so it must never import anything from the composer. No cycle either way: neither
+// module imports the other.
+import { lineHasSignificantRepeat } from './productDetailAttrs'
 
 /** Why an Item Highlight is HELD (the composer returned null). Each names ONE PO action.
  *  MOVED HERE (2026-09-04, closing the SILENT-HOLD defect class) from listingPipeline.ts: this

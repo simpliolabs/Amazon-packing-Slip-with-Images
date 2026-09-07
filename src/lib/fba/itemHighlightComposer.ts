@@ -33,7 +33,7 @@
  */
 import { CONTENT_CONTRACT } from './contentContract'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
-import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations } from './productDetailAttrs'
+import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations, GENDER_FOLDS, significantFolded, lineHasSignificantRepeat } from './productDetailAttrs'
 import { scrubTrademarks } from './trademarkGuard'
 import { type BlankSpec } from './blankSpecs'
 import {
@@ -130,31 +130,17 @@ export const titleCasePhrase = (p: string): string =>
   }).join(' ')
     .replace(/^./, (c) => c.toUpperCase())
 
-/** Gender/audience irregular plurals fold together (woman≡women, ladies≡lady, man≡men) — without
- *  this, "alligator shirt women" + "alligator shirts woman" both pass novelty and the line becomes
- *  the exact permutation-spam the PO rejected. EXPORTED (FIX WAVE 2, I-2, 2026-09-06): the ONE fold
- *  every repeat check in this file uses — `buildPerSkuItemHighlightMap` (perDesignItemHighlights.ts)
- *  reuses it verbatim at the push seam rather than hand-copying a second tokenizer (coherence
- *  INVARIANT 1 — a folding drift is how the `shirt`/coverage-token class of bug happens). */
-export const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
-export const significantFolded = (phrase: string): string[] =>
-  phrase.toLowerCase().split(/\s+/)
-    .map((w) => { const f = ihFoldWord(w); return GENDER_FOLDS[f] ?? f })
-    .filter((w) => w && !IH_INSIGNIFICANT.has(w))
-
-/** TRUE when `line` (the composer's own comma-joined shipped bytes, or any candidate stored line)
- *  repeats a folded significant word — the ABSOLUTE rule (PO ruling 2026-09-06, "2. No Repeat as
- *  per Amazon Ruules") stated as a predicate over bytes rather than over the live selection state,
- *  so a caller holding only the STORED line (no `usedFolded` set — the push seam, a stale per-child
- *  entry) can still ask the same question the composer's own selection loop asks incrementally. */
-export const lineHasSignificantRepeat = (line: string): boolean => {
-  const seen = new Set<string>()
-  for (const w of significantFolded(line)) {
-    if (seen.has(w)) return true
-    seen.add(w)
-  }
-  return false
-}
+/** FIX WAVE 2 ROUND 2 (F1, controller RULING, 2026-09-06): `GENDER_FOLDS`, `significantFolded` and
+ *  `lineHasSignificantRepeat` moved to `productDetailAttrs.ts` (imported above), beside the sibling
+ *  Item-Highlight repeat predicate (`ihRepeatViolations`, Amazon's own ≤2 cap) — ONE home for both.
+ *  This module used to be the ONLY definition site, and `perDesignItemHighlights.ts` (imported by
+ *  the CLIENT page) imported `lineHasSignificantRepeat` from HERE — the generation path (this file
+ *  reaches `contentTruth` -> `blankSpecs` -> a lazy supabase client) — so the client page
+ *  transitively reached the composer. `productDetailAttrs.ts` is already a leaf the client page
+ *  imports directly; this module now imports the three names from there instead of defining them,
+ *  and never re-exports them (nothing outside this file imported them from here — verified: the two
+ *  test files that reference these names by prose hand-copy their own local fold, they never
+ *  `import` it from this module). */
 
 /** TASK 2 (2026-09-06, PO "Why is Women repeating Twice?"): a candidate that adds ONE new token
  *  while repeating others used to outrank a candidate whose tokens are ALL new, merely by sorting

@@ -441,6 +441,47 @@ export function ihRepeatViolations(value: string): string[] {
   }
   return [...counts.entries()].filter(([, c]) => c > IH_MAX_WORD_REPEATS).map(([w]) => w)
 }
+
+/* ── THE ABSOLUTE NO-REPEAT PREDICATE — ONE HOME (FIX WAVE 2 ROUND 2, F1, controller RULING,
+ * 2026-09-06, final-fix-wave-2-round-2-findings.md) ───────────────────────────────────────────────
+ *
+ * `lineHasSignificantRepeat` (PO ruling "2. No Repeat as per Amazon Ruules") used to live in
+ * `itemHighlightComposer.ts` — the GENERATION path (imports `contentTruth` -> `blankSpecs` -> a
+ * lazy supabase client). `perDesignItemHighlights.ts` (the push seam + the per-design row builder
+ * the CLIENT page reads, `fba/listing/[asin]/page.tsx`, 'use client') imported it from there, so the
+ * client page transitively reached the composer: the next value-level import added to the composer
+ * would have landed in the browser bundle silently, regardless of whether tree-shaking hid today's
+ * import. This module is already a leaf `page.tsx` imports directly and already hosts the sibling
+ * predicate (`ihRepeatViolations`, Amazon's own ≤2-per-word cap) — ONE home for both Item-Highlight
+ * repeat predicates. `itemHighlightComposer.ts` now imports `GENDER_FOLDS`/`significantFolded`/
+ * `lineHasSignificantRepeat` from HERE instead of defining them; `perDesignItemHighlights.ts` still
+ * imports `lineHasSignificantRepeat`, but from HERE, never from the composer again. */
+
+/** Gender/audience irregular plurals fold together (woman≡women, ladies≡lady, man≡men) — without
+ *  this, "alligator shirt women" + "alligator shirts woman" both pass novelty and the line becomes
+ *  the exact permutation-spam the PO rejected. The ONE fold every repeat check in this codebase
+ *  uses — the composer's selection loop AND the push seam's terminal net both read this, so a
+ *  folding drift between "what composition calls a repeat" and "what the push seam calls a repeat"
+ *  (the class `coverage-token-folding-shirt-hub-trap` names) cannot happen. */
+export const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
+export const significantFolded = (phrase: string): string[] =>
+  phrase.toLowerCase().split(/\s+/)
+    .map((w) => { const f = ihFoldWord(w); return GENDER_FOLDS[f] ?? f })
+    .filter((w) => w && !IH_INSIGNIFICANT.has(w))
+
+/** TRUE when `line` (the composer's own comma-joined shipped bytes, or any candidate stored line)
+ *  repeats a folded significant word — the ABSOLUTE rule (PO ruling 2026-09-06, "2. No Repeat as
+ *  per Amazon Ruules") stated as a predicate over bytes rather than over the live selection state,
+ *  so a caller holding only the STORED line (no `usedFolded` set — the push seam, a stale per-child
+ *  entry) can still ask the same question the composer's own selection loop asks incrementally. */
+export const lineHasSignificantRepeat = (line: string): boolean => {
+  const seen = new Set<string>()
+  for (const w of significantFolded(line)) {
+    if (seen.has(w)) return true
+    seen.add(w)
+  }
+  return false
+}
 export function capItemHighlightRepeats(value: string): string {
   const fold = (w: string): string => {
     let b = w.toLowerCase().replace(/[^a-z0-9]/g, '')
