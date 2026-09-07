@@ -645,9 +645,64 @@ describe('Task 7: forced-gender lexicon extended with adult slang — ONE lexico
     expect(phraseTruthVerdict('for girls', SWEATS)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
   })
 
+  /* ── FIX WAVE 2 (M-2, 2026-09-06, controller RULING) ─────────────────────────────────────────────
+   * `ADULT_AUDIENCE_RE` (rule (c), adult-on-kids) used to hand-copy `women|woman|womens|womans|
+   * ladies|lady|men|mens|mans` — invisible to `guys`/`gals`/`dudes`/`gents` etc. so a kids family
+   * with NO declared lean (rule (c2) never fires without one) could carry adult slang unrejected.
+   * Derived from the SAME `LEAN_FEM_CORE`/`LEAN_MASC_CORE` now. */
+  it('FIX WAVE 2 (M-2): a kids family with NO declared lean now rejects adult slang under rule (c), same as it always rejected "for men"/"for ladies"', () => {
+    const KIDS_NO_LEAN: PhraseTruthCtx = {
+      garmentFamily: 'kids_tee', spec: TEE.spec, allowedBrand: null,
+      audience: audienceOfGarmentFamily('kids_tee'), audienceLean: null, field: 'backend',
+    }
+    // Pre-existing (unchanged): "for men"/"for ladies" already rejected.
+    expect(phraseTruthVerdict('shirts for men', KIDS_NO_LEAN)).toEqual({ ok: false, reason: 'audience-adult-on-kids' })
+    expect(phraseTruthVerdict('shirts for ladies', KIDS_NO_LEAN)).toEqual({ ok: false, reason: 'audience-adult-on-kids' })
+    // THE GAP THIS FIX CLOSES: these four were previously invisible (rule (c2) never fires without a
+    // declared unisex lean, so there was NO gate on them at all here before this fix).
+    for (const phrase of ['shirts for guys', 'shirts for gals', 'shirts for dudes', 'shirts for gents']) {
+      expect(phraseTruthVerdict(phrase, KIDS_NO_LEAN), phrase).toEqual({ ok: false, reason: 'audience-adult-on-kids' })
+    }
+    // The ruled kids-axis pin — unchanged: "for girls"/"for boys" stay OK on a kids family (they are
+    // the kids axis's OWN words, KIDS_AUDIENCE_RE, never added to the adult lexicon).
+    expect(phraseTruthVerdict('shirts for girls', KIDS_NO_LEAN)).toEqual({ ok: true })
+    expect(phraseTruthVerdict('shirts for boys', KIDS_NO_LEAN)).toEqual({ ok: true })
+  })
+
+  it('FIX WAVE 2 (M-2): the design-token exemption still covers a kids design NAMED with a gender word, now that the core adds bare "man" — "Spider Man"/"Little Man" keep their own name', () => {
+    const KIDS_NO_LEAN: PhraseTruthCtx = {
+      garmentFamily: 'kids_tee', spec: TEE.spec, allowedBrand: null,
+      audience: audienceOfGarmentFamily('kids_tee'), audienceLean: null, field: 'backend',
+    }
+    // "man" was NOT in the pre-fix hand-copied list (only "men"/"mens"/"mans") — the widened core
+    // adds it (`m[ae]n['’]?s?` matches bare "man"). Without the design-token exemption, a kids
+    // family whose design is literally named "Spider Man" would newly reject its own name.
+    expect(phraseTruthVerdict('spider man shirt', { ...KIDS_NO_LEAN, designTokens: ['Spider Man'] })).toEqual({ ok: true })
+    expect(phraseTruthVerdict('little man shirt', { ...KIDS_NO_LEAN, designTokens: ['Little Man'] })).toEqual({ ok: true })
+    // WITHOUT the design token the very same phrase is still rejected — the exemption did not widen
+    // into a blanket pass for "man" on kids families in general.
+    expect(phraseTruthVerdict('spider man shirt', KIDS_NO_LEAN)).toEqual({ ok: false, reason: 'audience-adult-on-kids' })
+    // A design named "Spider Man" does NOT exempt an UNRELATED adult word in the same phrase.
+    expect(phraseTruthVerdict('spider man shirt for ladies', { ...KIDS_NO_LEAN, designTokens: ['Spider Man'] }))
+      .toEqual({ ok: false, reason: 'audience-adult-on-kids' })
+  })
+
   it('LEAN_FEM_CORE / LEAN_MASC_CORE are the exact pattern strings the ruling specified (lexicon-content pin)', () => {
-    expect(LEAN_FEM_CORE).toBe(`wom[ae]n['’]?s?|ladies|lady|gals`)
+    // FIX WAVE 2 (M-1, 2026-09-06, controller RULING): `gal` (singular) joins `gals` — symmetry with
+    // the masculine half, which already carried both `guys|guy`.
+    expect(LEAN_FEM_CORE).toBe(`wom[ae]n['’]?s?|ladies|lady|gals|gal`)
     expect(LEAN_MASC_CORE).toBe(`m[ae]n['’]?s?|guys|guy|dudes|dude|bros|bro|gents|gent`)
+  })
+
+  it('FIX WAVE 2 (M-1): "gal" is a real forced-gender word on a unisex family (Item Highlights), and "galaxy"/"gallery"/"regal" do NOT false-positive on it', () => {
+    const UNISEX_HL: PhraseTruthCtx = { ...TEE, audienceLean: 'unisex', field: 'highlights' }
+    expect(phraseTruthVerdict('novelty shirt for a gal', UNISEX_HL)).toEqual({ ok: false, reason: 'audience-lean-lie' })
+    // Negatives: a design/pool phrase containing "galaxy"/"gallery"/"regal" is NOT a forced-gender
+    // hit — word-boundary discipline (`\bgal\b`) already prevents this; pinned so a future change to
+    // the alternation order cannot silently widen the match.
+    for (const phrase of ['galaxy print shirt', 'art gallery shirt', 'regal lion shirt']) {
+      expect(phraseTruthVerdict(phrase, UNISEX_HL), phrase).toEqual({ ok: true })
+    }
   })
 
   /* ── ONE LEXICON: both other copies compose onto the SAME exported core, never hand-copy it ──── */

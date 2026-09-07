@@ -230,7 +230,8 @@ export function garmentNounConstraint(ctx: PhraseTruthCtx): { allowed: string[];
 // GLOBAL since 2026-08-21 so the rule can ask WHICH audience words a phrase asserts, not merely
 // whether it asserts one — the design-token exemption below needs the individual hits. `matchAll`
 // does not mutate the source regex's lastIndex, so these stay safe to share.
-const ADULT_AUDIENCE_RE = /\b(?:women|woman|womens|womans|ladies|lady|men|mens|mans|adults?|plus[\s-]?size)\b/gi
+// ADULT_AUDIENCE_RE moved below LEAN_FEM_CORE/LEAN_MASC_CORE (FIX WAVE 2, M-2, 2026-09-06) — its
+// gender half is now DERIVED from that same core rather than hand-copied; see the comment there.
 const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/gi
 
 /** The family's design words, plural-folded so a "Girl Dad" design also owns "girls". */
@@ -269,11 +270,36 @@ const foreignAudienceHits = (phrase: string, re: RegExp, design: ReadonlySet<str
  *  EXPORTED as strings — not a compiled RegExp — so the two other module-private copies of this
  *  lexicon (nicheGuards.ts, syncListingContent.ts; both already independently drifted, carrying
  *  `female`/`girls?` this file never had) COMPOSE their own extra axis words onto this SAME core
- *  instead of hand-copying it — the class of drift this task exists to end. */
-export const LEAN_FEM_CORE = `wom[ae]n['’]?s?|ladies|lady|gals`
+ *  instead of hand-copying it — the class of drift this task exists to end.
+ *  FIX WAVE 2 (M-1, 2026-09-06, controller RULING — final whole-branch review #2): `gal` (singular)
+ *  joins `gals` — the masculine half already carried BOTH `guys|guy`; the feminine half was missing
+ *  its own singular, an asymmetry the review recorded as byte-exact-as-ruled but still worth closing
+ *  ("DO fix"). Word-boundary discipline (the `\b…\b` wrapper every consumer applies) already keeps
+ *  `galaxy`/`gallery`/`regal` from matching — `\bgal\b` requires a non-word character (or string
+ *  edge) on both sides, which none of those three offer. */
+export const LEAN_FEM_CORE = `wom[ae]n['’]?s?|ladies|lady|gals|gal`
 export const LEAN_MASC_CORE = `m[ae]n['’]?s?|guys|guy|dudes|dude|bros|bro|gents|gent`
 const LEAN_FEM_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE})\\b`, 'i')
 const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b`, 'i')
+
+/** FIX WAVE 2 (M-2, 2026-09-06, controller RULING — final whole-branch review #2): rule (c)'s
+ *  adult-on-kids half used to hand-copy `women|woman|womens|womans|ladies|lady|men|mens|mans` —
+ *  the SAME one-lexicon drift Task 7 closed for rule (c2), just on the other axis, and the review
+ *  found it live: "for Guys"/"for Gals"/"for Dudes"/"for Gents" on a kids family with no declared
+ *  lean read as OK (a gap) because those words were invisible here. Now DERIVED from the SAME
+ *  `LEAN_FEM_CORE`/`LEAN_MASC_CORE` rule (c2) tests against — never a second hand-copy — plus the
+ *  two words that are this rule's OWN business, not the forced-gender rule's: `adults?` and
+ *  `plus[\s-]?size`. `girls`/`boys` stay OFF (they are `KIDS_AUDIENCE_RE`'s words, Task 7's
+ *  pre-stage ruling, unchanged). Declared AFTER the two CORE strings (temporal-dead-zone: a `const`
+ *  cannot be read before its own declaration executes) — this module's only ordering constraint.
+ *  The core adds bare `man` (via `m[ae]n['’]?s?`, previously ONLY `men|mens|mans` were adult-axis
+ *  words here) — the design-token exemption at rule (c)'s call site (`designWordSet`/
+ *  `foreignAudienceHits`, unchanged by this fix) already exempts a kids design's OWN name (e.g.
+ *  "Spider Man", "Little Man") from any hit, adult or kids, so a bare "man" a design NAMES itself
+ *  after is not newly rejected — pinned in contentTruthSpine.test.ts. GLOBAL (`matchAll`, never
+ *  `.test()`) for the same reason the pre-existing regex was: the design-token exemption needs
+ *  every individual hit, not merely whether one exists. */
+const ADULT_AUDIENCE_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE}|${LEAN_MASC_CORE}|adults?|plus[\\s-]?size)\\b`, 'gi')
 /** GLOBAL twins of the two regexes above, for Item Highlights only (Task 5) — `foreignAudienceHits`
  *  needs every match (`matchAll`), not merely whether one exists, so it can tell a phrase's OWN
  *  gendered hit (the design's own name — exempt) from a foreign one (a market audience claim —

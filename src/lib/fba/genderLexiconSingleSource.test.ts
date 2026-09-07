@@ -245,13 +245,13 @@ interface AllowlistEntry {
   note?: string
 }
 
+// FIX WAVE 2 (M-2, 2026-09-06, controller RULING): the ADULT_AUDIENCE_RE allowlist entry that used
+// to live here is REMOVED — its gender half is now `new RegExp(\`...${LEAN_FEM_CORE}|${LEAN_MASC_CORE}...\`, 'gi')`
+// (contentTruth.ts), a COMPOSITION (the literal text contains "LEAN_FEM_CORE"/"LEAN_MASC_CORE"
+// verbatim), so `isComposition` now skips it before it ever reaches the allowlist check — an entry
+// here for it would be permanently stale (test 2 below, "every allowlist entry still exists
+// verbatim", would fail the moment the hand-copied literal it names stopped existing in the file).
 const ALLOWLIST: AllowlistEntry[] = [
-  {
-    file: "fba/contentTruth.ts",
-    literal: "/\\b(?:women|woman|womens|womans|ladies|lady|men|mens|mans|adults?|plus[\\s-]?size)\\b/gi",
-    reason: "stop-list",
-    note: "ADULT_AUDIENCE_RE — rule (c) kids/adult axis, a DIFFERENT predicate than forced-gender rule (c2); not a lean copy",
-  },
   {
     file: "fba/listingPipeline.ts",
     literal: "/\\b(?:men|mens|man|male|boys?)\\b/gi",
@@ -724,12 +724,14 @@ describe('genderLexiconSingleSource — ONE lexicon enumeration test (fix round 
   it('per-class counts — the honest, corrected residue this round sizes for the follow-up (Task 9 / title Phase 4)', () => {
     const counts: Record<string, number> = {}
     for (const e of ALLOWLIST) counts[e.reason] = (counts[e.reason] ?? 0) + 1
+    // FIX WAVE 2 (M-2, 2026-09-06): 'stop-list' 4 -> 3 — ADULT_AUDIENCE_RE's entry removed (it is now
+    // a composition, not a hand-copy; see the ALLOWLIST comment above).
     expect(counts).toEqual({
       'predicate-twin': 42,
       'strip-net': 14,
       'tail-shape': 4,
-      'stop-list': 4,
+      'stop-list': 3,
     })
-    expect(ALLOWLIST.length).toBe(64)
+    expect(ALLOWLIST.length).toBe(63)
   })
 })
