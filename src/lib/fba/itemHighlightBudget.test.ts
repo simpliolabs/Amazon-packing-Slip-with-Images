@@ -11,10 +11,17 @@
 import { describe, it, expect } from 'vitest'
 import { CONTENT_CONTRACT } from './contentContract'
 import { validateItemHighlights } from './listingPipeline'
-import { capItemHighlightRepeats } from './productDetailAttrs'
+import { capItemHighlightRepeats, type IhNetResult } from './productDetailAttrs'
 
 // 118 chars, clean distinct phrases, no repeats past the word cap, no sentence punctuation.
 const VAL_118 = '100% Ring-Spun Cotton, Relaxed Unisex Fit, Crew Neck, Bold Motivational Print, Durable Wash-Safe Graphic, Gift Ready'
+
+/** IH TERMINAL NET FIX ROUND 1: `capItemHighlightRepeats` returns a typed union — unwrap it for a
+ *  test that expects the net to ACCEPT the line (a refusal throws loudly, naming the reason). */
+function okValue(r: IhNetResult): string {
+  if (!r.ok) throw new Error(`expected the net to accept the line, but it refused: ${r.reason}`)
+  return r.value
+}
 
 describe('the one Item Highlights budget', () => {
   it('the contract says 125 max / 110 fill target — the PO 2026-08-10 ruling', () => {
@@ -29,14 +36,14 @@ describe('the one Item Highlights budget', () => {
   })
 
   it('the terminal net passes the same value through UNCUT (no hidden 75 truncation)', () => {
-    expect(capItemHighlightRepeats(VAL_118)).toBe(VAL_118)
+    expect(okValue(capItemHighlightRepeats(VAL_118))).toBe(VAL_118)
   })
 
   it('an over-budget value IS flagged and IS capped at a comma boundary — the cap exists, once', () => {
     const long = VAL_118 + ', Everyday Layering Staple'   // pushes past 125
     expect(long.length).toBeGreaterThan(CONTENT_CONTRACT.itemHighlights.max)
     expect(validateItemHighlights(long, 'THE CEO', false, []).some((p) => /characters/.test(p))).toBe(true)
-    const capped = capItemHighlightRepeats(long)
+    const capped = okValue(capItemHighlightRepeats(long))
     expect(capped.length).toBeLessThanOrEqual(CONTENT_CONTRACT.itemHighlights.max)
     expect(capped.endsWith(',')).toBe(false)
   })

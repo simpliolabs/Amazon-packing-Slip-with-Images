@@ -40,9 +40,18 @@ export const AMAZON_TITLE_MAX = 200
  *
  * NOTE what buying that precondition actually gets: measured across all 34 children of B0DSCDZC6K,
  * the Item Highlights line contributes 4-5 uniquely-indexed tokens (classic, cotton, polyester,
- * sweatshirts, fit) that the backend keywords do not already carry — and the field renders ONLY in
- * the HTML <title>, never anywhere a shopper looks (DOM-probed on the live listing: present in
- * document.title, absent from #centerCol and document.body.innerText).
+ * sweatshirts, fit) that the backend keywords do not already carry.
+ *
+ * DOCTRINE CORRECTION (2026-09-07, IH terminal net spec, Important 5 — controller RULING on
+ * phase-1-fix-round-findings.md): the line above USED to read "the field renders ONLY in the HTML
+ * <title>, never anywhere a shopper looks". That was refuted by a LIVE DOM probe the same day: on
+ * our own listings the Item Highlights line renders inside `#centerCol`, in
+ * `document.body.innerText`, ~366×60 px directly under the h1 — measured on `B0H9VDCBZJ` (124
+ * chars) and `B0DMXMH266` (122 chars). The field IS shopper-visible, consistent with
+ * `CONTENT_CONTRACT.itemHighlights`'s own note below ("Amazon moved Item Highlights to display
+ * BENEATH the item name") — this comment simply had not been updated to agree with it. Two PO
+ * rulings ("not conversion copy" and the 107-char floor, `handoff/SELLER_PROFILE.md`) were made
+ * believing no shopper sees this field; both should be re-read against the corrected premise.
  *
  * `hardCap` still equals this today so behaviour is byte-identical. Raising it is Phase 4 of
  * docs/superpowers/specs/2026-09-05-title-ceiling-and-shape-implementation.md, and MUST come after

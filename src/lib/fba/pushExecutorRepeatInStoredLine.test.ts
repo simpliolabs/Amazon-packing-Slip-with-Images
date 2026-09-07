@@ -55,3 +55,55 @@ describe('pushExecutor.ts consumes the repeat-in-stored-line refusal (FIX WAVE 2
     expect(SRC).toMatch(/d\.skipReason === REPEAT_IN_STORED_LINE/)
   })
 })
+
+/**
+ * IMPORTANT 3 (2026-09-07, controller RULING on phase-1-fix-round-findings.md, opus review
+ * phase-1-review.md): an `under-floor` SKU (Phase 1's H13 fix) reached `buildPerSkuItemHighlightMap`'s
+ * `skipped` list and the CARD (pre-flight) correctly, but vanished from the PUSH REPORT — the
+ * `:3903`/`:3983` gates only recognized `NO_LINE_FOR_DESIGN`/`REPEAT_IN_STORED_LINE`, so an
+ * under-floor SKU produced NO result row, no progress event, and no line in the push summary. Same
+ * source-scan discipline as FIX WAVE 2 above (live Supabase/SP-API chain — see the file docstring).
+ */
+describe('pushExecutor.ts consumes the under-floor refusal at the push REPORT (IMPORTANT 3, fix round 1)', () => {
+  it('imports UNDER_FLOOR from the seam module', () => {
+    const importLine = SRC.match(/import \{[^}]*\} from '@\/lib\/fba\/perDesignItemHighlights'/)?.[0] ?? ''
+    expect(importLine).toMatch(/\bUNDER_FLOOR\b/)
+  })
+
+  it('the executePush details-branch per-SKU skip check ALSO recognizes UNDER_FLOOR (a third branch, appended after the pinned prefix above) and reports its own accurate message', () => {
+    expect(SRC).toMatch(/item\.skipReason === NO_LINE_FOR_DESIGN \|\| item\.skipReason === REPEAT_IN_STORED_LINE \|\| !item\.raw \|\| item\.skipReason === UNDER_FLOOR/)
+    expect(SRC).toMatch(/item\.skipReason === UNDER_FLOOR/)
+  })
+
+  it('the held-SKU surfacing pass (rawDetailDiff) ALSO recognizes UNDER_FLOOR (appended after the pinned prefix above), never falling through to the generic "has no composed Item Highlight" text', () => {
+    expect(SRC).toMatch(/r\.skipReason === NO_LINE_FOR_DESIGN \|\| r\.skipReason === REPEAT_IN_STORED_LINE \|\| r\.skipReason === UNDER_FLOOR/)
+    expect(SRC).toMatch(/d\.skipReason === UNDER_FLOOR/)
+  })
+
+  it('the under-floor message reuses the ONE existing IH_HOLD_MESSAGES[\'under-floor\'] text (no second hand-written floor sentence)', () => {
+    expect(SRC).toMatch(/IH_HOLD_MESSAGES\[UNDER_FLOOR\]/)
+  })
+})
+
+/**
+ * BLOCKING 1 (2026-09-07, controller RULING on phase-1-fix-round-findings.md, opus review
+ * phase-1-review.md): a refusal must never become an empty SP-API `replace` patch. `buildDetailPatchValue`
+ * now returns `[]` on refusal (productDetailAttrs.ts) instead of `[{value:''}]` — this pin proves the
+ * ONE choke point every single-attribute PATCH sender (`patchSkuDetail`, called directly by the
+ * single-push details branch AND by `pushPerFieldFallback`'s per-attribute retries) refuses to
+ * forward an empty resolved value to Amazon at all, rather than sending `patches:[{value:[]}]`
+ * un-examined.
+ */
+describe('pushExecutor.ts never forwards an empty resolved patch value to Amazon (BLOCKING 1, fix round 1)', () => {
+  it('patchSkuDetail resolves the patch value BEFORE the fetch call and refuses (no HTTP call) when it is empty', () => {
+    // CRLF-tolerant: this repo's source files use \r\n line endings.
+    const fn = SRC.match(/async function patchSkuDetail\([\s\S]*?\r?\n\}\r?\n/)?.[0] ?? ''
+    expect(fn).not.toBe('')
+    // the guard's own emptiness check must appear BEFORE the `await fetch(` call in this function
+    const guardIdx = fn.search(/resolvedValue\.length === 0/)
+    const fetchIdx = fn.search(/await fetch\(/)
+    expect(guardIdx).toBeGreaterThan(-1)
+    expect(fetchIdx).toBeGreaterThan(-1)
+    expect(guardIdx).toBeLessThan(fetchIdx)
+  })
+})

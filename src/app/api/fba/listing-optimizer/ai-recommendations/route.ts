@@ -2199,8 +2199,13 @@ export async function GET(req: NextRequest) {
           // any PATCH — blocks unrelated pushes (a title push failed on it). Cap it on the READ path so the
           // seller never SEES or pushes the raw spam; same heal-on-read as the value normalization here and
           // the trademark scrub-on-serve below. No-op on a clean value; the push boundary caps too.
+          // BLOCKING 2 (controller RULING, fix round 1): a refusal from the typed net must NEVER be
+          // served as `''` in place of the seller's stored value — that reads on the card as "the
+          // field went empty". Serve the raw stored value unchanged on a refusal; the push seam's own
+          // classification (classifyStoredIhLine) is the ONE place that names the refusal to the
+          // seller, pre-flight.
           recommended_value: isItemHighlightsField(fieldName, (p as { sp_api_key?: string }).sp_api_key)
-            ? capItemHighlightRepeats(recVal)
+            ? ((): string => { const r = capItemHighlightRepeats(recVal); return r.ok ? r.value : recVal })()
             : recVal,
         }
       })
@@ -2250,7 +2255,13 @@ export async function GET(req: NextRequest) {
   const per_child_titles_scrubbed = per_child_titles.map((c) => ({ ...c, title: scrubTrademarks(c.title || '') }))
   const per_child_bullets_scrubbed = per_child_bullets.map((c) => ({ ...c, bullets: scrubTrademarksArr(c.bullets || []) }))
   const per_child_descriptions_scrubbed = per_child_descriptions.map((c) => ({ ...c, description: scrubTrademarks(c.description || '') }))
-  const per_child_item_highlights_scrubbed = per_child_item_highlights.map((c) => ({ ...c, item_highlight: c.item_highlight ? capItemHighlightRepeats(scrubTrademarks(c.item_highlight)) : '' }))
+  // BLOCKING 2 (controller RULING, fix round 1): heal-on-read must never serve '' for a refusal —
+  // keep this design's stored line unchanged, same discipline as the broadcast heal-on-serve above.
+  const per_child_item_highlights_scrubbed = per_child_item_highlights.map((c) => {
+    if (!c.item_highlight) return { ...c, item_highlight: '' }
+    const r = capItemHighlightRepeats(scrubTrademarks(c.item_highlight))
+    return { ...c, item_highlight: r.ok ? r.value : c.item_highlight }
+  })
 
   // SHIP-TRUTH DERIVATION (2026-07-09, approach A): the card verdict / current_status /
   // replacement_content are DERIVED from live truth on every serve — displayed content is the exact

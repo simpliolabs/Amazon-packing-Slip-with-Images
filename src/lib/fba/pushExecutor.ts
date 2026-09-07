@@ -47,7 +47,7 @@ import {
   type DetailAttribute, type ItemHighlightsApiState,
 } from '@/lib/fba/productDetailAttrs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
-import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerCurrent, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight, type IhSkuSkipReason } from '@/lib/fba/perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerCurrent, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, UNDER_FLOOR, IH_HOLD_MESSAGES, type PerChildItemHighlight, type IhSkuSkipReason } from '@/lib/fba/perDesignItemHighlights'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
@@ -1371,15 +1371,26 @@ async function patchSkuDetail(
   /** Calibrated patch value (a specific write-form variant) — overrides the builders. */
   patchValue?: Record<string, unknown>[],
 ): Promise<PatchResult> {
+  // Composite attributes (SHIRT neck/closure/sleeve) need the value on their schema
+  // sub-field — the flat shape is accepted then silently dropped (0/89 applied live).
+  const resolvedValue = patchValue ?? (valueShape
+    ? buildShapedDetailValue(valueShape, value, MARKETPLACE_ID)
+    : buildDetailPatchValue(attribute, value, MARKETPLACE_ID))
+  // BLOCKING 1 (controller RULING, fix round 1, phase-1-review.md): a terminal net refusing (Item
+  // Highlights) — or, pre-existing, a genuinely empty rawValue — resolves to `[]`
+  // (`buildDetailPatchValue`'s fix). `[]` must NEVER be forwarded as `patches:[{op:'replace',
+  // value:[]}]`: that array is the LITERAL body of the SP-API PATCH, and an unexamined empty value
+  // reaching Amazon is exactly the class BLOCKING 1 named. This is the ONE choke point every
+  // single-attribute PATCH funnels through (the single/per-design push details branch AND
+  // `pushPerFieldFallback`'s per-attribute retries both call this function) — refuse here, before
+  // any network call, with a reason the caller's existing `!result.ok` handling already surfaces.
+  if (resolvedValue.length === 0) {
+    return { ok: false, submissionId: null, error: `Nothing to patch for "${attribute.spApiKey}" — the value resolved to empty (a terminal net refused it, or it was genuinely blank); never sent as an empty PATCH.` }
+  }
   await spApiWriteBucket.acquire()   // global 5-rps ceiling (task #23)
   const body = {
     productType,
-    patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`,
-      // Composite attributes (SHIRT neck/closure/sleeve) need the value on their schema
-      // sub-field — the flat shape is accepted then silently dropped (0/89 applied live).
-      value: patchValue ?? (valueShape
-        ? buildShapedDetailValue(valueShape, value, MARKETPLACE_ID)
-        : buildDetailPatchValue(attribute, value, MARKETPLACE_ID)) }],
+    patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`, value: resolvedValue }],
   }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
   const url =
@@ -3900,10 +3911,16 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             // FIX WAVE 2 (I-2b): 'repeat-in-stored-line' gets its OWN accurate message — a line DID
             // exist, the terminal net at the seam refused it for repeating a significant word, which
             // is a different fact than "held, nothing composed" and must not be reported as that.
-            if (ctx.perDesignEntries && (item.skipReason === NO_LINE_FOR_DESIGN || item.skipReason === REPEAT_IN_STORED_LINE || !item.raw)) {
+            // IMPORTANT 3 (controller RULING, fix round 1): 'under-floor' (Phase 1's H13 fix) reached
+            // the seam's `skipped` list and the card, but this gate never recognized it — the SKU
+            // produced no result row and no progress event at all (neither pushed nor reported). Added
+            // as a THIRD branch (appended, not inserted, so the pinned prefix above stays matchable).
+            if (ctx.perDesignEntries && (item.skipReason === NO_LINE_FOR_DESIGN || item.skipReason === REPEAT_IN_STORED_LINE || !item.raw || item.skipReason === UNDER_FLOOR)) {
               const reason = item.skipReason === REPEAT_IN_STORED_LINE
                 ? 'Skipped — this SKU\'s stored Item Highlight repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit to recompose it.'
-                : 'Skipped — this SKU\'s design has no composed Item Highlight (held); it is never given another design\'s line.'
+                : item.skipReason === UNDER_FLOOR
+                  ? `Skipped — this SKU's stored Item Highlight is under the floor (${IH_HOLD_MESSAGES[UNDER_FLOOR]}); re-run ↻ Regen or a full audit to recompose it.`
+                  : 'Skipped — this SKU\'s design has no composed Item Highlight (held); it is never given another design\'s line.'
               results.push({ sku: item.sku, status: 'skipped', submissionId: null, error: reason, isParent })
               emit({ type: 'progress', sku: item.sku, status: 'skipped', error: reason })
               continue
@@ -3979,11 +3996,15 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // entered `diff` (proposed '' ⇒ changed:false) so the seller sees WHICH were skipped and why.
           // FIX WAVE 2 (I-2b): also surfaces 'repeat-in-stored-line' refusals with their OWN accurate
           // reason (a line existed; the seam refused it — not "held, nothing composed").
+          // IMPORTANT 3 (controller RULING, fix round 1): also surfaces 'under-floor' — appended after
+          // the pinned prefix above so the existing REPEAT_IN_STORED_LINE regex pin stays matchable.
           if (ctx.perDesignEntries) {
-            for (const d of rawDetailDiff.filter((r) => (r.skipReason === NO_LINE_FOR_DESIGN || r.skipReason === REPEAT_IN_STORED_LINE) && r.asin !== parent_asin)) {
+            for (const d of rawDetailDiff.filter((r) => (r.skipReason === NO_LINE_FOR_DESIGN || r.skipReason === REPEAT_IN_STORED_LINE || r.skipReason === UNDER_FLOOR) && r.asin !== parent_asin)) {
               const reason = d.skipReason === REPEAT_IN_STORED_LINE
                 ? `Skipped (${REPEAT_IN_STORED_LINE}) — ${d.designName || d.designKey || 'this design'}'s stored Item Highlight repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit.`
-                : `Skipped (${NO_LINE_FOR_DESIGN}) — ${d.designName || d.designKey || 'this design'} has no composed Item Highlight; never given another design's line.`
+                : d.skipReason === UNDER_FLOOR
+                  ? `Skipped (${UNDER_FLOOR}) — ${d.designName || d.designKey || 'this design'}'s stored Item Highlight is under the floor (${IH_HOLD_MESSAGES[UNDER_FLOOR]}).`
+                  : `Skipped (${NO_LINE_FOR_DESIGN}) — ${d.designName || d.designKey || 'this design'} has no composed Item Highlight; never given another design's line.`
               results.push({ sku: d.sku, status: 'skipped', submissionId: null, error: reason, isParent: false })
               emit({ type: 'progress', sku: d.sku, status: 'skipped', error: reason })
             }

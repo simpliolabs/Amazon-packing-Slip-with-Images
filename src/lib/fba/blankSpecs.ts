@@ -735,7 +735,13 @@ export function ensureBlankBrandInHighlights(
   const named = titles.filter((t): t is string => !!t && !!t.trim())
   if (named.length > 0 && named.every((t) => carries(t))) { log('title-carries'); return hl }
   if (carries(hl)) { log('ih-carries'); return hl } // IH already carries it — idempotence
-  const candidate = capItemHighlightRepeats(`authentic ${brand} blank, ${hl}`)
+  // FIX ROUND 1 (2026-09-07, controller RULING): `capItemHighlightRepeats` now returns a typed
+  // union — a refusal here is treated exactly like the pre-existing `phrases.length < 2` floor-abort
+  // below (the candidate cannot be netted into a compliant line, so the insertion is abandoned and
+  // the ORIGINAL `hl` ships unchanged; the brand is never bought at the price of IH compliance).
+  const capResult = capItemHighlightRepeats(`authentic ${brand} blank, ${hl}`)
+  if (!capResult.ok) { log('floor-abort', { from: hl.length, refused: capResult.reason }); return hl }
+  const candidate = capResult.value
   const phrases = candidate.split(',').map((p) => p.trim()).filter(Boolean)
   if (phrases.length < 2) { log('floor-abort', { from: hl.length }); return hl } // compliance floor: an IH must keep >=2 phrases
   const evicted = hl.split(',').map((p) => p.trim()).filter(Boolean).length + 1 - phrases.length
@@ -823,7 +829,16 @@ export function applyBlankBrandNetToDetails(
   if (idx < 0) return { details: arr, changed: false }
   const current = detailValueToString(arr[idx].recommended_value)
   if (!current.trim()) return { details: arr, changed: false }
-  const netted = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, titles, blank))
+  // BLOCKING 2 (controller RULING, fix round 1): a refusal must NEVER overwrite this stored value —
+  // keep `current` (changed:false) and log the hold, the same discipline the per-design twin below
+  // now uses. `capItemHighlightRepeats` returning `''` used to be read as "no brand change" and
+  // written straight over an already-compliant, PO-accepted line.
+  const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, titles, blank))
+  if (!capResult.ok) {
+    console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'refused-kept-current', field: detailValueToString(arr[idx].field_name), current, reason: capResult.reason }))
+    return { details: arr, changed: false }
+  }
+  const netted = capResult.value
   if (netted === current) return { details: arr, changed: false }
   // WATERFALL WINS (PO ruling, SELLER_PROFILE §5 — adversarial precedence question 2026-08-08):
   // this net MAY rewrite even a sticky-kept PO-ACCEPTED Item Highlight when the shipping titles
@@ -864,7 +879,17 @@ export function applyBlankBrandNetPerDesign<T extends { sku: string; asin?: stri
     if (!current) return e
     const title = titlesBySku.get(e.sku) ?? (e.asin ? titlesByAsin.get(e.asin) : undefined)
     if (!title) return e   // no shipped title known for this SKU → nothing to net against
-    const netted = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, [title], blank))
+    // BLOCKING 2 REPRODUCTION (controller RULING, fix round 1, phase-1-review.md): a refusal used to
+    // become `''`, and `netted === current` was false (an empty string is never equal to a non-empty
+    // stored line), so the design's already-compliant line was OVERWRITTEN with `''` and marked
+    // `changed:true` — silently converting a pushable design to HELD. Keep `e` (the prior value)
+    // unchanged on refusal, same as the `!title` guard immediately above.
+    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, [title], blank))
+    if (!capResult.ok) {
+      console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'per-design-refused-kept', sku: e.sku, current, reason: capResult.reason }))
+      return e
+    }
+    const netted = capResult.value
     if (netted === current) return e
     changed = true
     console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'per-design-rewrite', sku: e.sku, from: current, to: netted }))

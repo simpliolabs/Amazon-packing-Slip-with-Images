@@ -24,7 +24,7 @@ import { selectionMode, resolveRankingTargets } from '@/lib/keyword-engine/selec
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
-import { buildItemHighlights, buildItemHighlightsPerDesign, buildPerDesignIhDetailPatch, IH_REASON, IH_HOLD_MESSAGES } from '@/lib/fba/listingPipeline'
+import { buildItemHighlights, buildItemHighlightsPerDesign, buildPerDesignIhDetailPatch, IH_REASON, IH_HOLD_MESSAGES, type IhHoldReason } from '@/lib/fba/listingPipeline'
 import { normalizeAudienceLean } from '@/lib/fba/contentTruth'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
@@ -265,7 +265,17 @@ export async function POST(req: NextRequest) {
       // second rule.
       audienceLean: apparel ? normalizeAudienceLean(storedAudienceLean) : null,
     })
-    const hl = capItemHighlightRepeats((built.value || '').trim())
+    // FIX ROUND 1 (2026-09-07, controller RULING): `capItemHighlightRepeats` now returns a typed
+    // union. A genuine REFUSAL (the net could not net the composer's own output into a compliant
+    // line — an edge case, since the composer already floor-checks) maps onto the SAME
+    // IhHoldReason vocabulary this route already used (no new hold semantics); the pre-existing
+    // "built.value was already empty" HOLD path below is unchanged.
+    const capResult = capItemHighlightRepeats((built.value || '').trim())
+    if (!capResult.ok) {
+      const reason: IhHoldReason = built.hold ?? (capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor')
+      return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason }, { status: 422 })
+    }
+    const hl = capResult.value
     if (!hl) {
       // HOLD (PO 2026-08-21): name the reason — the PO's next action — never a generic "empty".
       const reason = built.hold ?? 'under-floor'

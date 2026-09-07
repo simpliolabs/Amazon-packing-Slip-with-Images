@@ -646,13 +646,29 @@ export function classifyStoredIhLine(value: string | null | undefined): IhLineCl
  * push-boundary's defence-in-depth net, not a second copy of the composer's stricter rule, and nine
  * pre-existing tests (`blankBrandHighlightNet.test.ts` T4.x, `itemHighlightOneRule.test.ts`) already
  * pin bytes that would break under the stricter budget). What changes is what happens when neither
- * net can produce a compliant, non-empty result: REFUSE (return `''`), never fall back to the raw
- * un-netted input and never ship a length-driven amputation that lands under the floor. A caller
- * that gets `''` back is exactly as unpushable as a HELD design already is (`buildDetailPatchValue`
- * only ever calls this on a non-empty, already-trimmed value, so `''` unambiguously means "this net
- * refused" — never "there was nothing to net").
+ * net can produce a compliant, non-empty result: REFUSE, never fall back to the raw un-netted input
+ * and never ship a length-driven amputation that lands under the floor.
+ *
+ * FIX ROUND 1 (2026-09-07, controller RULING on phase-1-fix-round-findings.md — opus review
+ * phase-1-review.md BLOCKING 1 + BLOCKING 2): Phase 1 encoded the refusal as `''`, and `''` already
+ * meant "no value" to eight existing callers — one token, two facts. BLOCKING 1 reproduced
+ * `buildDetailPatchValue` shipping `[{value:"", ...}]`, the literal body of a live SP-API `replace`
+ * patch that CLEARS a shopper-visible field; BLOCKING 2 reproduced `applyBlankBrandNetPerDesign`
+ * overwriting a compliant-looking 129-char stored line with `''`, `changed:true` — a design that WAS
+ * pushable silently becomes HELD, and the overwrite is destructive (the truncation it replaced was
+ * at least recoverable). The refusal is now a TYPED, OUT-OF-BAND result (`IhNetResult`), never a
+ * string — a caller that does not destructure `.ok` before reading a value will not typecheck.
  */
-export function capItemHighlightRepeats(value: string): string {
+export type IhRefusalReason = 'repeat-over-budget' | 'over-max' | 'under-floor'
+export type IhNetResult = { ok: true; value: string } | { ok: false; reason: IhRefusalReason }
+
+export function capItemHighlightRepeats(value: string): IhNetResult {
+  // Empty/whitespace-only input is NOT a refusal — it is "nothing to net", the pre-existing meaning
+  // of `''` every caller already treats as "no value" before or after calling this net.
+  // `buildDetailPatchValue` guards it BEFORE calling in; `regenerate-item-highlight/route.ts` does
+  // not, so this keeps that caller's legacy behaviour byte-identical instead of mislabeling an
+  // absent line as a "repeat"/"over-max" refusal.
+  if (!value.trim()) return { ok: true, value: '' }
   // TASK 8 (2026-09-07): the local hand-copy of the fold is gone — this is the SAME hand-copy class
   // this function's own docstring history already names; `ihFoldWord` is byte-identical (proven on
   // this function's own pre-existing tests). The cap below is Amazon's own cap
@@ -667,7 +683,8 @@ export function capItemHighlightRepeats(value: string): string {
   // correct verdict (see the refusal below).
   const counts = new Map<string, number>()
   const kept: string[] = []
-  for (const phrase of value.split(',').map((p) => p.trim()).filter(Boolean)) {
+  const phrases = value.split(',').map((p) => p.trim()).filter(Boolean)
+  for (const phrase of phrases) {
     const local = new Map<string, number>()
     for (const w of phrase.split(/[\s/-]+/).map(ihFoldWord)) {
       if (w.length <= 1 || IH_TRIVIAL.has(w)) continue
@@ -700,17 +717,29 @@ export function capItemHighlightRepeats(value: string): string {
   // REFUSE, never truncate into a lie (Phase 1, H10/H11): nothing survived either net — the raw
   // `value` (H10, H11's old fallback) is never returned; a design that cannot net to a compliant
   // line is exactly as unshippable as one the composer never composed in the first place.
-  if (capped.length === 0) return ''
+  // FIX ROUND 1: the reason distinguishes WHICH net emptied it — the repeat cap already dropped every
+  // phrase (`kept.length === 0`, H10's class) vs. the repeat cap kept phrases but the length cap could
+  // not fit even one of them (`kept.length > 0`, H11's class: a single phrase over budget on its own).
+  if (capped.length === 0) {
+    return { ok: false, reason: kept.length === 0 ? 'repeat-over-budget' : 'over-max' }
+  }
   const joined = capped.join(', ')
-  // REFUSE rather than amputate (Phase 1, H12): a drop that the LENGTH net actually performed
-  // (`capped` shorter than `kept` — some trailing phrase(s) were sacrificed to fit the max) must not
-  // silently land the survivor under `CONTENT_CONTRACT.itemHighlights.min` (107) — that is half a
-  // sentence shipped as if it were the whole one, and nothing downstream re-checks the floor. Scoped
-  // to an ACTUAL length-driven drop (never fires when every kept phrase already fit, so a
-  // naturally-short-but-untouched value — not this net's job to floor-check, see `classifyStoredIhLine`
-  // for the pre-flight floor gate on STORED lines — still passes through unchanged as before).
-  if (capped.length < kept.length && joined.length < CONTENT_CONTRACT.itemHighlights.min) return ''
-  return joined
+  // REFUSE rather than amputate (Phase 1, H12; IMPORTANT 4, fix round 1): a drop that EITHER net
+  // actually performed — the LENGTH net (`capped` shorter than `kept`) OR the REPEAT net (`kept`
+  // shorter than the original phrase count) — must not silently land the survivor under
+  // `CONTENT_CONTRACT.itemHighlights.min` (107). Phase 1 scoped this floor check to the length-driven
+  // drop only; the reviewer reproduced the same silent amputation reached via a REPEAT-only drop (a
+  // 112-char, 5-phrase line whose repeat cap alone drops one "cotton" phrase, landing a 90-char
+  // 4-phrase survivor — no length-driven drop ever occurred, so the old guard never fired). Scoped to
+  // an ACTUAL drop on EITHER axis (never fires when every original phrase already survived both nets,
+  // so a naturally-short-but-untouched value — not this net's job to floor-check, see
+  // `classifyStoredIhLine` for the pre-flight floor gate on STORED lines — still passes through
+  // unchanged as before).
+  const dropped = capped.length < kept.length || kept.length < phrases.length
+  if (dropped && joined.length < CONTENT_CONTRACT.itemHighlights.min) {
+    return { ok: false, reason: 'under-floor' }
+  }
+  return { ok: true, value: joined }
 }
 
 export function buildDetailPatchValue(
@@ -723,7 +752,18 @@ export function buildDetailPatchValue(
   if (!trimmed) return []
   // Item Highlight: cap repeated words so a non-compliant value (LLM/stored/stale) can never be the reason
   // Amazon rejects this OR any other attribute's patch for the SKU (Amazon re-validates the whole item).
-  if (isItemHighlightsField(null, attr.spApiKey)) trimmed = capItemHighlightRepeats(trimmed)
+  if (isItemHighlightsField(null, attr.spApiKey)) {
+    const netResult = capItemHighlightRepeats(trimmed)
+    // BLOCKING 1 (controller RULING, fix round 1): a refusal must NEVER become `[{value:''}]` — that
+    // array is the literal body of an SP-API `replace` patch, so it would CLEAR a live,
+    // shopper-visible field. `[]` (no patch entries at all — the same "nothing to patch" shape this
+    // function already returns for empty input two lines up) is the correct signal for "this net
+    // refused"; the caller is responsible for skipping the SKU/attribute and reporting why (the
+    // per-SKU push loop — see pushExecutor.ts's `patchSkuDetail` guard and Important 3's UNDER_FLOOR
+    // surfacing at the pre-flight skip checks).
+    if (!netResult.ok) return []
+    trimmed = netResult.value
+  }
   const normalized = attr.enumMap ? (attr.enumMap[trimmed.toLowerCase()] ?? trimmed) : trimmed
   return [{ value: normalized, marketplace_id: marketplaceId, language_tag: languageTag }]
 }
