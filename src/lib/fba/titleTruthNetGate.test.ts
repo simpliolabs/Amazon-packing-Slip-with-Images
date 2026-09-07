@@ -214,8 +214,16 @@ describe('FAILURE 2 — cross-design contamination on the EXACT live per-child t
   it('the design that OWNS the name keeps it verbatim — protection follows the design, not the family', () => {
     const own = 'THE CEO Business B*tch Sweatshirt | Funny Work Crewneck'
     expect(netForDesign(own, 'BUSINESSBTCH', 'Business B*tch')).toBe(own)
-    // And even when its own name sits in a droppable segment, it is protected there.
-    const commaed = 'THE CEO Boss Lady Sweatshirt | Fall Crewneck, Business B*tch'
+    // And even when its own name sits in a droppable segment, it is protected there. Segment 0 here
+    // is deliberately UNRELATED filler for this design (BUSINESSBTCH), NOT a real sibling's name —
+    // fix round 1 (2026-09-06, B1) widened the shared audience lexicon's REMOVER to match its
+    // DETECTOR (`LEAN_FEM_CORE` now includes "lady"), so this fixture's original filler "Boss Lady"
+    // (coincidentally also a REAL sibling design's name, `DESIGNS.BOSSLADY`) is correctly recognised
+    // as a forced-gender word on this unisex-lean SWEATS ctx and would now be word-scrubbed by rule
+    // (b) — a true, unrelated consequence of the ruling, not a bug in this test's actual subject
+    // (whether "Business B*tch" survives in a droppable comma segment). Swapped to gender-neutral
+    // filler so the assertion stays about what it was written to test.
+    const commaed = 'THE CEO Grind Mode Sweatshirt | Fall Crewneck, Business B*tch'
     expect(netForDesign(commaed, 'BUSINESSBTCH', 'Business B*tch')).toBe(commaed)
   })
 

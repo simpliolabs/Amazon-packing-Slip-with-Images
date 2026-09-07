@@ -24,7 +24,7 @@ import { selectionMode, resolveRankingTargets } from '@/lib/keyword-engine/selec
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
-import { buildItemHighlights, buildItemHighlightsPerDesign, IH_HOLD_MESSAGES } from '@/lib/fba/listingPipeline'
+import { buildItemHighlights, buildItemHighlightsPerDesign, buildPerDesignIhDetailPatch, IH_REASON, IH_HOLD_MESSAGES } from '@/lib/fba/listingPipeline'
 import { normalizeAudienceLean } from '@/lib/fba/contentTruth'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
@@ -38,6 +38,37 @@ function admin() {
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { autoRefreshToken: false, persistSession: false } },
   )
+}
+
+/**
+ * FIX WAVE 2 (I-2a, 2026-09-06, controller RULING — final whole-branch review #2, Important #2):
+ * THE per-design Item Highlight writer this route uses — for BOTH the partial-hold (composed > 0)
+ * and all-held (composed === 0) branches. Constructs the row patch via `buildPerDesignIhDetailPatch`
+ * (listingPipeline.ts), the SAME function the full-audit pipeline calls, so this route can never
+ * drift into a second, differently-shaped writer (the "two write paths" class). Exported so the fix's
+ * TDD pins can call it directly with a mocked `supabase` and assert the EXACT rows written, without
+ * mocking this route's whole upstream chain (keyword pool, blank resolution, design-group identity).
+ */
+export async function persistPerDesignItemHighlights(
+  supabase: ReturnType<typeof admin>,
+  parentAsin: string,
+  details: Record<string, unknown>[],
+  ihIdx: number,
+  built: ReturnType<typeof buildItemHighlightsPerDesign>,
+): Promise<{ updated: Record<string, unknown>[]; error: string | null }> {
+  const patch = buildPerDesignIhDetailPatch(built, IH_REASON)
+  const updated = details.map((p, i) => (i === ihIdx ? { ...p, ...patch } : p))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const db = supabase as any
+  const { error: updErr } = await db.from('listing_seo_recommendations')
+    .update({ product_details_improvements: updated, per_child_item_highlights: built.perChild })
+    .eq('parent_asin', parentAsin)
+  if (updErr) {
+    // Missing migration 060: persisting the marker WITHOUT the lines would blank the field — refuse loudly instead.
+    console.error(`[regenerate-item-highlight] per-design persist failed for ${parentAsin} (run migration 060): ${updErr.message}`)
+    return { updated, error: `Could not save the per-design Item Highlights (${updErr.message}). Apply migration 060 (per_child_item_highlights) and retry.` }
+  }
+  return { updated, error: null }
 }
 
 export async function POST(req: NextRequest) {
@@ -187,31 +218,33 @@ export async function POST(req: NextRequest) {
         audienceLeanByDesign: storedAudienceLeanByDesign,
       })
       const composed = built.perDesign.filter((d) => d.value)
+      // FIX WAVE 2 (I-2a, 2026-09-06, controller RULING — final whole-branch review #2, Important
+      // #2): BOTH branches below persist through `persistPerDesignItemHighlights`, the SAME writer
+      // `buildPerDesignIhDetailPatch` (listingPipeline.ts) also drives for the full-audit path — path
+      // parity (fba-generation-invariants INVARIANT 3). Before this fix the all-held branch (below)
+      // wrote NOTHING, so a pre-ruling stored line (or any stale line) stayed pushable and the card
+      // showed no Held badge until a full AI audit ran. This is not the #352 outage-blanking trap:
+      // `built.shared.hold` is guaranteed non-null whenever `composed.length === 0`
+      // (buildItemHighlightsPerDesign's own `sharedHold` derivation), so this is always a
+      // deterministic ruling verdict with a named reason, never an ambiguous empty result — a genuine
+      // exception anywhere above this line still hits the route's own try/catch and writes nothing.
+      const persisted = await persistPerDesignItemHighlights(supabase, parent_asin, details, ihIdx, built)
+      if (persisted.error) {
+        return NextResponse.json({ error: persisted.error }, { status: 500 })
+      }
       if (composed.length === 0) {
         const reasons = [...new Set(built.perDesign.map((d) => d.hold).filter((h): h is NonNullable<typeof h> => !!h))]
         const missing = built.shared.missingDesigns
         return NextResponse.json({
-          error: `Item Highlight HELD for every design (${built.perDesign.length}): ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')}${missing.length ? ` (unrated designs: ${missing.join(', ')})` : ''} — kept the existing values.`,
+          error: `Item Highlight HELD for every design (${built.perDesign.length}): ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')}${missing.length ? ` (unrated designs: ${missing.join(', ')})` : ''} — the held state has been saved (card shows Held; a stale/pre-ruling stored line can no longer be pushed).`,
           hold: reasons[0] ?? 'under-floor', missing_designs: missing,
           per_design: built.perDesign.map((d) => ({ designKey: d.designKey, designName: d.designName, hold: d.hold })),
         }, { status: 422 })
       }
-      // hold:null — this branch only reaches here when composed.length > 0 (the held case returns
-      // 422 above without writing), so any stale hold reason on the existing row must clear too.
-      const updated = details.map((p, i) => (i === ihIdx ? { ...p, recommended_value: '', per_design: true, hold: null } : p))
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const db = supabase as any
-      const { error: updErr } = await db.from('listing_seo_recommendations')
-        .update({ product_details_improvements: updated, per_child_item_highlights: built.perChild }).eq('parent_asin', parent_asin)
-      if (updErr) {
-        // Missing migration 060: persisting the marker WITHOUT the lines would blank the field — refuse loudly instead.
-        console.error(`[regenerate-item-highlight] per-design persist failed for ${parent_asin} (run migration 060): ${updErr.message}`)
-        return NextResponse.json({ error: `Could not save the per-design Item Highlights (${updErr.message}). Apply migration 060 (per_child_item_highlights) and retry.` }, { status: 500 })
-      }
       return NextResponse.json({
         per_design: perDesignIhRows(built.perChild),
         per_child_item_highlights: built.perChild,
-        product_details_improvements: updated,
+        product_details_improvements: persisted.updated,
         shared: { item_highlight: built.shared.value, designs: built.shared.designKeys, foreignDropped: built.shared.foreignDropped },
         composed: composed.length, held: built.perDesign.length - composed.length,
       })

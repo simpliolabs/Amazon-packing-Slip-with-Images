@@ -226,6 +226,11 @@ describe('NOT held — unchanged behaviour (regression guard: the fix must not t
   it('single-design: a viable rated pool still composes a real value, hold null, row pushed exactly as before', async () => {
     // The exact composing fixture from itemHighlightHold.test.ts's "composes in the band" case —
     // proven to produce a non-empty line through the SAME buildItemHighlights this pipeline calls.
+    // TASK 6 (2026-09-06, absolute no-repeat): two of these ("later gator shirt women", "alligator
+    // clothing women") repeat `later`/`alligator` and never compose any more (they used to reach the
+    // floor only via the now-deleted Tier-B fallback) — an extra all-new phrase ("weekend cookout
+    // vibes") is added so this regression guard's OWN intent (a viable pool composes; the fix under
+    // test here must not touch that path) still holds a genuine composing fixture, not a HOLD.
     const analysis: AnalyzedKeyword[] = [
       { keyword: 'later gator shirt women', searchVolume: 450, themeFit: 3 } as unknown as AnalyzedKeyword,
       { keyword: 'see you later alligator', searchVolume: 900, themeFit: 3 } as unknown as AnalyzedKeyword,
@@ -234,6 +239,8 @@ describe('NOT held — unchanged behaviour (regression guard: the fix must not t
       { keyword: 'novelty animal tops', searchVolume: 200, themeFit: 2 } as unknown as AnalyzedKeyword,
       { keyword: 'comfort colors graphic tee', searchVolume: 5000, themeFit: 2 } as unknown as AnalyzedKeyword,
       { keyword: 'swamp humor clothing', searchVolume: 150, themeFit: 2 } as unknown as AnalyzedKeyword,
+      { keyword: 'weekend cookout vibes', searchVolume: 220, themeFit: 3 } as unknown as AnalyzedKeyword,
+      { keyword: 'holiday backyard celebration', searchVolume: 210, themeFit: 3 } as unknown as AnalyzedKeyword,
     ]
     const openai = makeOpenAiStub()
     const input: PipelineInput = {

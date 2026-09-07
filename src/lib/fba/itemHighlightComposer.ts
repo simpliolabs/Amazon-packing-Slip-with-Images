@@ -33,7 +33,7 @@
  */
 import { CONTENT_CONTRACT } from './contentContract'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
-import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations } from './productDetailAttrs'
+import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations, GENDER_FOLDS, significantFolded, lineHasSignificantRepeat } from './productDetailAttrs'
 import { scrubTrademarks } from './trademarkGuard'
 import { type BlankSpec } from './blankSpecs'
 import {
@@ -55,6 +55,11 @@ export interface ComposerPoolRow {
 const MIN_CANDIDATES = 3
 /** Rated pools compose themeFit >= 2 ONLY (PO 2026-08-21, B0DQ5YZH38: fit-1 "Band Tees" led a line). */
 const MIN_THEME_FIT = 2
+/** The pool-phrase loop's own pick cap (was an inline `picked.length >= 7` break). Named ONCE here
+ *  (FIX WAVE 2, I-1, 2026-09-06) so `admitCandidate` — shared by the live selection loop and the
+ *  reachability shadow — can enforce the identical cap in both places; a hand-copied `7` in the
+ *  shadow is exactly how this class of drift (I-1) happened the first time. */
+const MAX_PICKED_PHRASES = 7
 
 /** The composer's garment vocabulary: the blank_specs enum UNFOLDED (kids_tee must reach the
  *  audience rule; long_sleeve_tee names its own spec phrase), plus the title-guess values.
@@ -125,24 +130,41 @@ export const titleCasePhrase = (p: string): string =>
   }).join(' ')
     .replace(/^./, (c) => c.toUpperCase())
 
-/** Gender/audience irregular plurals fold together (woman≡women, ladies≡lady, man≡men) — without
- *  this, "alligator shirt women" + "alligator shirts woman" both pass novelty and the line becomes
- *  the exact permutation-spam the PO rejected. */
-const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
-const significantFolded = (phrase: string): string[] =>
-  phrase.toLowerCase().split(/\s+/)
-    .map((w) => { const f = ihFoldWord(w); return GENDER_FOLDS[f] ?? f })
-    .filter((w) => w && !IH_INSIGNIFICANT.has(w))
+/** FIX WAVE 2 ROUND 2 (F1, controller RULING, 2026-09-06): `GENDER_FOLDS`, `significantFolded` and
+ *  `lineHasSignificantRepeat` moved to `productDetailAttrs.ts` (imported above), beside the sibling
+ *  Item-Highlight repeat predicate (`ihRepeatViolations`, Amazon's own ≤2 cap) — ONE home for both.
+ *  This module used to be the ONLY definition site, and `perDesignItemHighlights.ts` (imported by
+ *  the CLIENT page) imported `lineHasSignificantRepeat` from HERE — the generation path (this file
+ *  reaches `contentTruth` -> `blankSpecs` -> a lazy supabase client) — so the client page
+ *  transitively reached the composer. `productDetailAttrs.ts` is already a leaf the client page
+ *  imports directly; this module now imports the three names from there instead of defining them,
+ *  and never re-exports them (nothing outside this file imported them from here — verified: the two
+ *  test files that reference these names by prose hand-copy their own local fold, they never
+ *  `import` it from this module). */
 
 /** TASK 2 (2026-09-06, PO "Why is Women repeating Twice?"): a candidate that adds ONE new token
  *  while repeating others used to outrank a candidate whose tokens are ALL new, merely by sorting
  *  higher on theme-fit/volume — "Fall Sweatshirts for Women" (adds only `fall`) beat "Graphic
  *  Pullover Top" (adds three) to a slot, and the line repeated `sweatshirts`/`women`. Amazon's ≤2
- *  cap let it through because each repeat landed exactly twice.
+ *  cap let it through because each repeat landed exactly twice. Task 2's own fix ranked in two
+ *  tiers — Tier A (every token new) fills before a Tier-B FALLBACK (repeats a used token), engaged
+ *  only once Tier A was exhausted below the fill band.
+ *
+ *  TASK 6 (2026-09-06, PO ruling verbatim "2. No Repeat as per Amazon Ruules" — rejecting the
+ *  controller's proposed amendment "no repeat unless the 107 floor cannot otherwise be reached
+ *  truthfully"): the Tier-B FALLBACK is gone. A candidate that repeats ANY already-used folded
+ *  significant token is REJECTED, full stop, in BOTH selection loops — see the two call sites below,
+ *  which now accept only `tier === 'A'` and never iterate a 'B' pass. `classifyTier` itself is
+ *  UNCHANGED (still a pure three-way classifier: 'A' / 'B' / `null`) because both call sites still
+ *  need to tell "this candidate would have added new content, but only via a repeat" (tier 'B') apart
+ *  from "this candidate adds nothing new at all" (`null`) — that distinction is what lets the caller
+ *  report the PO-facing `under-floor-no-repeat` hold instead of a generic "pool too thin" reason when
+ *  the true cause is the absolute rule, not a starved pool. `classifyTier` plays no part in selection
+ *  any more; it is read-only, for that one detection.
  *
  *  Tier A = every significant token is new (zero overlap with `usedFolded`). Tier B = adds at least
- *  one new token but repeats at least one used token (today's rule, now the FALLBACK tier). `null` =
- *  adds nothing new — never composes, same as before this task.
+ *  one new token but repeats at least one used token (NEVER composes since Task 6). `null` = adds
+ *  nothing new — never composes, same as before Task 2.
  *
  *  Shared by BOTH selection loops (pool phrases below, spec-fact pad further down) so the tier rule
  *  lives in exactly one place — the two loops rank different candidate shapes but must never fork
@@ -152,6 +174,49 @@ const classifyTier = (folded: readonly string[], usedFolded: ReadonlySet<string>
   const addsNew = folded.some((w) => !usedFolded.has(w))
   if (!addsNew) return null
   return folded.some((w) => usedFolded.has(w)) ? 'B' : 'A'
+}
+
+/** FIX WAVE 2 (I-1, 2026-09-06, controller RULING on the final whole-branch review #2): the real
+ *  pool loop's own per-candidate ADMISSION decision — tier (the repeat rule; `allowRepeat` picks
+ *  which tiers may compose), the named pick cap, the char-budget fit, Amazon's own <=2-per-word cap
+ *  (`ihRepeatViolations`), and the "brand appears in at most one picked phrase" rule — extracted into
+ *  ONE function so the live selection (`allowRepeat: false`) and the reachability shadow
+ *  (`allowRepeat: true`, `shadowRepeatReachesFloor` below) can never drift apart: the shadow walks
+ *  the SAME admission gate the real loop enforces and inherits every rule by construction instead of
+ *  re-modeling a subset of them (the bug this finding closes — the shadow used to skip both the <=2
+ *  cap and the pick cap, so it could report a repeat-permitting selection "reachable" using more
+ *  repeats or more picks than the real loop, even with repeats allowed, could ever actually admit).
+ *
+ *  Deliberately NOT part of admission: garment-surface-variety ordering (the live loop's own
+ *  `preferNewGarment` pass). That preference decides which Tier-A candidate goes first among equals
+ *  on THIS pass — a candidate it skips now can still be picked on the next pass — so it can never be
+ *  the reason a candidate is permanently unreachable, only the reason it lands in a different slot.
+ *  Modeling it here would duplicate ordering logic without changing whether 107 chars is reachable.
+ *
+ *  `picked`/`len` describe the running selection the caller is about to extend; `repeatCheckBase` is
+ *  the array `ihRepeatViolations` must see the draft against — the pool loop passes `withBrand(picked)`
+ *  because the reserved brand phrase counts toward the repeat cap before it is literally pushed. */
+function admitCandidate(
+  phrase: string,
+  folded: readonly string[],
+  tierBasis: ReadonlySet<string>,
+  allowRepeat: boolean,
+  picked: readonly string[],
+  len: number,
+  max: number,
+  repeatCheckBase: readonly string[],
+  brandRe: RegExp | null,
+  brandPick: string | null,
+): boolean {
+  const tier = classifyTier(folded, tierBasis)
+  if (tier === null) return false
+  if (tier === 'B' && !allowRepeat) return false
+  if (picked.length >= MAX_PICKED_PHRASES) return false
+  const nextLen = len + (picked.length ? 2 : 0) + phrase.length
+  if (nextLen > max) return false
+  if (ihRepeatViolations([...repeatCheckBase, phrase].join(', ')).length > 0) return false
+  if (brandRe && brandRe.test(phrase) && (brandPick || repeatCheckBase.some((p) => brandRe.test(p)))) return false
+  return true
 }
 
 export interface ComposerOpts {
@@ -173,11 +238,69 @@ export interface ComposerOpts {
   designTokens?: readonly string[]
 }
 
-/** The composer's null stages — the caller maps them to a PO-facing hold reason. */
-export type ComposerNullStage = 'unrated-pool' | 'too-few-candidates' | 'too-few-picked' | 'under-floor-after-pad'
+/** The composer's null stages — the caller maps them to a PO-facing hold reason.
+ *  `under-floor-no-repeat` (Task 6, 2026-09-06): the absolute no-repeat rule (not a thin pool) is
+ *  why the floor was missed — see `repeatBlocked` at both call sites below. */
+export type ComposerNullStage = 'unrated-pool' | 'too-few-candidates' | 'too-few-picked' | 'under-floor-after-pad' | 'under-floor-no-repeat'
 export interface ComposerResult {
   line: string | null
   stage: ComposerNullStage | null
+}
+
+/** FIX ROUND 1 (#1, PO-controller ruling 2026-09-06): `repeatBlocked` used to fire the instant ANY
+ *  Tier-B candidate merely fit the remaining budget — not when a repeat would actually have reached
+ *  the floor. Reproduced against unmodified HEAD 7fc05ae: pool ['retro sunset vibes','coastal palm
+ *  energy','retro palm','retro cactus'] has exactly one Tier-B candidate that fits budget ('retro
+ *  cactus'), so the old flag fired and named `under-floor-no-repeat` — but the best ANY repeat-
+ *  permitting selection can reach on that pool is 53 chars, nowhere near the 107 floor. The Task 6
+ *  repro pool (crewneck/fall-sweatshirts/…) is the control case: a repeat-permitting selection there
+ *  really does reach 122 chars, so `under-floor-no-repeat` is correct for it.
+ *
+ *  This shadow pass is the fix: one cheap, deterministic greedy walk over the SAME already-filtered
+ *  `candidates` (novelty check, truth stage, legal door already applied) plus the spec fact bank,
+ *  admitting a candidate through the SAME `admitCandidate` gate the real loop uses, `allowRepeat:
+ *  true` (Tier A or B — only "adds nothing new" is excluded, matching Task 2's pre-Task-6 admission
+ *  rule). It answers exactly one question — "could a repeat-permitting selection reach MIN?" — and
+ *  is discarded immediately after; it never writes to the real `picked`/`usedFolded` and cannot
+ *  change a single shipped byte.
+ *
+ *  FIX WAVE 2 (I-1): now enforces the SAME pick cap, char budget, Amazon ≤2-per-word cap and
+ *  brand-once rule as the real loop, via `admitCandidate` — the class of mis-attribution this
+ *  finding closes (the shadow used to answer "reachable" using more repeats or more picks than the
+ *  real loop, even with repeats permitted, could ever actually admit; see the `summer`/pick-cap pins
+ *  in itemHighlightComposer.test.ts). Deliberately STILL excludes garment-surface-variety ordering —
+ *  see the note on `admitCandidate` above for why that one is correctly out of scope. */
+function shadowRepeatReachesFloor(
+  candidates: readonly ComposerPoolRow[],
+  basePicked: readonly string[],
+  baseUsedFolded: ReadonlySet<string>,
+  spec: ComposerOpts['spec'],
+  min: number,
+  max: number,
+  brandRe: RegExp | null,
+  brandPick: string | null,
+): boolean {
+  const picked = [...basePicked]
+  const used = new Set(baseUsedFolded)
+  let len = picked.reduce((n, p, i) => n + p.length + (i ? 2 : 0), 0)
+  const tryAdd = (phrase: string, folded: readonly string[]) => {
+    if (len >= min) return
+    if (!admitCandidate(phrase, folded, used, true, picked, len, max, picked, brandRe, brandPick)) return
+    len += (picked.length ? 2 : 0) + phrase.length
+    picked.push(phrase)
+    folded.forEach((w) => used.add(w))
+  }
+  for (const c of candidates) {
+    if (len >= min) break
+    const phrase = titleCasePhrase(c.keyword)
+    if (!basePicked.includes(phrase)) tryAdd(phrase, significantFolded(c.keyword))
+  }
+  const factFillers = spec ? [
+    spec.material || '', spec.fit ? `${spec.fit} Fit` : '', spec.unisex === true ? 'Unisex Fit' : '',
+    spec.neck || '', spec.sleeve || '', spec.dye ? `${spec.dye} Fabric` : '',
+  ].filter(Boolean) : []
+  for (const f of factFillers) tryAdd(titleCasePhrase(f), significantFolded(f))
+  return len >= min
 }
 
 /**
@@ -241,7 +364,7 @@ export function composeItemHighlightDetailed(
   // 2026-08-21: every null branch below names itself — two 6014 families returned null WITH a full
   // spec available and nobody could say which filter starved them. A silent null is a guess factory.
   const truthDrops: Partial<Record<IhTruthReason, number>> = {}
-  const why = { pool: pool.length, ratedShare: Math.round(ratedShare * 100), requireFit, needBrand, afterFit: 0, candidates: 0, picked: 0, lineLen: 0, truthDrops }
+  const why = { pool: pool.length, ratedShare: Math.round(ratedShare * 100), requireFit, needBrand, afterFit: 0, candidates: 0, picked: 0, lineLen: 0, truthDrops, repeatBlocked: false }
   const nullOut = (stage: ComposerNullStage): ComposerResult => {
     console.log(JSON.stringify({ tag: 'IH_COMPOSER_NULL', stage, ...why }))
     return { line: null, stage }
@@ -300,38 +423,48 @@ export function composeItemHighlightDetailed(
     if (gm) usedGarmentSurfaces.add(gm)
   }
 
-  // TASK 2: Tier A (all-new candidates) fills BEFORE Tier B (repeats a used token) — never the
-  // reverse, even when a Tier-B candidate outranks a Tier-A one on fit/volume. Within each tier, the
-  // existing two-pass order holds: first prefer candidates introducing a NEW garment surface (the
-  // variety craft), then fill remaining budget with any novel-in-tier candidate. Tier B is reached
-  // only once every Tier-A candidate (both passes) has been considered.
-  for (const tier of ['A', 'B'] as const) {
-    for (const preferNewGarment of [true, false]) {
-      for (const c of candidates) {
-        if (picked.length >= 7 || lineLen() >= AIM) break
-        const phrase = titleCasePhrase(c.keyword)
-        if (picked.includes(phrase) || phrase === brandPick) continue
-        const folded = significantFolded(c.keyword)
-        if (classifyTier(folded, usedFolded) !== tier) continue        // must add something new, tier order
-        const gm = c.keyword.match(GARMENT_SURFACE_RE)?.[0]?.toLowerCase().replace(/[-\s]/g, '').replace(/s$/, '')
-        if (preferNewGarment && gm && usedGarmentSurfaces.has(gm)) continue
-        if (preferNewGarment && !gm) continue
-        const nextLen = lineLen() + (picked.length ? 2 : 0) + phrase.length
-        if (nextLen > MAX) continue
-        const draft = withBrand([...picked, phrase]).join(', ')
-        if (ihRepeatViolations(draft).length > 0) continue               // Amazon's ≤2 per-word rule
-        // PO ruling 2026-08-21 (B0GWFFK1W7 "comfort colors tshirt, comfort colors graphic tee…" —
-        // "repeating CC 2 times"): the blank brand appears in AT MOST ONE picked phrase. Amazon's
-        // ≤2-per-word cap allows two; the PO does not. The reserved waterfall phrase counts as it.
-        if (brandRe && brandRe.test(phrase) && (brandPick || picked.some((pp) => brandRe.test(pp)))) continue
-        picked.push(phrase)
-        folded.forEach((w) => usedFolded.add(w))
-        if (gm) usedGarmentSurfaces.add(gm)
-      }
+  // TASK 6 (2026-09-06, PO "No Repeat as per Amazon Ruules"): Task 2's Tier-B FALLBACK pass is
+  // DELETED here, not gated behind a constant — only Tier A (every significant token new) ever
+  // composes. The existing two-pass order is otherwise unchanged: first prefer candidates
+  // introducing a NEW garment surface (the variety craft), then fill remaining budget with any
+  // novel candidate. `tierBFitBudgetSeen` is set (never cleared) the moment a candidate that WOULD
+  // have fit the budget classifies Tier B — a RAW signal, cheap to compute inline; it plays no part
+  // in selection and is NOT itself the hold-reason decision (FIX ROUND 1, #1 below gates it on
+  // whether a repeat-permitting selection would actually have reached the floor).
+  let tierBFitBudgetSeen = false
+  for (const preferNewGarment of [true, false]) {
+    for (const c of candidates) {
+      if (picked.length >= MAX_PICKED_PHRASES || lineLen() >= AIM) break
+      const phrase = titleCasePhrase(c.keyword)
+      if (picked.includes(phrase) || phrase === brandPick) continue
+      const folded = significantFolded(c.keyword)
+      const tier = classifyTier(folded, usedFolded)
+      if (tier === 'B' && lineLen() + (picked.length ? 2 : 0) + phrase.length <= MAX) tierBFitBudgetSeen = true
+      const gm = c.keyword.match(GARMENT_SURFACE_RE)?.[0]?.toLowerCase().replace(/[-\s]/g, '').replace(/s$/, '')
+      if (preferNewGarment && gm && usedGarmentSurfaces.has(gm)) continue
+      if (preferNewGarment && !gm) continue
+      // FIX WAVE 2 (I-1): the tier/budget/≤2-cap/brand-once checks below used to be hand-copied here
+      // AND (incompletely) in the shadow pass — now ONE `admitCandidate` gate for both, `allowRepeat:
+      // false` here so only tier 'A' is ever admitted (the absolute rule, unchanged in effect).
+      if (!admitCandidate(phrase, folded, usedFolded, false, picked, lineLen(), MAX, withBrand(picked), brandRe, brandPick)) continue
+      picked.push(phrase)
+      folded.forEach((w) => usedFolded.add(w))
+      if (gm) usedGarmentSurfaces.add(gm)
     }
   }
   // A pool-sourced brand phrase IS a pool pick for the viability count; the spec phrase is not.
-  if (picked.length + (brandFromPool ? 1 : 0) < MIN_CANDIDATES) { why.picked = picked.length; return nullOut('too-few-picked') }
+  // TASK 6 FIX ROUND 1 (#1): when the shortfall is the absolute no-repeat rule rejecting content
+  // that would have cleared this gate, name that — not the generic "pool too thin" reason — so the
+  // PO sees the true cause. But only when a repeat-permitting selection would ACTUALLY have reached
+  // the floor (the shadow pass): `tierBFitBudgetSeen` alone over-fires (Important #1's reproduction —
+  // a Tier-B candidate can fit the remaining budget while still leaving the line far under 107).
+  if (picked.length + (brandFromPool ? 1 : 0) < MIN_CANDIDATES) {
+    why.picked = picked.length
+    const repeatBlocked = tierBFitBudgetSeen &&
+      shadowRepeatReachesFloor(candidates, withBrand(picked), usedFolded, opts?.spec, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max, brandRe, brandPick)
+    why.repeatBlocked = repeatBlocked
+    return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'too-few-picked')
+  }
   if (brandPick) picked.push(brandPick)
   why.picked = picked.length
 
@@ -377,23 +510,35 @@ export function composeItemHighlightDetailed(
     // "repetition". A pool phrase repeating pool/brand/wear-fact vocabulary (a real customer-visible
     // repeat) still correctly falls to Tier B against this snapshot.
     const usedBeforePad = new Set(usedFolded)
-    for (const tier of ['A', 'B'] as const) {
-      for (const f of factFillers) {
-        if (lineLen() >= MIN) break
-        const phrase = titleCasePhrase(f)
-        if (picked.includes(phrase)) continue
-        const folded = significantFolded(f)
-        if (!folded.some((w) => !usedFolded.has(w))) continue           // must add something new (live)
-        if (classifyTier(folded, usedBeforePad) !== tier) continue     // tier vs. the pre-pad line only
-        if (lineLen() + 2 + phrase.length > CONTENT_CONTRACT.itemHighlights.max) continue
-        if (ihRepeatViolations([...picked, phrase].join(', ')).length > 0) continue
-        picked.push(phrase)
-        folded.forEach((w) => usedFolded.add(w))
-      }
+    // TASK 6: the same absolute rule as the pool loop above — Tier B (vs. the FROZEN `usedBeforePad`
+    // snapshot, so the exemption in the comment above is untouched) is deleted, not gated. A spec
+    // fact that repeats a POOL token is still rejected outright; `tierBFitBudgetSeen` is the SAME
+    // composer-wide raw signal the pool loop sets (one signal, read once below via the shadow pass).
+    for (const f of factFillers) {
+      if (lineLen() >= MIN) break
+      const phrase = titleCasePhrase(f)
+      if (picked.includes(phrase)) continue
+      const folded = significantFolded(f)
+      if (!folded.some((w) => !usedFolded.has(w))) continue           // must add something new (live)
+      const tier = classifyTier(folded, usedBeforePad)
+      if (tier === 'B' && lineLen() + 2 + phrase.length <= CONTENT_CONTRACT.itemHighlights.max) tierBFitBudgetSeen = true
+      if (tier !== 'A') continue                                      // absolute: no repeat, even vs. the pad snapshot
+      if (lineLen() + 2 + phrase.length > CONTENT_CONTRACT.itemHighlights.max) continue
+      if (ihRepeatViolations([...picked, phrase].join(', ')).length > 0) continue
+      picked.push(phrase)
+      folded.forEach((w) => usedFolded.add(w))
     }
   }
   why.picked = picked.length; why.lineLen = lineLen()
-  if (lineLen() < MIN) return nullOut('under-floor-after-pad')
+  // TASK 6 FIX ROUND 1 (#1): same shadow-gated naming as the too-few-picked gate above — the
+  // absolute no-repeat rule, not a thin pool/spec, is why the floor was missed, but only when a
+  // repeat-permitting selection would ACTUALLY have reached MIN (see shadowRepeatReachesFloor).
+  if (lineLen() < MIN) {
+    const repeatBlocked = tierBFitBudgetSeen &&
+      shadowRepeatReachesFloor(candidates, picked, usedFolded, opts?.spec, MIN, CONTENT_CONTRACT.itemHighlights.max, brandRe, brandPick)
+    why.repeatBlocked = repeatBlocked
+    return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'under-floor-after-pad')
+  }
 
   // Trademark door on the final bytes (defense in depth — candidates are already door-clean, but
   // the wear-fact / brand / filler joins and future edits must never reopen it).

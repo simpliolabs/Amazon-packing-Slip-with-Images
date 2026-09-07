@@ -54,6 +54,29 @@
  * Pool-only (the 3 truthful pool phrases alone, before any pad filler) stays 77-87 chars for every
  * design — under 89 — so `Classic Fit` is still produced ONLY by the pad, never a coincidence of the
  * pool phrases' own wording.
+ *
+ * TASK 6 CONSEQUENCE (2026-09-06, ABSOLUTE no-repeat, PO ruling verbatim "2. No Repeat as per Amazon
+ * Ruules") — REPORTED, NOT RE-FIXTURED, per this task's own brief ("if any design HOLDS under the
+ * absolute rule on that fixture, REPORT it ... do not re-fixture; the controller decides whether the
+ * fixture pool is representative"):
+ *
+ * The "3 truthful pool phrases" this file's own margin math (above) is built on were NEVER all
+ * mutually Tier-A: `SHARED` is `['graphic novelty tee for men', 'funny tee gift idea today']` — both
+ * share the folded token `tee`. Under Task 2's (now-deleted) Tier-B fallback the second phrase still
+ * composed (it added `funny`/`gift`/`idea`/`today`, merely repeating `tee`), giving 3 pool picks
+ * (OWN + SHARED[0] + SHARED[1]) and the `poolOnly` lengths this file's comments cite (77-87). Under
+ * the absolute rule SHARED[1] is REJECTED outright, leaving only 2 mutually non-repeating pool picks
+ * (OWN + SHARED[0]) per design — below `MIN_CANDIDATES` (3) — so EVERY design in EVERY scenario below
+ * now HOLDS `under-floor-no-repeat` before the pad loop (and `Classic Fit`) is ever reached. `MARGIN`
+ * still does its OWN job (keeping `candidates.length` at 5-6, nowhere near the `too-few-candidates`
+ * cliff it was built for — confirmed via the composer's own diagnostic log, run 2026-09-06); the new
+ * cliff is a DIFFERENT gate (`too-few-picked`, via `under-floor-no-repeat`) that MARGIN was never
+ * built to address, because Task 2 (whose fallback MARGIN's sibling phrases relied on being excluded
+ * from) still allowed SHARED[1]'s repeat when this file was last re-baselined. The tests below are
+ * updated to assert the TRUE (HOLD) outcome; the pool is untouched. This also means this file's own
+ * "prove the real wire threads distinct per-design values" tests (below) can no longer demonstrate
+ * that specific proof on THIS pool, since nothing composes any more — flagged as a coverage gap for
+ * the controller, not silently patched.
  */
 import { describe, it, expect, vi } from 'vitest'
 
@@ -61,8 +84,9 @@ const create = vi.fn(async () => { throw new Error('OpenAI must never be called 
 vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { create } } } }))
 
 import { buildItemHighlightsPerDesign } from './listingPipeline'
-import { buildPerSkuItemHighlightMap, NO_LINE_FOR_DESIGN } from './perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, perDesignIhRows, NO_LINE_FOR_DESIGN, type PerChildItemHighlight } from './perDesignItemHighlights'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
+import { ihFoldWord, IH_INSIGNIFICANT } from './productDetailAttrs'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
 
 const KEYS = ['BD', 'BM', 'DQ', 'RIACG', 'RK', 'SM'] as const
@@ -136,14 +160,16 @@ const POOL: AnalyzedKeyword[] = [...OWN_PHRASES, ...SHARED, ...MARGIN]
 const build = (pool: AnalyzedKeyword[]) =>
   buildItemHighlightsPerDesign({ groups: GROUPS, pool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: FAMILY_TITLE })
 
-describe('Important #6: the fixture no longer sits on the zero-margin candidate cliff', () => {
-  it('losing ONE shared phrase (the exact cliff the pre-fix fixture sat on: 3 candidates -> 2, ALL SIX designs thin-candidates/0) now leaves every design still composing — MARGIN keeps candidates at 5, safely above MIN_CANDIDATES (3)', () => {
+describe('Important #6: the fixture no longer sits on the zero-margin CANDIDATE cliff (a DIFFERENT cliff — TASK 6 CONSEQUENCE, see file header — now holds every design regardless)', () => {
+  it('losing ONE shared phrase (the exact candidate-count cliff the pre-fix fixture sat on: 3 candidates -> 2) still leaves `candidates` healthy — MARGIN keeps it at 5, safely above MIN_CANDIDATES (3) — but every design HOLDS anyway, for the absolute no-repeat reason (Task 6), not the thin-candidates reason MARGIN was built to prevent', () => {
     const minusOne = [...OWN_PHRASES, SHARED[0], ...MARGIN]   // drop SHARED[1] — the plan's own acceptance-test scenario
     const r = build(minusOne)
     for (const k of KEYS) {
       const d = r.perDesign.find((p) => p.designKey === k)!
-      expect(d.hold).toBeNull()
-      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      // TASK 6: not `thin-candidates` (MARGIN still prevents that cliff — its own job) and not
+      // `designs-unrated` (every design is rated) — specifically the absolute no-repeat hold.
+      expect(d.hold).toBe('under-floor-no-repeat')
+      expect(d.value).toBe('')
     }
   })
 })
@@ -152,44 +178,38 @@ describe('push seam wire: real buildItemHighlightsPerDesign -> real buildPerSkuI
   const r = build(POOL)
   const { values, skipped } = buildPerSkuItemHighlightMap(r.perChild, ALL_TARGETS, null)
 
-  it('every design composed a non-empty line >= 107 chars, no OpenAI call — sanity precondition for the assertions below (not itself the wire proof)', () => {
+  it('TASK 6 CONSEQUENCE (see file header): every design now HOLDS under-floor-no-repeat on this exact pool, no OpenAI call regardless — replaces the pre-Task-6 sanity precondition ("every design composed >= 107 chars"), which no longer holds here', () => {
     for (const k of KEYS) {
       const d = r.perDesign.find((p) => p.designKey === k)!
-      expect(d.hold).toBeNull()
-      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      expect(d.hold).toBe('under-floor-no-repeat')
+      expect(d.value).toBe('')
     }
     expect(create).not.toHaveBeenCalled()
   })
 
-  it('each SKU maps to ITS OWN design\'s line — six distinct values across the map, never a sibling\'s (the exact class PR #652 would have missed: this reads the map the REAL Task 1 output produced, not a hand-built one)', () => {
-    expect(skipped).toEqual([])
-    expect(values.size).toBe(ALL_TARGETS.length)               // all 7 SKUs resolved
-    expect(new Set(values.values()).size).toBe(KEYS.length)    // 6 distinct design lines
-    // Cross-check every SKU against ITS OWN design's composed value specifically (not merely
-    // "distinct from the others") — BM's two SKUs must both carry BM's line, RK's one SKU only RK's.
-    for (const g of GROUPS) {
-      const ownLine = r.perDesign.find((d) => d.designKey === g.key)!.value
-      for (const s of g.skus) expect(values.get(s.sku)).toBe(ownLine)
-    }
+  it('TASK 6 CONSEQUENCE: with every design held, the map resolves NOTHING and skips every SKU `no-line-for-design` — never a sibling\'s line (the class PR #652 would have missed still holds: a fully-held family maps to an empty pushable set, not a borrowed value). The ORIGINAL proof this test carried (six distinct per-design values thread correctly through the REAL map) cannot be demonstrated on this pool any more — flagged in the file header for the controller; not re-fixtured.', () => {
+    expect(values.size).toBe(0)
+    expect(skipped.length).toBe(ALL_TARGETS.length)
+    for (const t of ALL_TARGETS) expect(skipped).toContainEqual({ sku: t.sku, asin: t.asin, reason: NO_LINE_FOR_DESIGN })
   })
 
-  it('no mapped value contains "relaxed" for this Classic-fit blank — Task 4 SHIPPED (final fix wave, 2026-09-06, Minor #9: renamed from "NOTE (Task 4, not yet built)"): the assertion is now REAL. A "relaxed ..." phrase is PRESENT in the pool (rated a strong candidate for every design) and would otherwise win a slot on volume/fit alone — `ihTruthVerdict`\'s fit-claim rule (Task 4) is what keeps it out, proven here through the REAL wire (buildItemHighlightsPerDesign -> buildPerSkuItemHighlightMap), not phraseTruthVerdict called in isolation.', () => {
+  it('no mapped value contains "relaxed" for this Classic-fit blank — Task 4\'s fit-claim rule still excludes the adversarial phrase (truthDrops confirms `fit-claim-lie` fires), though on this now-fully-held pool the proof is vacuous over an empty map; the REAL (non-vacuous) proof that "relaxed" never ships on a Classic blank through a genuinely COMPOSING per-design wire now lives in itemHighlightPerDesign.test.ts\'s Task 5 describe block (augmented with a `.toContain(\'classic\')` pin, 2026-09-06).', () => {
     expect(GILDAN.spec.fit).toBe('Classic')
     const adversarial = kw('relaxed fit graphic tee', 9993, 3)
     const rAdv = build([adversarial, ...POOL])
     const { values: advValues } = buildPerSkuItemHighlightMap(rAdv.perChild, ALL_TARGETS, null)
     for (const v of advValues.values()) expect(v.toLowerCase()).not.toContain('relaxed')
-    // sanity: every design still composed a real line (the adversarial phrase was excluded by truth,
-    // not by starving the pool below MIN_CANDIDATES).
+    // TASK 6 CONSEQUENCE: the adversarial phrase is still excluded by TRUTH (fit-claim-lie), not by
+    // starving the pool below MIN_CANDIDATES — but every design now holds `under-floor-no-repeat`
+    // regardless (same mechanism as the rest of this file; see file header).
     for (const k of KEYS) {
       const d = rAdv.perDesign.find((p) => p.designKey === k)!
-      expect(d.hold).toBeNull()
-      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      expect(d.hold).toBe('under-floor-no-repeat')
     }
   })
 
-  it('at least one mapped value contains "Classic" — the spec-fact pad truth-fix (blank_specs.fit -> "${fit} Fit", itemHighlightComposer.ts:359-361) that must ship over the live "relaxed unisex fit" defect this plan was opened against', () => {
-    expect(Array.from(values.values()).some((v) => v.includes('Classic'))).toBe(true)
+  it('TASK 6 CONSEQUENCE: no mapped value contains "Classic" either, because nothing composes at all on this pool any more — the spec-fact pad truth-fix (blank_specs.fit -> "${fit} Fit") that must ship over the live "relaxed unisex fit" defect this plan was opened against is proven elsewhere (itemHighlightPerDesign.test.ts\'s Task 5 fixture, which DOES compose) rather than on this now-fully-held pool. Flagged for the controller — see file header.', () => {
+    expect(values.size).toBe(0)
   })
 })
 
@@ -213,11 +233,216 @@ describe('push seam wire: a held design is skipped at the map, never given a sib
     expect(skipped).toContainEqual({ sku: rkSku, asin: RK.skus[0].asin, reason: NO_LINE_FOR_DESIGN })
   })
 
-  it('the other five designs still resolve their OWN lines through the map — a hold on one design never blocks or borrows for its siblings', () => {
+  it('the other five designs are NEVER held `designs-unrated` because of RK — isolation still holds (TASK 6 CONSEQUENCE: they now separately HOLD `under-floor-no-repeat` too, same as every other scenario in this file — see file header — so this no longer proves "still resolve their OWN lines"; it proves the narrower, still-real claim that RK\'s specific unrated-ness never spreads to a sibling\'s hold REASON)', () => {
     for (const g of GROUPS.filter((g) => g.key !== 'RK')) {
-      const ownLine = r.perDesign.find((d) => d.designKey === g.key)!.value
-      expect(ownLine.length).toBeGreaterThanOrEqual(107)
-      for (const s of g.skus) expect(values.get(s.sku)).toBe(ownLine)
+      const d = r.perDesign.find((dd) => dd.designKey === g.key)!
+      expect(d.hold).not.toBe('designs-unrated')
+      expect(d.hold).toBe('under-floor-no-repeat')
+      // never borrowed RK's (or any sibling's) line, and never RK's specific hold reason
+      for (const s of g.skus) expect(values.get(s.sku)).toBeUndefined()
     }
+  })
+})
+
+/**
+ * FIX ROUND 1 (2026-09-06), Important #2 + #3 (controller RULING, task-6-fix-round-1-findings.md):
+ * a SECOND scenario, with its OWN mutually token-disjoint shared bank — `POOL`/`SHARED`/`MARGIN`
+ * above are UNTOUCHED, and the hold-scenario tests above are the honest record of what the absolute
+ * rule does on THAT pool (every design HOLDS there — see the file header). This scenario restores
+ * BOTH lost proofs on a pool that actually composes:
+ *   - Important #2: the six-design zero-duplicate-folded-token pin, on a pool where a Tier-B
+ *     regression WOULD produce a duplicate (ADV2_* below) — not a pool so sparse nothing could ever
+ *     repeat.
+ *   - Important #3: the REAL `buildItemHighlightsPerDesign` output driven through the REAL
+ *     `buildPerSkuItemHighlightMap` (the wire the file's own header names as its purpose), proving six
+ *     distinct mapped values and BM's two SKUs both carrying BM's line.
+ *
+ * FIXTURE. Reuses this file's own `OWN_PHRASES` (unchanged, module-level, defined above) as each
+ * design's identity phrase. `SHARED2` is a NEW, mutually disjoint 2-phrase bank (unlike the ORIGINAL
+ * `SHARED`, whose two phrases both carried `tee` — the exact collision that sank the hold-scenario
+ * fixture under the absolute rule): 'graphic novelty print' (graphic/novelty/print) and 'funny gift
+ * idea today' (funny/gift/idea/today) share NO folded token with each other, with any `OWN_*` phrase,
+ * or with any `ADV2_*` phrase below (checked by hand and confirmed empirically — see the report's
+ * probe output). `ADV2_*` is ONE Tier-B-tempting phrase PER DESIGN: it repeats that design's OWN
+ * name tokens (e.g. `ADV2_BD` repeats `boss`/`definition` from `OWN_BD`) while adding two brand-new
+ * words ("daily grind") — high enough volume (9200, between each `OWN_*`'s ~9994-9999 and `SHARED2`'s
+ * 9000/8000) that it would rank ABOVE `SHARED2` in the composer's fit/volume sort, so a Tier-B pass
+ * would readily pick it up once `OWN_*` already established the repeat. `STRICT NAMES` (designScope.ts)
+ * keeps each `ADV2_*` foreign to every OTHER design, exactly like `OWN_*` — it is a candidate ONLY
+ * for the one design whose name it carries, so every design gets its OWN adversarial temptation.
+ * (Note: an early draft used "champion" as the adversarial filler word and every design HELD
+ * `too-few-candidates` — `champion` is Carhartt's sibling in `APPAREL_BRAND_RE`'s competitor-brand
+ * lexicon (contentTruth.ts), so `ihTruthVerdict` correctly dropped it before selection ever ran; not
+ * a repeat-rule finding, but recorded here since it cost real debugging time and the next person
+ * editing this fixture will hit the same trap if they reach for a "motivational" word.)
+ */
+describe('FIX ROUND 1 (#2 + #3): a genuinely COMPOSING six-design pool, own mutually token-disjoint shared bank — restores the lost wire-liveness + zero-duplicate proofs', () => {
+  const SHARED2: AnalyzedKeyword[] = [
+    kw('graphic novelty print', 9000, 3),
+    kw('funny gift idea today', 8000, 3),
+  ]
+  /** ONE Tier-B-tempting phrase per design — repeats that design's OWN name tokens (from `OWN_*`
+   *  above), adds two brand-new words, and STRICT NAMES keeps it foreign to every sibling design.
+   *  The absolute rule (Task 6) must reject every one of these; if it did not, the design's line
+   *  would repeat its own name token twice (see the report's OLD-vs-NEW composer demonstration). */
+  const ADV2_BD = kw('boss definition daily grind', 9200, 3)
+  const ADV2_BM = kw('beast mode daily grind', 9200, 3)
+  const ADV2_DQ = kw('dont quit daily grind', 9200, 3)
+  const ADV2_RIACG = kw('relax ceo daily grind', 9200, 3)
+  const ADV2_RK = kw('real king daily grind', 9200, 3)
+  const ADV2_SM = kw('self made daily grind', 9200, 3)
+  const ADV2_PHRASES = [ADV2_BD, ADV2_BM, ADV2_DQ, ADV2_RIACG, ADV2_RK, ADV2_SM]
+
+  const POOL2: AnalyzedKeyword[] = [...OWN_PHRASES, ...ADV2_PHRASES, ...SHARED2]
+  const r2 = build(POOL2)
+  const { values: values2, skipped: skipped2 } = buildPerSkuItemHighlightMap(r2.perChild, ALL_TARGETS, null)
+
+  /** Independent fold over the RETURNED bytes — deliberately NOT the production `significantFolded`
+   *  (`productDetailAttrs.ts` as of round 2, F1; was `itemHighlightComposer.ts`) — mirrors
+   *  itemHighlightPerDesign.test.ts's own helper (same fold rules: `ihFoldWord` + the gender-plural
+   *  collapse) so this proves the WIRE's output obeys the no-repeat ruling, not merely the
+   *  production fold's own bookkeeping. */
+  const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
+  const dupedFoldedTokens = (line: string): string[] => {
+    const counts = new Map<string, number>()
+    for (const raw of line.toLowerCase().split(/[\s,]+/).filter(Boolean)) {
+      const f = ihFoldWord(raw)
+      const w = GENDER_FOLDS[f] ?? f
+      if (!w || IH_INSIGNIFICANT.has(w)) continue
+      counts.set(w, (counts.get(w) ?? 0) + 1)
+    }
+    return [...counts.entries()].filter(([, c]) => c > 1).map(([w]) => w)
+  }
+
+  it('all six designs compose (no hold) — the sanity precondition every assertion below needs', () => {
+    for (const k of KEYS) {
+      const d = r2.perDesign.find((p) => p.designKey === k)!
+      expect(d.hold).toBeNull()
+      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      expect(d.value.length).toBeLessThanOrEqual(125)
+    }
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('Important #2: zero duplicate folded significant tokens in EVERY returned line (folded independently of the composer\'s own bookkeeping)', () => {
+    for (const k of KEYS) {
+      const d = r2.perDesign.find((p) => p.designKey === k)!
+      expect(dupedFoldedTokens(d.value)).toEqual([])
+    }
+  })
+
+  it('the absolute rule rejects the Tier-B-tempting ADV2 phrase for every design — each design\'s OWN name token appears exactly ONCE, never twice, even though the tempting phrase outranks SHARED2 on volume', () => {
+    const nameTokenOf: Record<string, string> = { BD: 'boss', BM: 'beast', DQ: 'quit', RIACG: 'ceo', RK: 'king', SM: 'made' }
+    for (const k of KEYS) {
+      const d = r2.perDesign.find((p) => p.designKey === k)!
+      const words = d.value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+      const token = nameTokenOf[k]
+      expect(words.filter((w) => w === token).length).toBe(1)
+      // never the adversarial phrase's own distinguishing tail either
+      expect(d.value.toLowerCase()).not.toContain('daily grind')
+    }
+  })
+
+  it('Important #3: real buildItemHighlightsPerDesign output threads through the REAL buildPerSkuItemHighlightMap — six DISTINCT mapped values, nothing skipped', () => {
+    expect(values2.size).toBe(ALL_TARGETS.length)
+    expect(skipped2.length).toBe(0)
+    const distinctLines = new Set([...values2.values()])
+    expect(distinctLines.size).toBe(KEYS.length)
+  })
+
+  it('every SKU maps to ITS OWN design\'s line, never a sibling\'s — BM\'s two SKUs both carry BM\'s line', () => {
+    for (const g of GROUPS) {
+      const d = r2.perDesign.find((p) => p.designKey === g.key)!
+      for (const s of g.skus) expect(values2.get(s.sku)).toBe(d.value)
+    }
+    // BM specifically: two SKUs, ONE design, the SAME composed value on both.
+    expect(values2.get(BM.skus[0].sku)).toBe(values2.get(BM.skus[1].sku))
+    expect(values2.get(BM.skus[0].sku)).toBe(r2.perDesign.find((p) => p.designKey === 'BM')!.value)
+  })
+
+  it('"Classic" appears in every composed line and is produced ONLY by the pad\'s `${spec.fit} Fit` — never a coincidence of pool wording (no pool phrase in POOL2 contains "classic")', () => {
+    expect(POOL2.every((k) => !/classic/i.test(k.keyword))).toBe(true)
+    for (const k of KEYS) {
+      const d = r2.perDesign.find((p) => p.designKey === k)!
+      expect(d.value.toLowerCase()).toContain('classic fit')
+    }
+  })
+
+  /**
+   * PAD-CHAIN TRACE for BD (report requirement — trace ONE design fully):
+   * candidates sorted fit(tie=3) then volume DESC: OWN_BD(9999) > ADV2_BD(9200, REJECTED — repeats
+   * boss/definition) > SHARED2[0] 'graphic novelty print'(9000) > SHARED2[1] 'funny gift idea
+   * today'(8000). None of the three surviving phrases carry a GARMENT_SURFACE_RE token, so pass 1
+   * (preferNewGarment) picks nothing; pass 2 picks all three Tier-A phrases: "Boss Definition
+   * Motivation Wear, Graphic Novelty Print, Funny Gift Idea Today" = 77 chars (pool-only, well under
+   * the 89-char ceiling past which `material` alone would cross 107 and `fit` would never be
+   * reached). `opts.spec` = GILDAN (material 'Ring-Spun Cotton', fit 'Classic', neck 'Crew Neck',
+   * sleeve 'Short Sleeve'; no `unisex`/`dye`). Pad priority order: material first — 77+2+16=95, still
+   * under 107 — then fit — 95+2+11=108, crossing the floor — so the pad loop STOPS at `fit`; neck/
+   * sleeve are never tried. Final: "Boss Definition Motivation Wear, Graphic Novelty Print, Funny
+   * Gift Idea Today, Ring-Spun Cotton, Classic Fit" (108 chars). "Classic" is verified via the exact
+   * composed value in the assertion below (never `.toBe()` on the whole string — property-only, per
+   * this file's own discipline — but pinned to `.toContain` so a regression that drops the pad chain
+   * before `fit` is caught).
+   */
+  it('BD pad-chain trace: pool-only (OWN_BD + SHARED2, ADV2_BD rejected) is 77 chars; the pad walks material (95) then fit (108, crossing the floor) — neck/sleeve never tried', () => {
+    const bd = r2.perDesign.find((p) => p.designKey === 'BD')!
+    expect(bd.value).toContain('Boss Definition Motivation Wear')
+    expect(bd.value).toContain('Graphic Novelty Print')
+    expect(bd.value).toContain('Funny Gift Idea Today')
+    expect(bd.value).toContain('Ring-Spun Cotton')
+    expect(bd.value).toContain('Classic Fit')
+    expect(bd.value).not.toContain('Crew Neck')                      // pad stopped at `fit` — 108 >= 107
+    expect(bd.value.length).toBe(108)
+  })
+})
+
+/**
+ * FIX WAVE 2 ROUND 2 (F2 PARITY, controller RULING, final-fix-wave-2-round-2-findings.md pin (b)):
+ * the card (`perDesignIhRows`) and the push seam (`buildPerSkuItemHighlightMap`) must never disagree
+ * about which SKU is pushable. Runs BOTH functions on the SAME `perChild` array — never two
+ * independently-built fixtures — across every scenario this file already builds: the all-held
+ * `POOL`, the RK-unrated partial, and a genuinely-composing pool (`OWN_PHRASES` + a disjoint
+ * two-phrase bank, reusing this file's own `SHARED2` wording so it is proven to compose, no `ADV2`
+ * needed since those phrases are rejected either way and never reach the composed value).
+ */
+describe('F2 PARITY (round 2, controller RULING): perDesignIhRows.skipReason and buildPerSkuItemHighlightMap.skipped AGREE for every design, on every perChild array this file builds', () => {
+  const assertParity = (perChild: PerChildItemHighlight[]) => {
+    const rows = perDesignIhRows(perChild)
+    const rowByKey = new Map(rows.map((r) => [r.designKey, r]))
+    const { values, skipped } = buildPerSkuItemHighlightMap(perChild, ALL_TARGETS, null)
+    const seamReasonBySku = new Map(skipped.map((s) => [s.sku, s.reason]))
+    for (const g of GROUPS) {
+      const row = rowByKey.get(g.key)
+      for (const s of g.skus) {
+        const seamReason = seamReasonBySku.get(s.sku) ?? null
+        if (values.has(s.sku)) {
+          expect(seamReason).toBeNull()
+          expect(row?.skipReason ?? null).toBeNull()
+        } else {
+          expect(row?.skipReason ?? null).toBe(seamReason)
+        }
+      }
+    }
+  }
+
+  it('all-held POOL scenario: every design holds under-floor-no-repeat — row.skipReason and the seam reason agree (both no-line-for-design) for every SKU', () => {
+    assertParity(build(POOL).perChild)
+  })
+
+  it('RK-unrated partial scenario: RK holds designs-unrated, its siblings hold under-floor-no-repeat — parity holds design-by-design, never spreading RK\'s reason to a sibling', () => {
+    const partial = POOL.map((k) => {
+      const { RK: _rk, ...rest } = (k.themeFitByDesign ?? {}) as Record<string, { fit: 0 | 1 | 2 | 3 }>
+      return { ...k, themeFitByDesign: rest } as AnalyzedKeyword
+    })
+    assertParity(build(partial).perChild)
+  })
+
+  it('a genuinely-composing pool (OWN_PHRASES + a disjoint two-phrase bank, no ADV2 needed): every design composes a pushable line — parity holds when nothing is skipped too (both null)', () => {
+    const SHARED3: AnalyzedKeyword[] = [
+      kw('graphic novelty print', 9000, 3),
+      kw('funny gift idea today', 8000, 3),
+    ]
+    assertParity(build([...OWN_PHRASES, ...SHARED3]).perChild)
   })
 })

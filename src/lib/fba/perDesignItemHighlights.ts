@@ -27,6 +27,14 @@
  *    never handed another design's line, and never the broadcast value.
  */
 import { CONTENT_CONTRACT } from './contentContract'
+// FIX WAVE 2 ROUND 2 (F1/F2, controller RULING, 2026-09-06): `classifyStoredIhLine` is the ONE
+// classification of a stored line, used by BOTH the push seam (below) and the card's row builder
+// (`perDesignIhRows`, below) — so the two can never disagree about which SKU is pushable. It lives
+// in `productDetailAttrs.ts` (a leaf `page.tsx` already imports directly), NOT `itemHighlightComposer.ts`
+// (the generation path — reaches `contentTruth` -> `blankSpecs` -> a lazy supabase client): this
+// module is imported by the CLIENT page, so it must never import anything from the composer. No
+// cycle either way: neither module imports the other.
+import { classifyStoredIhLine } from './productDetailAttrs'
 
 /** Why an Item Highlight is HELD (the composer returned null). Each names ONE PO action.
  *  MOVED HERE (2026-09-04, closing the SILENT-HOLD defect class) from listingPipeline.ts: this
@@ -34,7 +42,7 @@ import { CONTENT_CONTRACT } from './contentContract'
  *  listing page (client component) without pulling the whole server-only pipeline (`import OpenAI
  *  from 'openai'`) into the browser bundle. listingPipeline.ts re-exports both names for every
  *  existing importer — this is a relocation, not a behavior change. */
-export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec' | 'designs-unrated'
+export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec' | 'designs-unrated' | 'under-floor-no-repeat'
 export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
   'unrated-pool': 'Held: pool is unrated — run research/theme rating first',
   'thin-candidates': 'Held: too few truthful ranking phrases in the pool — harvest more keywords for this family',
@@ -47,6 +55,28 @@ export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
   // { parent_asin, per_design: true } (it rates every design's column at once, so it also clears any
   // sibling that was separately unrated).
   'designs-unrated': 'Held: this design\'s own rating share is too thin — run the per-design theme rating (keyword-pool/rerate { per_design: true }) first',
+  // TASK 6 (2026-09-06, PO verbatim "2. No Repeat as per Amazon Ruules"): distinct from `under-floor`
+  // — a repeat WOULD reach the floor here, but the PO's ruling forbids composing one absolutely
+  // (stricter than Amazon's own ≤2 cap), so the composer never tries. Never a silently shortened line
+  // and never a repeat to reach the floor — the design HOLDS and names the same PO action as
+  // `under-floor` (more/varied keywords let Tier A alone reach the floor).
+  // FIX ROUND 1 (#1, 2026-09-06): the ORIGINAL wiring named this stage the moment a Tier-B candidate
+  // merely fit the remaining character budget — not when a repeat would truly have crossed the floor
+  // (reproduced: a 4-phrase pool whose best repeat-permitting reach was 53 chars, far under 107,
+  // still got this exact message). `itemHighlightComposer.ts`'s `shadowRepeatReachesFloor` gates this
+  // stage on a deterministic check that a repeat-permitting selection actually reaches
+  // `CONTENT_CONTRACT.itemHighlights.min` before this reason (and this message) can be returned.
+  // FIX WAVE 2 (I-1, 2026-09-06 final whole-branch review #2): that shadow check was still an
+  // APPROXIMATION — it ignored Amazon's own ≤2-per-word cap and the composer's 7-pick cap, so it
+  // could answer "reachable" using a repeat-permitting combination the real selection loop, even
+  // with repeats allowed, could never actually admit (reproduced: the `summer` pool and the 8-phrase
+  // pick-cap pool in itemHighlightComposer.test.ts). The shadow now calls `admitCandidate` — the
+  // real loop's OWN per-candidate admission gate (tier, pick cap, budget, ≤2 cap, brand-once), with
+  // `allowRepeat: true` — so it inherits every one of those rules BY CONSTRUCTION, not as a second,
+  // separately-maintained model of them. The claim below is now guaranteed true (the one thing still
+  // not modeled, garment-surface-variety ordering, only ever affects WHICH phrases compose, never
+  // whether the floor is reachable at all — see the comment on `admitCandidate`).
+  'under-floor-no-repeat': `Held: truthful phrases + blank facts reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor only by repeating a significant word, which is never allowed (PO ruling 2026-09-06) — rate/harvest more keywords for this family`,
 }
 
 /** One entry per SKU — mirrors per_child_titles' {sku, asin, <field>, designName?, designKey?}. */
@@ -65,6 +95,13 @@ export interface PerChildItemHighlight {
 }
 
 export const NO_LINE_FOR_DESIGN = 'no-line-for-design' as const
+/** FIX WAVE 2 (I-2b, 2026-09-06, controller RULING): the ruling was enforced at GENERATION only
+ *  (itemHighlightComposer.ts Task 6) — a line stored before it shipped, or written by any future
+ *  producer bug or manual edit, could still carry a repeated significant word. `NO_LINE_FOR_DESIGN`
+ *  names "no line exists"; this names the distinct case "a line exists but the push seam — the LAST
+ *  pure function before Amazon — refuses to ship it". */
+export const REPEAT_IN_STORED_LINE = 'repeat-in-stored-line' as const
+export type IhSkuSkipReason = typeof NO_LINE_FOR_DESIGN | typeof REPEAT_IN_STORED_LINE
 
 /** A compact one-row-per-design view of the stored array (first SKU of each design is representative). */
 export interface PerDesignIhRow {
@@ -75,6 +112,13 @@ export interface PerDesignIhRow {
   skuCount: number
   /** TRUE when every SKU of the design has pushed_value === line (non-empty). */
   onAmazon: boolean
+  /** FIX WAVE 2 ROUND 2 (F2, controller RULING): the PRE-FLIGHT classification of `line` via the
+   *  SAME `classifyStoredIhLine` predicate the push seam (`buildPerSkuItemHighlightMap`) applies —
+   *  null when `line` is non-empty and pushable ('ok'); otherwise the exact reason the seam would
+   *  refuse it. The card derives this from HERE, never a second decision in the page: a stale line
+   *  that repeats a significant word shows `repeat-in-stored-line` before any push is attempted,
+   *  not only after a push report says so. */
+  skipReason: IhSkuSkipReason | null
 }
 
 export function perDesignIhRows(entries: PerChildItemHighlight[] | null | undefined): PerDesignIhRow[] {
@@ -85,7 +129,18 @@ export function perDesignIhRows(entries: PerChildItemHighlight[] | null | undefi
     const key = e.designKey || e.designName || e.sku
     let row = byKey.get(key)
     if (!row) {
-      row = { designKey: key, designName: e.designName || e.designKey || e.sku, line: e.item_highlight || '', hold: e.hold ?? null, skuCount: 0, onAmazon: false, allPushed: true }
+      const line = e.item_highlight || ''
+      const classification = classifyStoredIhLine(line)
+      row = {
+        designKey: key,
+        designName: e.designName || e.designKey || e.sku,
+        line,
+        hold: e.hold ?? null,
+        skuCount: 0,
+        onAmazon: false,
+        skipReason: classification === 'ok' ? null : classification,
+        allPushed: true,
+      }
       byKey.set(key, row); order.push(key)
     }
     row.skuCount++
@@ -96,7 +151,10 @@ export function perDesignIhRows(entries: PerChildItemHighlight[] | null | undefi
 
 /** A collapsed view: designs whose (line, hold) are IDENTICAL share one row. Under the shared-line
  *  ruling (PO 2026-08-21) every multi-design family collapses to ONE row "shared across N designs";
- *  the per-design capability stays — rows that ever differ render separately. */
+ *  the per-design capability stays — rows that ever differ render separately. `skipReason` is
+ *  carried through from the group's own rows (guaranteed identical within a group — the collapse
+ *  key already includes `line`, and `skipReason` is a pure function of `line` alone via
+ *  `classifyStoredIhLine`). */
 export interface SharedIhRow {
   line: string
   hold: IhHoldReason | null
@@ -104,6 +162,7 @@ export interface SharedIhRow {
   skuCount: number
   /** TRUE when every SKU of every design in the row has the line on Amazon. */
   onAmazon: boolean
+  skipReason: IhSkuSkipReason | null
 }
 
 export function collapseSharedIhRows(rows: PerDesignIhRow[]): SharedIhRow[] {
@@ -112,7 +171,7 @@ export function collapseSharedIhRows(rows: PerDesignIhRow[]): SharedIhRow[] {
   for (const r of rows) {
     const k = `${r.hold ?? ''}|${r.line}`
     let row = byKey.get(k)
-    if (!row) { row = { line: r.line, hold: r.hold, designs: [], skuCount: 0, onAmazon: true }; byKey.set(k, row); order.push(k) }
+    if (!row) { row = { line: r.line, hold: r.hold, designs: [], skuCount: 0, onAmazon: true, skipReason: r.skipReason }; byKey.set(k, row); order.push(k) }
     row.designs.push(r)
     row.skuCount += r.skuCount
     if (!(r.line && r.onAmazon)) row.onAmazon = false
@@ -132,12 +191,19 @@ export function isPerDesignIhRow(row: { per_design?: unknown } | null | undefine
  * resolution every other per-child push applies). A SKU whose design holds ('' line) or that
  * matches no entry is SKIPPED with 'no-line-for-design' — NEVER given another design's line.
  * The variation PARENT hub (asin === parentAsin) is skipped the same way: a hub has no design.
+ *
+ * FIX WAVE 2 (I-2b, 2026-09-06): a resolved line that repeats a folded significant word is ALSO
+ * refused — 'repeat-in-stored-line' — before it reaches `values`. This is the terminal net on the
+ * SHIPPED bytes: it catches a pre-ruling stored line, a manual DB edit, or a future producer bug,
+ * not just what the current composer would produce today. Amazon's own ≤2-per-word cap
+ * (`capItemHighlightRepeats`) still runs downstream as defence in depth for the legacy/broadcast
+ * path — this refusal is STRICTER (any repeat, not just a 3rd+ mention) and runs first.
  */
 export function buildPerSkuItemHighlightMap(
   entries: PerChildItemHighlight[] | null | undefined,
   targets: { sku: string; asin: string }[],
   parentAsin?: string | null,
-): { values: Map<string, string>; skipped: { sku: string; asin: string; reason: typeof NO_LINE_FOR_DESIGN }[] } {
+): { values: Map<string, string>; skipped: { sku: string; asin: string; reason: IhSkuSkipReason }[] } {
   const bySku = new Map<string, string>()
   const byAsin = new Map<string, string>()
   for (const e of Array.isArray(entries) ? entries : []) {
@@ -147,14 +213,26 @@ export function buildPerSkuItemHighlightMap(
     if (e.asin && !byAsin.has(e.asin)) byAsin.set(e.asin, line)
   }
   const values = new Map<string, string>()
-  const skipped: { sku: string; asin: string; reason: typeof NO_LINE_FOR_DESIGN }[] = []
+  const skipped: { sku: string; asin: string; reason: IhSkuSkipReason }[] = []
   for (const t of targets) {
     const isHub = !!parentAsin && t.asin === parentAsin && !bySku.has(t.sku)
     const line = isHub ? undefined : (bySku.get(t.sku) ?? (t.asin ? byAsin.get(t.asin) : undefined))
-    if (line) values.set(t.sku, line)
-    else skipped.push({ sku: t.sku, asin: t.asin, reason: NO_LINE_FOR_DESIGN })
+    const classification = classifyStoredIhLine(line)
+    if (classification === 'no-line-for-design') { skipped.push({ sku: t.sku, asin: t.asin, reason: NO_LINE_FOR_DESIGN }); continue }
+    if (classification === 'repeat-in-stored-line') { skipped.push({ sku: t.sku, asin: t.asin, reason: REPEAT_IN_STORED_LINE }); continue }
+    values.set(t.sku, line!)
   }
   return { values, skipped }
+}
+
+/** FIX WAVE 2 (I-2, 2026-09-06, controller RULING): the ONE predicate for "does this per-design
+ *  entry contribute a pushable line" — non-empty AND not refused by the terminal repeat net above.
+ *  `pushExecutor.loadDetailContext`'s "every design held" gate consults THIS (not a hand-rolled
+ *  `.trim()` filter) so a family whose remaining lines would ALL be refused at the seam is treated
+ *  exactly as unpushable as a family that composed nothing — `perDesignLines.length > 0` alone can
+ *  no longer make a stale family look pushable one layer up from the seam that actually refuses it. */
+export function pushableDesignLines(entries: PerChildItemHighlight[] | null | undefined): PerChildItemHighlight[] {
+  return (Array.isArray(entries) ? entries : []).filter((e) => classifyStoredIhLine(e.item_highlight) === 'ok')
 }
 
 /** Stamp the write-through mirror on the entries whose SKU (or ASIN twin) just had `line` ACCEPTED. */
