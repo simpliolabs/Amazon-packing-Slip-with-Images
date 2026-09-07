@@ -599,16 +599,59 @@ export const lineHasSignificantRepeat = (line: string): boolean => {
  *  refusal PRE-FLIGHT (before any push is attempted) instead of learning it only from a push
  *  report. `'no-line-for-design'` — an empty/missing line (a HELD design, the pre-existing case).
  *  `'repeat-in-stored-line'` — a non-empty line that repeats a folded significant word (a
- *  pre-ruling stored value, a manual DB edit, or a future producer bug). `'ok'` — a non-empty,
- *  compliant line; the only classification that is ever pushable. */
-export type IhLineClassification = 'ok' | 'no-line-for-design' | 'repeat-in-stored-line'
+ *  pre-ruling stored value, a manual DB edit, or a future producer bug). `'under-floor'` — TASK 8
+ *  ROUND 2 / IH TERMINAL NET PHASE 1 (2026-09-07, spec docs/superpowers/specs/2026-09-07-item-
+ *  highlight-terminal-net.md, H13): a non-empty, non-repeating line shorter than
+ *  `CONTENT_CONTRACT.itemHighlights.min` (107) — reproduced live: a stale/hand-edited/legacy stored
+ *  line can sit under the floor forever because nothing at the push seam ever checked length, only
+ *  repeats. `'ok'` — a non-empty, compliant line; the only classification that is ever pushable. */
+export type IhLineClassification = 'ok' | 'no-line-for-design' | 'repeat-in-stored-line' | 'under-floor'
 export function classifyStoredIhLine(value: string | null | undefined): IhLineClassification {
   const line = (value || '').trim()
   if (!line) return 'no-line-for-design'
   if (lineHasSignificantRepeat(line)) return 'repeat-in-stored-line'
+  if (line.length < CONTENT_CONTRACT.itemHighlights.min) return 'under-floor'
   return 'ok'
 }
 
+/**
+ * IH TERMINAL NET, PHASE 1 (2026-09-07, spec docs/superpowers/specs/2026-09-07-item-highlight-
+ * terminal-net.md, PO 2026-09-07 verbatim "B: yesm go" — fix the terminal nets BEFORE the writer).
+ *
+ * REPRODUCED against this function unmodified (`scratchpad/ih-research/probe-h10-h13.mts`, HEAD
+ * c1eabe9) — three fail-open bugs, all in the OLD trailing fallback
+ * (`finalPhrases = capped.length ? capped : kept.slice(0, 1)`, then
+ * `finalPhrases.join(', ') || value.split(',')[0]?.trim() || value`):
+ *
+ *  H10 a comma-less line repeating a significant word 4x: the per-word cap correctly computes the
+ *      violation (the running `counts` map IS a whole-line count, not a per-segment one — a single
+ *      comma-less "phrase" is checked against it exactly like any other) and correctly drops the
+ *      sole phrase (`kept = []`) — but the OLD fallback then read `kept.slice(0,1)` (still `[]`)
+ *      and fell through to `value.split(',')[0]?.trim() || value`, which — with no comma to split
+ *      on — is just `value` again. The cap fires; the fallback UNDOES it. Measured: returned
+ *      byte-identical to the input.
+ *  H11 a comma-less 218-char line, no repeats: the length loop's own guard
+ *      (`next > max && capped.length >= 1`) requires ONE phrase already kept before it will ever
+ *      refuse — the first phrase is unconditionally pushed regardless of its own length. Measured:
+ *      a 218-char line survived whole, past `buildDetailPatchValue`, toward the SP-API PATCH.
+ *  H12 a 186-char two-clause line, one comma: the length loop correctly drops the trailing clause
+ *      (86 > "next" over budget) — the drop is real and reduces the SP-API payload to 88 chars —
+ *      but nothing checks whether the 88-char SURVIVOR still clears
+ *      `CONTENT_CONTRACT.itemHighlights.min` (107). Silent amputation: half the seller's sentence
+ *      ships, under the floor, and the seam does not notice.
+ *
+ * THE FIX. Both nets are unchanged in what they accept (repeat cap: `IH_MAX_WORD_REPEATS`/
+ * `ihFoldWord`, exactly as before — Amazon's own flat cap, deliberately looser than the composer's
+ * garment-exempt `ihRepeatBudget`, per the TASK 8 note this function already carried: this is the
+ * push-boundary's defence-in-depth net, not a second copy of the composer's stricter rule, and nine
+ * pre-existing tests (`blankBrandHighlightNet.test.ts` T4.x, `itemHighlightOneRule.test.ts`) already
+ * pin bytes that would break under the stricter budget). What changes is what happens when neither
+ * net can produce a compliant, non-empty result: REFUSE (return `''`), never fall back to the raw
+ * un-netted input and never ship a length-driven amputation that lands under the floor. A caller
+ * that gets `''` back is exactly as unpushable as a HELD design already is (`buildDetailPatchValue`
+ * only ever calls this on a non-empty, already-trimmed value, so `''` unambiguously means "this net
+ * refused" — never "there was nothing to net").
+ */
 export function capItemHighlightRepeats(value: string): string {
   // TASK 8 (2026-09-07): the local hand-copy of the fold is gone — this is the SAME hand-copy class
   // this function's own docstring history already names; `ihFoldWord` is byte-identical (proven on
@@ -617,6 +660,11 @@ export function capItemHighlightRepeats(value: string): string {
   // push-boundary net, not the composer's stricter budget.
   // TASK 8 ROUND 2 (R1, reviewer Minor M1): the literal `2` is gone — `IH_MAX_WORD_REPEATS` above is
   // the one constant, never written as a bare number anywhere else in this file.
+  // The running `counts` map is the WHOLE-LINE tally (Phase 1, H10) — it persists across every
+  // comma-phrase in order, so a solitary comma-less "phrase" (the entire line) is checked against
+  // it exactly like any later segment of a multi-phrase line would be; there is no separate
+  // per-segment notion of "repeat" here to begin with, only a fallback that used to discard the
+  // correct verdict (see the refusal below).
   const counts = new Map<string, number>()
   const kept: string[] = []
   for (const phrase of value.split(',').map((p) => p.trim()).filter(Boolean)) {
@@ -637,16 +685,32 @@ export function capItemHighlightRepeats(value: string): string {
   // short feature/benefit phrases,
   // not a full sentence). This runs at the PUSH boundary (buildDetailPatchValue) + every generator return +
   // the regen route, so an over-budget stale/LLM/stored value is truncated to the contract max at a
-  // COMMA boundary (never mid-word) even if it skipped the generator gate. Always keeps >=1 phrase (never blanks).
+  // COMMA boundary (never mid-word) even if it skipped the generator gate.
+  // PHASE 1 (H11): the old guard (`&& capped.length >= 1`) forced the FIRST phrase to survive no
+  // matter how long it was on its own — removed. A phrase (first or not) that alone would push past
+  // the max is now dropped like any other; if that is every phrase, `capped` ends up empty and the
+  // refusal below fires instead of a truncated lie.
   const capped: string[] = []
   let len = 0
   for (const p of kept) {
     const next = capped.length ? len + 2 + p.length : p.length
-    if (next > CONTENT_CONTRACT.itemHighlights.max && capped.length >= 1) break
+    if (next > CONTENT_CONTRACT.itemHighlights.max) break
     capped.push(p); len = next
   }
-  const finalPhrases = capped.length ? capped : kept.slice(0, 1)
-  return finalPhrases.join(', ') || value.split(',')[0]?.trim() || value
+  // REFUSE, never truncate into a lie (Phase 1, H10/H11): nothing survived either net — the raw
+  // `value` (H10, H11's old fallback) is never returned; a design that cannot net to a compliant
+  // line is exactly as unshippable as one the composer never composed in the first place.
+  if (capped.length === 0) return ''
+  const joined = capped.join(', ')
+  // REFUSE rather than amputate (Phase 1, H12): a drop that the LENGTH net actually performed
+  // (`capped` shorter than `kept` — some trailing phrase(s) were sacrificed to fit the max) must not
+  // silently land the survivor under `CONTENT_CONTRACT.itemHighlights.min` (107) — that is half a
+  // sentence shipped as if it were the whole one, and nothing downstream re-checks the floor. Scoped
+  // to an ACTUAL length-driven drop (never fires when every kept phrase already fit, so a
+  // naturally-short-but-untouched value — not this net's job to floor-check, see `classifyStoredIhLine`
+  // for the pre-flight floor gate on STORED lines — still passes through unchanged as before).
+  if (capped.length < kept.length && joined.length < CONTENT_CONTRACT.itemHighlights.min) return ''
+  return joined
 }
 
 export function buildDetailPatchValue(

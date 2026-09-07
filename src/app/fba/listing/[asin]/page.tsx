@@ -13,6 +13,7 @@ import {
   type GarmentResolution, type ChildGarmentResolution,
 } from '@/lib/fba/garmentPerDesign'
 import { perDesignIhRows, collapseSharedIhRows, IH_HOLD_MESSAGES, type PerChildItemHighlight, type PerDesignIhRow, type IhHoldReason } from '@/lib/fba/perDesignItemHighlights'
+import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'   // IH TERMINAL NET PHASE 1 (2026-09-07): the under-floor skip reason's own message names the real floor, never a hardcoded 107
 import { runThemeRerate, type ThemeRerateOutcome } from '@/lib/fba/themeRerateControl'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
@@ -514,7 +515,9 @@ export default function ListingDetailPage() {
   const FIELD_LABEL: Record<PushField, string> = { title: 'Title', bullets: 'Bullets', description: 'Description', keywords: 'Backend Keywords', details: 'Product Detail' }
   // FIX WAVE 2 (I-2b, 2026-09-06): skipReason mirrors pushExecutor.ts's DiffRow (IhSkuSkipReason) —
   // 'repeat-in-stored-line' joins 'no-line-for-design' as a real value this row can carry.
-  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean; isParent?: boolean; asin?: string; skipReason?: 'no-line-for-design' | 'repeat-in-stored-line'; designKey?: string; designName?: string }
+  // IH TERMINAL NET PHASE 1 (2026-09-07, H13): 'under-floor' joins them — classifyStoredIhLine's
+  // newest classification.
+  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean; isParent?: boolean; asin?: string; skipReason?: 'no-line-for-design' | 'repeat-in-stored-line' | 'under-floor'; designKey?: string; designName?: string }
   interface PushResultRow { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }
   interface PushPreview {
     field: PushField; label: string; broadcast: boolean; count: number; changed: number;
@@ -4556,8 +4559,11 @@ export default function ListingDetailPage() {
                                           REFUSE (repeats a significant word — a pre-ruling stored value, a manual DB edit,
                                           or a future producer bug) is flagged PRE-FLIGHT, derived from `perDesignIhRows`'
                                           own `skipReason` (the SAME `classifyStoredIhLine` the seam applies) — never a
-                                          second decision made here in the page. */}
-                                      {r.line && r.skipReason && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title="This stored line repeats a significant word — Amazon's push seam refuses to ship it. Click ↻ Regen to compose a compliant line.">Skip at push</span>}
+                                          second decision made here in the page.
+                                          IH TERMINAL NET PHASE 1 (2026-09-07, H13): 'under-floor' joins 'repeat-in-stored-line'
+                                          as a real skipReason — same PRE-FLIGHT surfacing, its OWN accurate reason text (never
+                                          the repeat wording for a line that is actually just too short). */}
+                                      {r.line && r.skipReason && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={r.skipReason === 'under-floor' ? `This stored line is only ${r.line.length} chars — below the ${CONTENT_CONTRACT.itemHighlights.min} floor. Amazon's push seam refuses to ship it. Click ↻ Regen to compose a compliant line.` : "This stored line repeats a significant word — Amazon's push seam refuses to ship it. Click ↻ Regen to compose a compliant line."}>Skip at push</span>}
                                     </div>
                                     {r.line ? <p className="text-xs text-slate-700 break-words">{r.line}</p> : <p className="text-[11px] text-amber-800 italic">Skipped at push (no-line-for-design)</p>}
                                     {r.line && r.skipReason && <p className="text-[11px] text-amber-800 italic">Skipped at push ({r.skipReason})</p>}

@@ -105,7 +105,13 @@ export const NO_LINE_FOR_DESIGN = 'no-line-for-design' as const
  *  names "no line exists"; this names the distinct case "a line exists but the push seam — the LAST
  *  pure function before Amazon — refuses to ship it". */
 export const REPEAT_IN_STORED_LINE = 'repeat-in-stored-line' as const
-export type IhSkuSkipReason = typeof NO_LINE_FOR_DESIGN | typeof REPEAT_IN_STORED_LINE
+/** IH TERMINAL NET PHASE 1 (2026-09-07, H13): a stored line that is non-empty and non-repeating but
+ *  shorter than `CONTENT_CONTRACT.itemHighlights.min` — `classifyStoredIhLine`'s newest
+ *  classification, given its own named seam-skip reason for the same reason `REPEAT_IN_STORED_LINE`
+ *  got one (I-2b): "under the floor" is a distinct, nameable fact from "no line at all", and the PO
+ *  must see WHICH of the two is true, not a collapsed generic skip. */
+export const UNDER_FLOOR = 'under-floor' as const
+export type IhSkuSkipReason = typeof NO_LINE_FOR_DESIGN | typeof REPEAT_IN_STORED_LINE | typeof UNDER_FLOOR
 
 /** A compact one-row-per-design view of the stored array (first SKU of each design is representative). */
 export interface PerDesignIhRow {
@@ -224,6 +230,10 @@ export function buildPerSkuItemHighlightMap(
     const classification = classifyStoredIhLine(line)
     if (classification === 'no-line-for-design') { skipped.push({ sku: t.sku, asin: t.asin, reason: NO_LINE_FOR_DESIGN }); continue }
     if (classification === 'repeat-in-stored-line') { skipped.push({ sku: t.sku, asin: t.asin, reason: REPEAT_IN_STORED_LINE }); continue }
+    // IH TERMINAL NET PHASE 1 (H13): an under-floor stored line used to fall through to this
+    // `values.set` below (classifyStoredIhLine only ever returned 'ok' for a non-empty,
+    // non-repeating line, regardless of length) — the exact gap the spec's H13 reproduction names.
+    if (classification === 'under-floor') { skipped.push({ sku: t.sku, asin: t.asin, reason: UNDER_FLOOR }); continue }
     values.set(t.sku, line!)
   }
   return { values, skipped }
