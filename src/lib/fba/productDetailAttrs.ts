@@ -22,6 +22,7 @@
 import type { PatchValueEntry } from '@/lib/fba/pushFields'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { GARMENT_HEAD_WORDS } from '@/lib/fba/garmentNoun'
 
 /**
  * LLM/schema-sourced detail values are NOT guaranteed to be strings: the audit model can
@@ -424,6 +425,24 @@ export const ihFoldWord = (w: string): string => {
   return b.replace(/s$/, '')
 }
 
+/* ── TASK 8 (2026-09-07, PO RULING verbatim "A: 2 - Sweatshirt/ crewneck/, Tee Shirt/t-Shirt/
+ * tshirt/Shirt", option 2 of the Task 6 fork): the absolute no-repeat rule (below) made every
+ * truthful sweatshirt/tee family HOLD, because the product's own garment noun must appear twice to
+ * reach the 107-char floor once the pool's phrases are all-brand-name/category copy. The PO exempts
+ * the GARMENT HEAD NOUN alone, up to Amazon's own cap — every other significant word stays at 1.
+ * The exempt set is DERIVED from `GARMENT_HEAD_WORDS` (`garmentNoun.ts`, a leaf, zero imports —
+ * confirmed no cycle) folded through `ihFoldWord`, never a second hand-maintained list: adding a
+ * noun to the canonical set extends this budget automatically (see the derivation test in
+ * `itemHighlightOneRule.test.ts`). `ihRepeatBudget` is the ONE function every consumer of "is this a
+ * repeat" reads — the composer's `classifyTier`/`admitCandidate` (and therefore the shadow
+ * reachability pass, by construction) and `lineHasSignificantRepeat`/`classifyStoredIhLine` (and
+ * therefore the push seam's refusal and the card's pre-flight reason). Never write the literal `2`
+ * anywhere else — `IH_MAX_WORD_REPEATS` above is the one constant. */
+export const IH_GARMENT_HEAD_FOLDED: ReadonlySet<string> = new Set([...GARMENT_HEAD_WORDS].map(ihFoldWord))
+export function ihRepeatBudget(folded: string): number {
+  return IH_GARMENT_HEAD_FOLDED.has(folded) ? IH_MAX_WORD_REPEATS : 1
+}
+
 /** Words that never count toward the repeat cap. Union of both historical sets — see the block
  *  comment above for why union rather than a pick. */
 export const IH_INSIGNIFICANT: ReadonlySet<string> = new Set([
@@ -475,10 +494,13 @@ export const significantFolded = (phrase: string): string[] =>
  *  so a caller holding only the STORED line (no `usedFolded` set — the push seam, a stale per-child
  *  entry) can still ask the same question the composer's own selection loop asks incrementally. */
 export const lineHasSignificantRepeat = (line: string): boolean => {
-  const seen = new Set<string>()
+  // TASK 8 (2026-09-07): counts, not a seen-Set — the garment head noun's budget is 2, so only a
+  // count PAST that budget (`ihRepeatBudget`) is a repeat; every other word's budget is still 1.
+  const counts = new Map<string, number>()
   for (const w of significantFolded(line)) {
-    if (seen.has(w)) return true
-    seen.add(w)
+    const c = (counts.get(w) ?? 0) + 1
+    counts.set(w, c)
+    if (c > ihRepeatBudget(w)) return true
   }
   return false
 }
@@ -500,16 +522,16 @@ export function classifyStoredIhLine(value: string | null | undefined): IhLineCl
 }
 
 export function capItemHighlightRepeats(value: string): string {
-  const fold = (w: string): string => {
-    let b = w.toLowerCase().replace(/[^a-z0-9]/g, '')
-    if (b === 'tshirt' || b === 'tshirts') b = 'shirt'
-    return b.replace(/s$/, '')
-  }
+  // TASK 8 (2026-09-07): the local hand-copy of the fold is gone — this is the SAME hand-copy class
+  // this function's own docstring history already names; `ihFoldWord` is byte-identical (proven on
+  // this function's own pre-existing tests). The `> 2` cap below is Amazon's own cap
+  // (`IH_MAX_WORD_REPEATS`), unchanged and unrelated to the garment exemption — this is the terminal
+  // push-boundary net, not the composer's stricter budget.
   const counts = new Map<string, number>()
   const kept: string[] = []
   for (const phrase of value.split(',').map((p) => p.trim()).filter(Boolean)) {
     const local = new Map<string, number>()
-    for (const w of phrase.split(/[\s/-]+/).map(fold)) {
+    for (const w of phrase.split(/[\s/-]+/).map(ihFoldWord)) {
       if (w.length <= 1 || IH_TRIVIAL.has(w)) continue
       local.set(w, (local.get(w) ?? 0) + 1)
     }

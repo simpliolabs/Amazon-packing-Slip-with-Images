@@ -76,7 +76,11 @@ export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
   // separately-maintained model of them. The claim below is now guaranteed true (the one thing still
   // not modeled, garment-surface-variety ordering, only ever affects WHICH phrases compose, never
   // whether the floor is reachable at all — see the comment on `admitCandidate`).
-  'under-floor-no-repeat': `Held: truthful phrases + blank facts reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor only by repeating a significant word, which is never allowed (PO ruling 2026-09-06) — rate/harvest more keywords for this family`,
+  // TASK 8 (2026-09-07, PO RULING "A: 2 - Sweatshirt/…"): the absolute rule now has ONE exception —
+  // the garment head noun may repeat up to Amazon's own cap (`IH_MAX_WORD_REPEATS`, 2); every other
+  // significant word is still limited to once. The message names the allowance instead of claiming
+  // "never allowed" (still true for every other word, just no longer true of the garment noun).
+  'under-floor-no-repeat': `Held: truthful phrases + blank facts reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor only by repeating a word beyond its allowance (the garment noun may appear twice; every other significant word once) — rate/harvest more keywords for this family`,
 }
 
 /** One entry per SKU — mirrors per_child_titles' {sku, asin, <field>, designName?, designKey?}. */
