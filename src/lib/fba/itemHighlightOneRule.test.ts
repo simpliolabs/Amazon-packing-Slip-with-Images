@@ -156,7 +156,11 @@ describe('TASK 8: ihRepeatBudget — the ONE exemption, derived from GARMENT_HEA
  * disagree with the composer about what a "repeat" is. */
 describe('TASK 8: classifyStoredIhLine honors the garment exemption', () => {
   it('tee x2 -> ok (was repeat-in-stored-line before this ruling)', () => {
-    expect(classifyStoredIhLine('Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit')).toBe('ok')
+    // IH TERMINAL NET PHASE 1 (2026-09-07, H13): lengthened past the 107-char floor — the original
+    // 85-char fixture predates `classifyStoredIhLine`'s new under-floor classification and would now
+    // (correctly) be refused for a DIFFERENT reason than the one this test exists to pin (the garment
+    // exemption). Same words, same zero-non-garment-repeat shape, one extra true phrase appended.
+    expect(classifyStoredIhLine('Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit, Everyday Comfort Wear')).toBe('ok')
   })
 
   it('tee x3 -> repeat-in-stored-line — Amazon\'s own cap (2) still refuses a THIRD mention', () => {

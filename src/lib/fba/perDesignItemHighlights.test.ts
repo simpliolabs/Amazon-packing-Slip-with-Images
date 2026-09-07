@@ -31,8 +31,12 @@ describe('F1 (round 2, controller RULING): perDesignItemHighlights.ts stays clie
 // `buildPerSkuItemHighlightMap` now REFUSES any stored line that repeats one (see below), so a
 // fixture written before the absolute no-repeat ruling existed would now be skipped by the very
 // tests that assert it gets MAPPED. Re-worded, same shape/length, zero repeated folded tokens.
-const BM_LINE = 'Gym Motivation Shirts, Workout Graphic Tees, Lifting Apparel for Men, Fitness Clothing Line, Crew Neck'
-const RK_LINE = 'Real King Novelty Tee, Workout Graphic Apparel, Lifting Gear for Men, Bodybuilding Tops, Crew Neck'
+// IH TERMINAL NET PHASE 1 (2026-09-07, H13): both were 98-102 chars — under the 107-char floor
+// `classifyStoredIhLine` now enforces — so this SKU/twin-resolution fixture would (correctly) be
+// refused for a length reason unrelated to what this describe block tests. One extra true phrase
+// appended to each, zero new repeats (verified via the real predicate, not by eye).
+const BM_LINE = 'Gym Motivation Shirts, Workout Graphic Tees, Lifting Apparel for Men, Fitness Clothing Line, Crew Neck, Soft Comfort'
+const RK_LINE = 'Real King Novelty Tee, Workout Graphic Apparel, Lifting Gear for Men, Bodybuilding Tops, Crew Neck, Soft Comfort'
 const ENTRIES: PerChildItemHighlight[] = [
   { sku: 'BM64000L-BK', asin: 'B0BM000001', item_highlight: BM_LINE, designKey: 'BM', designName: 'Beast Mode', hold: null },
   { sku: 'BM64000M-BK', asin: 'B0BM000002', item_highlight: BM_LINE, designKey: 'BM', designName: 'Beast Mode', hold: null },
