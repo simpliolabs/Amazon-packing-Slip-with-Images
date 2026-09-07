@@ -244,3 +244,41 @@ describe('TASK 8 ROUND 2 (R1): the pad bank is ONE definition; its boilerplate r
     expect(deriveIhBoilerplateBudget(noSuffixOnly)).toEqual(new Set())
   })
 })
+
+/* ─── TASK 8 ROUND 3 (2026-09-07, controller RULING, task-8-report.md "Round 2" §2 design note
+ * REJECTED): round 2's `unisex` descriptor declared `suffix: IH_PAD_SUFFIX_FIT` but its `build`
+ * returned the LITERAL `'Unisex Fit'` instead of composing `` `Unisex ${IH_PAD_SUFFIX_FIT}` ``. The
+ * literal happens to spell the same bytes as the constant TODAY, so every byte-output fixture
+ * stayed green — but nothing forced that agreement. A reproduction probe (mutating the literal to
+ * 'Unisex Sizing') proved `deriveIhBoilerplateBudget`/`ihRepeatBudget` are BLIND to it — the budget
+ * stayed 2 for 'fit' while composing a filler that no longer ends in "Fit" at all — and that only
+ * 3 pre-existing tests caught the wording change, all by COINCIDENCE (they hardcode the exact
+ * composed string; none of them assert build() output is consistent with its OWN declared
+ * `suffix`). A wording change that also updated those fixtures would have shipped the same drift
+ * invisibly. This pin closes that gap structurally: it asserts the relationship the budget
+ * derivation ASSUMES holds — build() output for a suffixed descriptor is the spec value plus a
+ * trailing " " + suffix — for every descriptor, so the budget (which reads `suffix`) and the bytes
+ * the composer appends (which come from `build`) cannot drift apart again. */
+describe('TASK 8 ROUND 3: build() output cannot drift from its own declared suffix', () => {
+  const FULL_SPEC = {
+    material: '100% Ring-Spun Cotton',
+    fit: 'Relaxed',
+    unisex: true,
+    neck: 'Crew Neck',
+    sleeve: 'Short Sleeve',
+    dye: 'Garment-Dyed',
+  }
+
+  it('SELF-CONSISTENCY PIN: every suffixed descriptor\'s non-empty build() output ends with " " + its declared suffix; every suffix-less descriptor (material/neck/sleeve) returns the spec value verbatim', () => {
+    expect(IH_PAD_FILLER_DESCRIPTORS.length).toBeGreaterThanOrEqual(6)
+    for (const d of IH_PAD_FILLER_DESCRIPTORS) {
+      const built = d.build(FULL_SPEC)
+      if (built === '') continue // no descriptor in the full-spec fixture should be empty; loop stays honest if one ever is
+      if (d.suffix) {
+        expect(built.endsWith(' ' + d.suffix), `${d.key}: "${built}" must end with " ${d.suffix}"`).toBe(true)
+      } else {
+        expect(built, d.key).toBe((FULL_SPEC as Record<string, unknown>)[d.key])
+      }
+    }
+  })
+})

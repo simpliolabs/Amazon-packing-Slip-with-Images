@@ -485,10 +485,14 @@ interface IhPadFillerDescriptor {
  *  one array. */
 // Exported so a test can reference the SAME list the production derivation and both composer call
 // sites read (perturbing a COPY of it, never this one) — never a second hand-typed template list.
+// TASK 8 ROUND 3: every descriptor that declares a `suffix` must BUILD it from the same constant
+// (never a literal that merely happens to spell the same word today) — the self-consistency pin in
+// itemHighlightOneRule.test.ts enforces this so `deriveIhBoilerplateBudget` (reads `suffix`) can
+// never silently diverge from the bytes `build` actually appends.
 export const IH_PAD_FILLER_DESCRIPTORS: readonly IhPadFillerDescriptor[] = [
   { key: 'material', suffix: null, build: (sp) => sp.material || '' },
   { key: 'fit', suffix: IH_PAD_SUFFIX_FIT, build: (sp) => (sp.fit ? `${sp.fit} ${IH_PAD_SUFFIX_FIT}` : '') },
-  { key: 'unisex', suffix: IH_PAD_SUFFIX_FIT, build: (sp) => (sp.unisex === true ? 'Unisex Fit' : '') },
+  { key: 'unisex', suffix: IH_PAD_SUFFIX_FIT, build: (sp) => (sp.unisex === true ? `Unisex ${IH_PAD_SUFFIX_FIT}` : '') },
   { key: 'neck', suffix: null, build: (sp) => sp.neck || '' },
   { key: 'sleeve', suffix: null, build: (sp) => sp.sleeve || '' },
   { key: 'dye', suffix: IH_PAD_SUFFIX_FABRIC, build: (sp) => (sp.dye ? `${sp.dye} ${IH_PAD_SUFFIX_FABRIC}` : '') },
