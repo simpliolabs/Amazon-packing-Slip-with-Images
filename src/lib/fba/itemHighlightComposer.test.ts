@@ -557,13 +557,13 @@ describe('brand waterfall INSIDE the composer (B0FKFHSCS9: 1717 by override, tit
  * (fit/volume, the `women`/`sweatshirt`/`crewneck` repeats) but swap the all-new candidate for one
  * with NO garment surface match, which genuinely isolates the tier rule. */
 describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallback (PO 2026-09-06)', () => {
-  it('the absolute rule composes with the repeat-heavy candidates excluded entirely — `women` appears exactly ONCE even though the repeat candidate sorts higher on volume (the pin the final reviewer flagged as untested)', () => {
+  it('the absolute rule composes with the repeat-heavy candidate excluded — `women` appears exactly ONCE even though the repeat candidate sorts higher on volume (the pin the final reviewer flagged as untested); TASK 8 (2026-09-07, PO RULING "A: 2 - Sweatshirt/…"): `long sleeve crewneck` now COMPOSES too — `crewneck` is the garment head noun, exempt to Amazon\'s own cap (2) — this is the exact allowance the ruling grants, not a regression', () => {
     const pool = [
       { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
-      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // repeats `sweatshirt`/`women` — NEVER composes since Task 6
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // repeats `sweatshirt` (exempt, ok) AND `women` (not exempt) — NEVER composes
       { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },        // all new, no garment-surface head start
-      { keyword: 'weekend getaway vibe', searchVolume: 750, themeFit: 3 },         // TASK 6: 3rd all-new pool phrase — MIN_CANDIDATES needs 3, and the original 2-pick pool now HOLDS regardless of spec (see file-header note)
-      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // repeats `crewneck` — NEVER composes since Task 6
+      { keyword: 'weekend getaway vibe', searchVolume: 750, themeFit: 3 },         // TASK 6: 3rd all-new pool phrase — MIN_CANDIDATES needs 3
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // TASK 8: repeats `crewneck` (garment noun) ONCE — its 2nd mention, still within budget 2 — COMPOSES
     ]
     const spec = { material: '100% Cotton Blend', fit: 'Relaxed', unisex: true, neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed' }
     const out = composeItemHighlight(pool, [], { spec: spec as any })!
@@ -572,14 +572,56 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     expect(out.length).toBeLessThanOrEqual(MAX)
     expect(out.toLowerCase()).toContain('novelty retro graphic')
     expect(out.toLowerCase()).toContain('weekend getaway vibe')
-    // the repeat candidates never compose, full stop — not merely deprioritized behind a fallback
+    expect(out.toLowerCase()).toContain('long sleeve crewneck')   // TASK 8: the garment-noun exemption
+    // the women-repeating candidate never composes, full stop — women stays at budget 1
     expect(out.toLowerCase()).not.toContain('fall sweatshirts for women')
-    expect(out.toLowerCase()).not.toContain('long sleeve crewneck')
     const womenCount = (out.match(/\bwomen\b/gi) ?? []).length
     expect(womenCount).toBe(1)
+    const crewneckCount = (out.match(/crewneck/gi) ?? []).length
+    expect(crewneckCount).toBe(2)   // Amazon's own cap — the garment noun's allowance, never a THIRD
   })
 
-  it('INVERTED (PO ruling 2026-09-06, "2. No Repeat as per Amazon Ruules"): the Tier-B fallback this test used to prove was REAL is now DEAD. Tier A alone ("Crewneck Sweatshirts Women" + "Novelty Retro Graphic", ~49 chars) cannot reach the 107-char floor without repeating `sweatshirt`/`crewneck`/`women`, and no `spec` is passed, so the design HOLDS `under-floor-no-repeat` instead of composing a repeat to get there. This exact pool is the branch\'s recorded reproduction: run unmodified (HEAD f64175f), it composes a 122-char line containing `crewneck`x2/`sweatshirt`x2/`women`x2/`sleeve`x2 — the defect this ruling closes.', () => {
+  it('TASK 8 PIN: the ORIGINAL Task 6/final-review repro pool (5 phrases: crewneck sweatshirts women / fall sweatshirts for women / novelty retro graphic / long sleeve crewneck / sleeve detail graphic), WITH a spec so it actually composes — crewneck/sweatshirt (garment nouns) may appear TWICE; women/sleeve (not garment nouns) may appear only ONCE; asserted on the returned bytes, not a property proxy', () => {
+    const pool = [
+      { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // sweatshirt ok (2nd), women OVER (2nd) -> Tier B, rejected
+      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // crewneck's legal 2nd mention
+      { keyword: 'sleeve detail graphic', searchVolume: 550, themeFit: 2 },        // sleeve OVER (2nd), graphic OVER (2nd) -> Tier B, rejected
+    ]
+    const spec = { material: '100% Cotton Blend', fit: 'Relaxed', unisex: true, neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed' }
+    const res = composeItemHighlightDetailed(pool, [], { spec: spec as any })
+    // Verified via an `npx tsx` probe against the real composer (task-8-report.md).
+    expect(res.line).toBe('Crewneck Sweatshirts Women, Novelty Retro Graphic, Long Sleeve Crewneck, 100% Cotton Blend, Relaxed Fit, Unisex Fit')
+    expect(res.stage).toBeNull()
+    const line = res.line!
+    expect((line.match(/crewneck/gi) ?? []).length).toBe(2)          // garment noun, budget 2
+    expect((line.match(/\bsweatshirts?\b/gi) ?? []).length).toBe(1)  // only ONE phrase carries it here
+    expect((line.match(/\bwomen\b/gi) ?? []).length).toBe(1)         // not a garment noun — budget 1
+    expect((line.match(/\bsleeve\b/gi) ?? []).length).toBe(1)        // not a garment noun — budget 1
+    expect(line.toLowerCase()).not.toContain('fall sweatshirts for women')
+    expect(line.toLowerCase()).not.toContain('sleeve detail graphic')
+  })
+
+  it('TASK 8 PIN: a THIRD garment-noun mention is still rejected (Amazon\'s own cap, `ihRepeatViolations`) even by the repeat-permitting SHADOW — a pool whose floor is reachable only via `crewneck` a third time HOLDS. Three mutually-disjoint Tier-A phrases reach only 86 chars (well under the 107 floor); the only remaining candidate needs crewneck a 3rd time to fit the char budget, so `tierBFitBudgetSeen` fires, but the shadow\'s OWN `admitCandidate` call still runs `ihRepeatViolations` and refuses it — the shadow can never "reach the floor" through a violation the real loop could not ship either, so this reports the pre-existing reason (`under-floor-after-pad`, no spec pad bank here), never a false `under-floor-no-repeat`', () => {
+    const pool = [
+      { keyword: 'crewneck graphic design wear', searchVolume: 900, themeFit: 3 },
+      { keyword: 'crewneck holiday cheer style', searchVolume: 850, themeFit: 3 },   // crewneck's legal 2nd mention
+      { keyword: 'weekend getaway retro vibe', searchVolume: 800, themeFit: 3 },
+      { keyword: 'crewneck festive winter charm', searchVolume: 750, themeFit: 3 }, // crewneck's 3rd mention — Amazon's cap, rejected everywhere
+    ]
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.line).toBeNull()
+    expect(res.stage).toBe('under-floor-after-pad')
+    const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(logged.picked).toBe(3)
+    expect(logged.lineLen).toBe(86)
+    expect(logged.repeatBlocked).toBe(false)   // the shadow could not use the 3rd mention either
+    logSpy.mockRestore()
+  })
+
+  it('INVERTED (PO ruling 2026-09-06, "2. No Repeat as per Amazon Ruules"): the Tier-B fallback this test used to prove was REAL is now DEAD. Tier A alone ("Crewneck Sweatshirts Women" + "Novelty Retro Graphic", ~49 chars) cannot reach the 107-char floor without repeating `sweatshirt`/`crewneck`/`women`, and no `spec` is passed, so the design HOLDS `under-floor-no-repeat` instead of composing a repeat to get there. This exact pool is the branch\'s recorded reproduction: run unmodified (HEAD f64175f), it composes a 122-char line containing `crewneck`x2/`sweatshirt`x2/`women`x2/`sleeve`x2 — the defect this ruling closes. TASK 8 NOTE: with a spec this pool DOES compose (see the pin above) — it holds HERE only because no spec is passed, so the pad path never runs; `women`\'s 2nd mention (via `fall sweatshirts for women`) is still rejected on its own merits regardless.', () => {
     const pool = [
       { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
       { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // repeats sweatshirt/women

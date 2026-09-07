@@ -133,8 +133,13 @@ const holdFor = (r: ReturnType<typeof build>, key: string) => r.perDesign.find((
  *  round 2, F1; was `itemHighlightComposer.ts`) — so this proves the wire's output obeys the PO's
  *  ruling, not merely the production fold's own bookkeeping (`test-proves-the-mock-not-the-wire`).
  *  Mirrors the same fold RULES (`ihFoldWord` + the same gender-plural collapse) using only the
- *  exported primitives. */
+ *  exported primitives.
+ *  TASK 8 (2026-09-07): the budget itself is now an INDEPENDENT hand-written rule too — a literal
+ *  garment list IN THE TEST (not `IH_GARMENT_HEAD_FOLDED`), so this test does not validate the
+ *  production predicate with itself. */
 const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
+const TEST_GARMENT_WORDS = new Set(['sweatshirt', 'crewneck', 'tee', 'shirt', 'hoodie', 'pullover'])
+const testBudget = (w: string): number => (TEST_GARMENT_WORDS.has(w) ? 2 : 1)
 const dupedFoldedTokens = (line: string): string[] => {
   const counts = new Map<string, number>()
   for (const raw of line.toLowerCase().split(/[\s,]+/).filter(Boolean)) {
@@ -143,7 +148,7 @@ const dupedFoldedTokens = (line: string): string[] => {
     if (!w || IH_INSIGNIFICANT.has(w)) continue
     counts.set(w, (counts.get(w) ?? 0) + 1)
   }
-  return [...counts.entries()].filter(([, c]) => c > 1).map(([w]) => w)
+  return [...counts.entries()].filter(([w, c]) => c > testBudget(w)).map(([w]) => w)
 }
 
 describe('each design composes its OWN line (PO 2026-09-06, refining the shared-line ruling)', () => {

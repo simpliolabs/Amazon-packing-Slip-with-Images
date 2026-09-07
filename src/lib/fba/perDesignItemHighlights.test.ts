@@ -89,11 +89,15 @@ describe('buildPerSkuItemHighlightMap', () => {
  * composer calls a repeat" and "what the push seam calls a repeat" is exactly the class of bug this
  * project's memory calls out (coverage-token-folding-shirt-hub-trap). */
 describe('FIX WAVE 2 (I-2b): buildPerSkuItemHighlightMap refuses a stored line that repeats a significant word', () => {
-  const STALE_LINE_REPEATED_TEE = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+  // TASK 8 (2026-09-07, PO RULING "A: 2 - Sweatshirt/…"): the ORIGINAL fixture here repeated `tee`
+  // twice — that is now LEGAL (`tee` is the garment head noun, exempt to Amazon's own cap). Swapped
+  // to repeat `boss` instead (a non-garment, non-exempt token, still budget 1) so this block keeps
+  // testing the REFUSAL mechanism itself; the tee-twice consequence gets its OWN pin below.
+  const STALE_LINE_REPEATED_BOSS = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Boss Gift Idea Today, Ring-Spun Cotton, Classic Fit'
 
-  it('a stale stored line with `tee` twice (the reviewer-executed MAIN-era reproduction) is SKIPPED with repeat-in-stored-line, never mapped', () => {
+  it('a stale stored line with `boss` twice (a non-garment repeat) is SKIPPED with repeat-in-stored-line, never mapped', () => {
     const entries: PerChildItemHighlight[] = [
-      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_BOSS, designKey: 'BD', designName: 'Boss Definition', hold: null },
     ]
     const { values, skipped } = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK', asin: 'B0BD000001' }], null)
     expect(values.has('BD64000L-BK')).toBe(false)
@@ -108,11 +112,21 @@ describe('FIX WAVE 2 (I-2b): buildPerSkuItemHighlightMap refuses a stored line t
 
   it('an FBM twin resolved by ASIN through a repeated stored line is refused too — the twin resolution never bypasses the repeat check', () => {
     const entries: PerChildItemHighlight[] = [
-      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_BOSS, designKey: 'BD', designName: 'Boss Definition', hold: null },
     ]
     const { values, skipped } = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK-FBM', asin: 'B0BD000001' }], null)
     expect(values.has('BD64000L-BK-FBM')).toBe(false)
     expect(skipped).toEqual([{ sku: 'BD64000L-BK-FBM', asin: 'B0BD000001', reason: REPEAT_IN_STORED_LINE }])
+  })
+
+  it('TASK 8 CONSEQUENCE: the ORIGINAL `tee`-twice stale line (the reviewer-executed MAIN-era reproduction, final-review-2-findings.md §0(a)) is now MAPPED, never skipped — `tee` is the garment head noun, exempt up to Amazon\'s own cap (2)', () => {
+    const staleLineTeeTwice = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: staleLineTeeTwice, designKey: 'BD', designName: 'Boss Definition', hold: null },
+    ]
+    const { values, skipped } = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK', asin: 'B0BD000001' }], null)
+    expect(values.get('BD64000L-BK')).toBe(staleLineTeeTwice)
+    expect(skipped).toHaveLength(0)
   })
 })
 
@@ -123,16 +137,28 @@ describe('FIX WAVE 2 (I-2b): buildPerSkuItemHighlightMap refuses a stored line t
  * button, then learn it was skipped only from the push report; these pins prove the row itself now
  * carries `skipReason` so the card can show it BEFORE any push is attempted. */
 describe('FIX WAVE 2 ROUND 2 (F2): perDesignIhRows derives the push-seam skip reason PRE-FLIGHT', () => {
-  const STALE_LINE_REPEATED_TEE = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+  // TASK 8 (2026-09-07): `tee` twice is now legal (garment head noun, exempt to Amazon's own cap) —
+  // repeats `boss` instead so this fixture still exercises a genuine refusal.
+  const STALE_LINE_REPEATED_BOSS = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Boss Gift Idea Today, Ring-Spun Cotton, Classic Fit'
 
-  it('(a) a stored `tee`-twice line yields skipReason repeat-in-stored-line and the row is not pushable', () => {
+  it('(a) a stored line repeating `boss` (a non-garment word) yields skipReason repeat-in-stored-line and the row is not pushable', () => {
     const entries: PerChildItemHighlight[] = [
-      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_BOSS, designKey: 'BD', designName: 'Boss Definition', hold: null },
     ]
     const rows = perDesignIhRows(entries)
     expect(rows).toHaveLength(1)
     expect(rows[0].skipReason).toBe(REPEAT_IN_STORED_LINE)
     expect(pushableDesignLines(entries)).toEqual([])   // not pushable — same predicate the seam applies
+  })
+
+  it('(a2) TASK 8 CONSEQUENCE: a stored line repeating `tee` (the garment head noun) has skipReason null and IS pushable — Amazon\'s own cap (2), not budget 1', () => {
+    const staleLineTeeTwice = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: staleLineTeeTwice, designKey: 'BD', designName: 'Boss Definition', hold: null },
+    ]
+    const rows = perDesignIhRows(entries)
+    expect(rows[0].skipReason).toBeNull()
+    expect(pushableDesignLines(entries)).toEqual(entries)
   })
 
   it('(c) the existing no-line-for-design (HELD) rendering is unchanged: empty line, the composer\'s own hold reason, and skipReason reports no-line-for-design', () => {

@@ -27,8 +27,12 @@ import { resolveBulkSkuFields } from '@/lib/fba/pushExecutor'
 import { buildPerSkuItemHighlightMap, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 
 // The exact reproduction line from final-rereview-2-findings.md §0(2) / perDesignItemHighlights.test.ts —
-// 'Tee' appears twice, which `classifyStoredIhLine` refuses as 'repeat-in-stored-line'.
-const STALE_LINE_REPEATED_TEE = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+// originally 'Tee' twice, which `classifyStoredIhLine` refused as 'repeat-in-stored-line'.
+// TASK 8 (2026-09-07, PO RULING "A: 2 - Sweatshirt/…"): `tee` twice is now LEGAL (the garment head
+// noun, exempt to Amazon's own cap) — swapped to repeat `boss` (non-garment, still budget 1) so this
+// fixture keeps exercising the REFUSAL mechanism this file tests; the tee-twice consequence is its
+// own pin below.
+const STALE_LINE_REPEATED_BOSS = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Boss Gift Idea Today, Ring-Spun Cotton, Classic Fit'
 
 describe('resolveBulkSkuFields (bulk-push per-design skip parity, 2026-09-06)', () => {
   const livePlans = [
@@ -37,9 +41,9 @@ describe('resolveBulkSkuFields (bulk-push per-design skip parity, 2026-09-06)', 
   ]
   const desired = { fabric_type: '100% Cotton' }
 
-  it('a stale `tee`-twice stored line (real seam output) yields repeat-in-stored-line — NOT no-line-for-design — as a structured skip, not a bare log', () => {
+  it('a stale stored line repeating `boss` (real seam output) yields repeat-in-stored-line — NOT no-line-for-design — as a structured skip, not a bare log', () => {
     const entries: PerChildItemHighlight[] = [
-      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_BOSS, designKey: 'BD', designName: 'Boss Definition', hold: null },
     ]
     const seam = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK', asin: 'B0BD000001' }], null)
     expect(seam.values.has('BD64000L-BK')).toBe(false)          // pre-condition: the seam DID refuse it
@@ -56,6 +60,21 @@ describe('resolveBulkSkuFields (bulk-push per-design skip parity, 2026-09-06)', 
     // The unrelated broadcast field is unaffected by the per-design skip.
     expect(result.desiredSku.fabric_type).toBe('100% Cotton')
     expect(result.skuKeys).toContain('fabric_type')
+  })
+
+  it('TASK 8 CONSEQUENCE: a stored line repeating `tee` (the garment head noun, exempt to Amazon\'s own cap) is NEVER skipped — resolves through exactly like the happy path', () => {
+    const staleLineTeeTwice = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: staleLineTeeTwice, designKey: 'BD', designName: 'Boss Definition', hold: null },
+    ]
+    const seam = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK', asin: 'B0BD000001' }], null)
+    expect(seam.values.get('BD64000L-BK')).toBe(staleLineTeeTwice)
+    expect(seam.skipped).toHaveLength(0)
+
+    const perDesignMaps = new Map([['Item Highlights', seam]])
+    const result = resolveBulkSkuFields('BD64000L-BK', livePlans, perDesignMaps, desired)
+    expect(result.skips).toHaveLength(0)
+    expect(result.desiredSku.item_highlight).toBe(staleLineTeeTwice)
   })
 
   it('a genuinely absent design (no entry at all) still reports no-line-for-design — the pre-existing reason is preserved, not collapsed away', () => {

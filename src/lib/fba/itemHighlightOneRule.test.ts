@@ -25,7 +25,11 @@ import {
   IH_MAX_WORD_REPEATS,
   IH_INSIGNIFICANT,
   capItemHighlightRepeats,
+  IH_GARMENT_HEAD_FOLDED,
+  ihRepeatBudget,
+  classifyStoredIhLine,
 } from './productDetailAttrs'
+import { GARMENT_HEAD_WORDS } from './garmentNoun'
 
 describe('the canonical rule matches Amazon, not a stricter invention', () => {
   it('Amazon allows a word TWICE — that is the shipped threshold', () => {
@@ -104,5 +108,63 @@ describe('the validator and the door cannot disagree', () => {
   it('is total — empty and whitespace input never throw', () => {
     expect(ihRepeatViolations('')).toEqual([])
     expect(ihRepeatViolations('   ')).toEqual([])
+  })
+})
+
+/* ─── TASK 8 (2026-09-07, PO RULING verbatim "A: 2 - Sweatshirt/ crewneck/, Tee Shirt/t-Shirt/
+ * tshirt/Shirt"): the garment head noun is the ONE exception to the absolute no-repeat rule — it
+ * may appear up to Amazon's own cap (`IH_MAX_WORD_REPEATS`, 2); every other significant word stays
+ * at budget 1. `ihRepeatBudget` is the ONE function every consumer (the composer's tier/admission,
+ * `lineHasSignificantRepeat`/`classifyStoredIhLine`) reads — never a second list, never the literal
+ * `2` written anywhere but here. */
+describe('TASK 8: ihRepeatBudget — the ONE exemption, derived from GARMENT_HEAD_WORDS, never a second list', () => {
+  it('DERIVATION PIN: IH_GARMENT_HEAD_FOLDED is exactly the fold of GARMENT_HEAD_WORDS — a local list would fail this', () => {
+    const expected = new Set([...GARMENT_HEAD_WORDS].map(ihFoldWord))
+    expect(new Set(IH_GARMENT_HEAD_FOLDED)).toEqual(expected)
+  })
+
+  it('ENUMERATION PIN: every one of the PO\'s six verbatim forms folds INTO the exempt set', () => {
+    for (const form of ['Sweatshirt', 'crewneck', 'Tee Shirt', 't-Shirt', 'tshirt', 'Shirt']) {
+      for (const word of form.split(/\s+/)) {
+        expect(IH_GARMENT_HEAD_FOLDED.has(ihFoldWord(word)), `${form} -> ${word}`).toBe(true)
+      }
+    }
+  })
+
+  it('non-garment significant words are NOT in the exempt set', () => {
+    for (const w of ['women', 'sleeve', 'graphic', 'funny']) {
+      expect(IH_GARMENT_HEAD_FOLDED.has(ihFoldWord(w)), w).toBe(false)
+    }
+  })
+
+  it('budget is 2 (Amazon\'s cap, IH_MAX_WORD_REPEATS) for a garment head noun, 1 for everything else', () => {
+    for (const w of ['sweatshirt', 'crewneck', 'tee', 'shirt', 'hoodie', 'pullover']) {
+      expect(ihRepeatBudget(ihFoldWord(w)), w).toBe(IH_MAX_WORD_REPEATS)
+    }
+    for (const w of ['women', 'sleeve', 'graphic', 'funny', 'cotton']) {
+      expect(ihRepeatBudget(ihFoldWord(w)), w).toBe(1)
+    }
+  })
+})
+
+/* ─── TASK 8: `lineHasSignificantRepeat`/`classifyStoredIhLine` — the STORED-LINE half of the same
+ * budget. A line stored before this ruling (or a manual DB edit) is judged by the SAME
+ * `ihRepeatBudget`, never a second rule, so the seam (push) and the card (pre-flight) can never
+ * disagree with the composer about what a "repeat" is. */
+describe('TASK 8: classifyStoredIhLine honors the garment exemption', () => {
+  it('tee x2 -> ok (was repeat-in-stored-line before this ruling)', () => {
+    expect(classifyStoredIhLine('Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit')).toBe('ok')
+  })
+
+  it('tee x3 -> repeat-in-stored-line — Amazon\'s own cap (2) still refuses a THIRD mention', () => {
+    expect(classifyStoredIhLine('Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Classic Tee Style, Ring-Spun Cotton')).toBe('repeat-in-stored-line')
+  })
+
+  it('women x2 -> repeat-in-stored-line — a non-garment significant word never gets the exemption', () => {
+    expect(classifyStoredIhLine('Crewneck Sweatshirts Women, Fall Sweatshirts for Women, Classic Fit')).toBe('repeat-in-stored-line')
+  })
+
+  it('the LIVE stored falsehood\'s neighbour stays refused: "Crewneck Sweatshirts Women, Fall Sweatshirts for Women, Graphic Crewneck, 50% Cotton / 50% Polyester, Classic Fit" (women twice)', () => {
+    expect(classifyStoredIhLine('Crewneck Sweatshirts Women, Fall Sweatshirts for Women, Graphic Crewneck, 50% Cotton / 50% Polyester, Classic Fit')).toBe('repeat-in-stored-line')
   })
 })
