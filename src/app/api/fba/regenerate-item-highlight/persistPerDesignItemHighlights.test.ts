@@ -14,6 +14,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { persistPerDesignItemHighlights } from './route'
+import { buildItemHighlightsPerDesign } from '@/lib/fba/listingPipeline'
 import type { PerDesignItemHighlight, SharedItemHighlight } from '@/lib/fba/listingPipeline'
 import type { PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 
@@ -121,5 +122,27 @@ describe('persistPerDesignItemHighlights (FIX WAVE 2, I-2a)', () => {
     expect(result.error).toMatch(/Could not save the per-design Item Highlights/)
     expect(result.error).toMatch(/migration 060/)
     errorSpy.mockRestore()
+  })
+
+  it("INVARIANT (not the #352 outage-blanking trap): the REAL buildItemHighlightsPerDesign never returns composed===0 with shared.hold===null — the route's held branch always has a NAMED reason to persist, never an ambiguous empty result. Fed a genuinely thin/unrated pool, then persisted end-to-end.", async () => {
+    const groups = [
+      { key: 'BD', designName: 'Boss Definition', skus: [{ sku: 'BD1', asin: 'A1' }], titles: ['Boss Definition Tee'] },
+      { key: 'BM', designName: 'Beast Mode', skus: [{ sku: 'BM1', asin: 'A2' }], titles: ['Beast Mode Tee'] },
+    ]
+    // An EMPTY pool: no candidate can ever compose, but every design is still nominally "rated"
+    // (ratedShare on an empty pool is 0/0 -> requireFit false -> unrated-pool, a REAL named reason).
+    const built = buildItemHighlightsPerDesign({
+      groups, pool: [], apparelProduct: true, blankBrand: null, familyTitleText: 'Test Family',
+    })
+    const composed = built.perDesign.filter((d) => d.value).length
+    expect(composed).toBe(0)
+    expect(built.shared.hold).not.toBeNull()   // THE invariant persistPerDesignItemHighlights relies on
+
+    const { supabase, calls } = fakeSupabase({ error: null })
+    const result = await persistPerDesignItemHighlights(supabase, 'B0TEST0004', DETAILS, IH_IDX, built)
+    expect(result.error).toBeNull()
+    const payload = calls[0].payload as { product_details_improvements: Record<string, unknown>[] }
+    expect(payload.product_details_improvements[1].hold).toBe(built.shared.hold)
+    expect(payload.product_details_improvements[1].hold).not.toBeNull()
   })
 })
