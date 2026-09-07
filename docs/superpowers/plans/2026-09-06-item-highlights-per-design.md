@@ -186,3 +186,89 @@ whose design phrase itself is gendered (e.g. "Mother Hustler") keeps its own phr
 bytes.
 
 **Verify:** as Task 1.
+
+## Task 6: NO repeated significant word — absolute. Tier B is replaced by HOLD.
+
+**PO RULING 2026-09-06**, verbatim: *"2. No Repeat as per Amazon Ruules"* — given in answer to the
+controller's proposed spec amendment ("no repeat unless the 107 floor cannot otherwise be reached
+truthfully"). The amendment is REJECTED; the spec row stands as written:
+`No repeats | no significant word twice — Women, … Women is a FAIL (stricter than Amazon's cap of 2)`.
+
+**What ships today (PR #673, Task 2) and must change:** `itemHighlightComposer.ts` fills from Tier A
+(all folded significant tokens new) and then FALLS BACK to Tier B (adds ≥1 new token but repeats ≥1
+used token) whenever Tier A is exhausted below `fillTarget` (110). The final reviewer's probe shipped
+`Shirts` twice on one design under that fallback. Under this ruling a Tier-B pick is never allowed.
+
+**The rule:** in BOTH selection loops (pool phrases and the spec-fact pad), a candidate that repeats
+ANY already-used folded significant token is REJECTED, full stop. If Tier A is exhausted and the
+line is still under `CONTENT_CONTRACT.itemHighlights.min` (107), the design HOLDS with a NEW named
+reason (e.g. `under-floor-no-repeat` — follow the existing `IhHoldReason` / `IH_HOLD_MESSAGES` pattern
+exactly, with a PO-facing message that says the pool cannot fill 107 chars without repeating a word
+and names the action: rate/enrich the pool). Never compose a repeat to reach the floor. The push-
+boundary ≤2 cap (`ihRepeatViolations` / `capItemHighlightRepeats`) STAYS as defence in depth.
+
+**Task 2's pad-loop ruling still applies:** the six spec-fact fillers are independent truths and share
+only the code-appended boilerplate `Fit`/`Fabric`; the pad loop judges against the pre-pad snapshot
+(`usedBeforePad`) so `Classic Fit` + `Unisex Fit` may co-exist (PO ruling 2026-08-06). That exemption
+is NOT a repeat in the spec's sense and is unchanged. A spec fact that repeats a POOL token is still
+rejected.
+
+**Files:** `src/lib/fba/itemHighlightComposer.ts` (both loops; the `tier` outer loop collapses to Tier
+A only — delete the Tier-B pass rather than gating it, so the dead branch cannot be re-enabled by a
+constant), `src/lib/fba/listingPipeline.ts` (`IhHoldReason` union + `IH_HOLD_MESSAGES`), and the
+tests that pinned the fallback (`itemHighlightComposer.test.ts` — the Task 2 test that proved the
+fallback was REAL must now be inverted deliberately with a comment: it proves the HOLD instead).
+
+**Tests (RED first):** a pool where Tier A reaches only 49 chars and Tier B would reach 107 → returns
+null/hold with `under-floor-no-repeat` (today it composes with a repeat); the realistic six-design
+fixture under unisex still composes all six ≥107 with ZERO repeated significant tokens (assert by
+folding every line and checking for duplicates — returned bytes, not the composer's internal set);
+the pad-loop exemption still holds (`Classic Fit` + `Unisex Fit` co-exist); `womenCount === 1` on
+the Task 2 fixture (the assertion the final reviewer said was untested in the branch where it bites).
+Then re-run the acceptance test `itemHighlightPushSeam.test.ts` — if any design now HOLDS on the
+re-baselined fixture, that is a real consequence of the ruling: report it, do not re-fixture; the
+controller decides whether the fixture pool is representative.
+
+**Verify:** `npx tsc --noEmit` → 0; full `npx vitest run src/lib/fba/` green except the 4 pre-existing
+expected-fails.
+
+## Task 7: extend the audience lexicon — for BOTH surfaces, ONE lexicon
+
+**PO RULING 2026-09-06**, verbatim: *"1. Extend"* — given in answer to: the shared forced-gender
+lexicon is `wom[ae]n's?|ladies|lady` / `m[ae]n's?` only, so `guys`, `dudes`, `bros`, `gals`, `girls`,
+`boys` are invisible and six unisex lines lead "Novelty Shirts for Guys". The PO chose to extend the
+SHARED predicate, knowing it changes the TITLE path too.
+
+**The rule:** extend `LEAN_FEM_RE` / `LEAN_MASC_RE` (`src/lib/fba/contentTruth.ts:262-263`, and their
+`_G` derivations at `:276-277` which must stay derived via `new RegExp(source,'gi')`) so the
+forced-gender rule (c2) recognises: feminine `gals|girls|girl|ladies|lady|women|womens|woman|womans`;
+masculine `guys|guy|dudes|dude|bros|bro|gents|gent|men|mens|man|mans` (build the final lists from the
+existing patterns plus these; keep the apostrophe/plural handling the existing regexes have). Apply
+the word-boundary discipline the existing regexes use so `germany` / `human` / `management` are not
+matched.
+
+**ONE lexicon, not four.** The Task 5 review found two other copies: `src/lib/sync/syncListingContent.ts:382-383`
+and `src/lib/keyword-engine/nicheGuards.ts:220-221`. Either derive all consumers from the ONE
+exported source (preferred — export the pattern strings from `contentTruth.ts` and import them; check
+for import cycles first, `contentTruth.ts` is a leaf) or, if a consumer cannot import without a
+cycle, add an ENUMERATION test that fails when any copy's word set differs from the source. A silent
+fourth copy is how this class recurs.
+
+**Kids/adult interaction — check before building:** `girls`/`boys` are also kids-audience words in
+rule (c) (`contentTruth.ts` kids/adult, `KIDS_AUDIENCE`). A phrase like `shirts for girls` on a kids
+family must not now be rejected by (c2) as "feminine on a unisex kids design" when it is the correct
+kids audience — trace how (c2) reads `audienceLean` vs how (c) reads the kids blank, and pin the
+interaction: kids family + `for girls` + design lean unisex → ok (kids audience wins); adult unisex
+family + `for guys` → rejected; `lean_male` adult family + `for guys` → ok. If the two rules
+conflict in a way the ruling did not anticipate, STOP and report BLOCKED with the trace.
+
+**Title-path consequence, pinned:** a title candidate `for guys` on an adult `lean_female` design is
+now rejected the same way `for men` is (`field:'title'`); the existing title tests must stay green
+except any that pinned `guys` passing — change those deliberately with a comment citing this ruling.
+
+**Tests (RED first):** unisex adult design, men-heavy pool with `novelty shirts for guys` → line has
+no bare masculine word (today it leads with it); `lean_male` sibling → may carry it; kids interaction
+pins above; title-path pins above; lexicon-parity enumeration test (or the shared-import proof).
+
+**Verify:** as Task 6; plus the title-path suites (`titleBand`, `truthBandGate`, `titleMoneyTail`,
+`lockedTitleTruth`) and `syncListingContent`/`nicheGuards` tests.

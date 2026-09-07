@@ -19,6 +19,11 @@
  * "add this keyword" advice can never disagree about what's on-niche.
  */
 
+// Task 7 (2026-09-06): the ONE adult-gender-word core, shared with the title/Item-Highlights truth
+// predicate (contentTruth.ts's phraseTruthVerdict rule (c2)) — see the LEAN_FEM_RE/LEAN_MASC_RE
+// composition below. contentTruth.ts is a leaf module (verified no import cycle before this task).
+import { LEAN_FEM_CORE, LEAN_MASC_CORE } from '@/lib/fba/contentTruth'
+
 /** Equipment-context words that, next to "golf tee(s)", mean the PEG not the SHIRT.
  *  Material/pack/brand/spec words a garment keyword never carries. */
 const GOLF_TEE_EQUIPMENT_SIGNALS = new RegExp(
@@ -214,11 +219,24 @@ export function isForeignKeyword(keyword: string): boolean {
 
 /* ── AUDIENCE LEAN ────────────────────────────────────────────────────────────────────────────── */
 
-/** ⚠️ KEEP IN SYNC — these regexes exist as module-private copies in syncListingContent.ts (~:360),
- *  listingPipeline.ts and rankAnalysis.ts (each carries the same KEEP IN SYNC note). This export is
- *  the CANONICAL home; migrate the private copies here rather than editing four files. */
-const LEAN_FEM_RE = /\bwom[ae]ns?\b|\bladies\b|\bfemale\b|\bgirls?\b/i
-const LEAN_MASC_RE = /\bm[ae]ns?\b|\bmale\b|\bboys?\b/i
+/** COMPOSED (Task 7, PO ruling 2026-09-06 "1. Extend") from `contentTruth.ts`'s exported
+ *  `LEAN_FEM_CORE`/`LEAN_MASC_CORE` — the ONE canonical adult-gender-word lexicon, shared with the
+ *  title/Item-Highlights truth predicate (`phraseTruthVerdict`'s rule (c2)) — plus this module's OWN
+ *  extra axis words (`female`, `girls?`, `boys?`) that the shared core deliberately does NOT carry:
+ *  `girls`/`boys` are the KIDS audience axis there (double-classifying them here would fight that
+ *  rule), but THIS predicate's job is broader (any hard-lean keyword exclusion, not a kids/adult
+ *  split), so they stay on this module's own extra-word side, same as before.
+ *  ⚠️ Composing onto the core (not hand-copying it) is what stops this file's copy from drifting the
+ *  way it already had (this file used to carry `female`/`girls?` that `contentTruth.ts` never did —
+ *  exactly the class of drift this task ends). `syncListingContent.ts` (~:382) composes the same way.
+ *  `listingPipeline.ts` and `rankAnalysis.ts` still carry their OWN independent copies — out of scope
+ *  for Task 7 (M1 fix, 2026-09-06: cites the brief's "ONE lexicon, not four" paragraph and the
+ *  controller's pre-stage ruling — both name only these two consumers + the core; a prior version
+ *  of this comment cited a "task-7-brief.md's Code Organization" section that does not exist, caught
+ *  by task-7-review-findings.md M1). Every remaining copy is now enumerated and classified in
+ *  `contentTruth.ts`'s sibling test `genderLexiconSingleSource.test.ts`'s `ALLOWLIST`. */
+const LEAN_FEM_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE})\\b|\\bfemale\\b|\\bgirls?\\b`, 'i')
+const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b|\\bmale\\b|\\bboys?\\b`, 'i')
 
 /**
  * A HARD audience lean ('male' | 'female' exactly — soft leans like 'lean_female' pass everything)

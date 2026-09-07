@@ -230,7 +230,8 @@ export function garmentNounConstraint(ctx: PhraseTruthCtx): { allowed: string[];
 // GLOBAL since 2026-08-21 so the rule can ask WHICH audience words a phrase asserts, not merely
 // whether it asserts one — the design-token exemption below needs the individual hits. `matchAll`
 // does not mutate the source regex's lastIndex, so these stay safe to share.
-const ADULT_AUDIENCE_RE = /\b(?:women|woman|womens|womans|ladies|lady|men|mens|mans|adults?|plus[\s-]?size)\b/gi
+// ADULT_AUDIENCE_RE moved below LEAN_FEM_CORE/LEAN_MASC_CORE (FIX WAVE 2, M-2, 2026-09-06) — its
+// gender half is now DERIVED from that same core rather than hand-copied; see the comment there.
 const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/gi
 
 /** The family's design words, plural-folded so a "Girl Dad" design also owns "girls". */
@@ -257,10 +258,48 @@ const isDesignOwnWord = (hit: string, design: ReadonlySet<string>): boolean => {
 const foreignAudienceHits = (phrase: string, re: RegExp, design: ReadonlySet<string>): string[] =>
   [...phrase.matchAll(re)].map((m) => m[0]).filter((h) => !isDesignOwnWord(h, design))
 
-/** The two halves of the FORCED-GENDER rule. Adult gender words only — kids words are the
- *  kids/adult audience rule's business, and a phrase naming BOTH halves is INCLUSIVE, not forced. */
-const LEAN_FEM_RE = /\b(?:wom[ae]n['’]?s?|ladies|lady)\b/i
-const LEAN_MASC_RE = /\b(?:m[ae]n['’]?s?)\b/i
+/** The two halves of the FORCED-GENDER rule, as pattern STRINGS (not compiled RegExp) — the
+ *  canonical, exported core. Adult gender words only — kids words are the kids/adult audience
+ *  rule's business, and a phrase naming BOTH halves is INCLUSIVE, not forced.
+ *  EXTENDED (Task 7, PO ruling 2026-09-06 "1. Extend", live: six unisex designs shipped "Novelty
+ *  Shirts for Guys" because `guys` was invisible to the old masculine-only lexicon) with `gals`
+ *  (feminine) and `guys|guy|dudes|dude|bros|bro|gents|gent` (masculine) — ADULT gender words only.
+ *  `girls`/`boys` deliberately stay OFF this lexicon and on the kids axis (KIDS_AUDIENCE_RE above):
+ *  adding them here would double-classify a kids family's correct "shirts for girls" as a forced-
+ *  gender lie under rule (c2) below (the controller's pre-stage ruling, see task-7-brief.md).
+ *  EXPORTED as strings — not a compiled RegExp — so the two other module-private copies of this
+ *  lexicon (nicheGuards.ts, syncListingContent.ts; both already independently drifted, carrying
+ *  `female`/`girls?` this file never had) COMPOSE their own extra axis words onto this SAME core
+ *  instead of hand-copying it — the class of drift this task exists to end.
+ *  FIX WAVE 2 (M-1, 2026-09-06, controller RULING — final whole-branch review #2): `gal` (singular)
+ *  joins `gals` — the masculine half already carried BOTH `guys|guy`; the feminine half was missing
+ *  its own singular, an asymmetry the review recorded as byte-exact-as-ruled but still worth closing
+ *  ("DO fix"). Word-boundary discipline (the `\b…\b` wrapper every consumer applies) already keeps
+ *  `galaxy`/`gallery`/`regal` from matching — `\bgal\b` requires a non-word character (or string
+ *  edge) on both sides, which none of those three offer. */
+export const LEAN_FEM_CORE = `wom[ae]n['’]?s?|ladies|lady|gals|gal`
+export const LEAN_MASC_CORE = `m[ae]n['’]?s?|guys|guy|dudes|dude|bros|bro|gents|gent`
+const LEAN_FEM_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE})\\b`, 'i')
+const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b`, 'i')
+
+/** FIX WAVE 2 (M-2, 2026-09-06, controller RULING — final whole-branch review #2): rule (c)'s
+ *  adult-on-kids half used to hand-copy `women|woman|womens|womans|ladies|lady|men|mens|mans` —
+ *  the SAME one-lexicon drift Task 7 closed for rule (c2), just on the other axis, and the review
+ *  found it live: "for Guys"/"for Gals"/"for Dudes"/"for Gents" on a kids family with no declared
+ *  lean read as OK (a gap) because those words were invisible here. Now DERIVED from the SAME
+ *  `LEAN_FEM_CORE`/`LEAN_MASC_CORE` rule (c2) tests against — never a second hand-copy — plus the
+ *  two words that are this rule's OWN business, not the forced-gender rule's: `adults?` and
+ *  `plus[\s-]?size`. `girls`/`boys` stay OFF (they are `KIDS_AUDIENCE_RE`'s words, Task 7's
+ *  pre-stage ruling, unchanged). Declared AFTER the two CORE strings (temporal-dead-zone: a `const`
+ *  cannot be read before its own declaration executes) — this module's only ordering constraint.
+ *  The core adds bare `man` (via `m[ae]n['’]?s?`, previously ONLY `men|mens|mans` were adult-axis
+ *  words here) — the design-token exemption at rule (c)'s call site (`designWordSet`/
+ *  `foreignAudienceHits`, unchanged by this fix) already exempts a kids design's OWN name (e.g.
+ *  "Spider Man", "Little Man") from any hit, adult or kids, so a bare "man" a design NAMES itself
+ *  after is not newly rejected — pinned in contentTruthSpine.test.ts. GLOBAL (`matchAll`, never
+ *  `.test()`) for the same reason the pre-existing regex was: the design-token exemption needs
+ *  every individual hit, not merely whether one exists. */
+const ADULT_AUDIENCE_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE}|${LEAN_MASC_CORE}|adults?|plus[\\s-]?size)\\b`, 'gi')
 /** GLOBAL twins of the two regexes above, for Item Highlights only (Task 5) — `foreignAudienceHits`
  *  needs every match (`matchAll`), not merely whether one exists, so it can tell a phrase's OWN
  *  gendered hit (the design's own name — exempt) from a foreign one (a market audience claim —
@@ -275,6 +314,22 @@ const LEAN_MASC_RE = /\b(?:m[ae]n['’]?s?)\b/i
  *  either way; only the SOURCE of the word list changes, not the flags/behavior. */
 const LEAN_FEM_RE_G = new RegExp(LEAN_FEM_RE.source, 'gi')
 const LEAN_MASC_RE_G = new RegExp(LEAN_MASC_RE.source, 'gi')
+
+/** Rule (b)'s STRIP halves (fix round 1, 2026-09-06, controller ruling on B1) — built from the SAME
+ *  `LEAN_FEM_CORE`/`LEAN_MASC_CORE` the DETECTOR (`LEAN_FEM_RE`/`LEAN_MASC_RE` above) tests against,
+ *  reusing the rule (b2) idiom one rule below ("reuses the EXACT helpers the predicate gates on ...
+ *  so this can never structurally disagree"). Before this fix rule (b) detected with the widened
+ *  core but REMOVED with a hand-copied `wom[ae]n['’]?s?` / `m[ae]n['’]?s?` literal that was never
+ *  widened for the nine new adult-slang words — so `applyTitleTruthNet` left "for Guys"/"for Gals"/
+ *  "for Dudes"/"for Bros"/"for Gents" byte-identical, `verdictForAssembledTitle`'s net-idempotence
+ *  ship gate read the untouched string as CLEAN, and the PO's exact live specimen
+ *  ("…Novelty Shirts for Guys") shipped on the title path while its "for Men" twin was blocked
+ *  (task-7-review-findings.md, B1). Hoisted to module scope, never rebuilt per call — a fresh
+ *  `new RegExp` on every `scrubMoneyPhrase` invocation would just be the same bug in a new shape
+ *  (a second, independently-maintained copy that could silently stop tracking the core). Global so
+ *  `.replace()` removes every offending mention in the phrase, not just the first. */
+const LEAN_FEM_STRIP_RE = new RegExp(`\\b(?:for\\s+)?(?:${LEAN_FEM_CORE})\\b`, 'gi')
+const LEAN_MASC_STRIP_RE = new RegExp(`\\b(?:for\\s+)?(?:${LEAN_MASC_CORE})\\b`, 'gi')
 
 /** PipelineInput.audienceLean → the truth rule's view. `lean_male`/`lean_female` are SOFT
  *  re-weightings (cross-gender traffic is the point of a lean), so they are NOT unisex and never
@@ -767,8 +822,20 @@ export function titleNetActsOn(reason: PhraseTruthReason, ctx: PhraseTruthCtx): 
   return false
 }
 
-/** The trailing audience clause every title producer can emit. */
-const AUDIENCE_TAIL_RE = /\s*[,|]?\s+for\s+(?:men|women)(?:['’]s)?\s*$/i
+/** The trailing audience clause every title producer can emit. Derived from the SAME
+ *  `LEAN_FEM_CORE`/`LEAN_MASC_CORE` the forced-gender rule's detector and (fix round 1) strip regex
+ *  use — the core already carries the `['’]?s?` apostrophe/plural forms for men/women, so this needed
+ *  no separate handling for those. Before this fix this was a hand-copied `(?:men|women)` literal
+ *  that pre-dated Task 7's lexicon widening entirely: its ONE caller (below, `applyTitleTruthNet`'s
+ *  step 1) never recognised "for Guys"/"for Gals"/"for Dudes"/"for Bros"/"for Gents" as an audience
+ *  tail at all — and, pre-existing even before Task 7, never recognised "for Ladies" either (the
+ *  "orphan set" B1 names: `ladies`/`lady` were detector-only from the day rule (c2) first shipped).
+ *  A tail this regex cannot see falls through to the coarser segment-sweep/whole-string scrub below,
+ *  which drops the WHOLE segment or (pre-fix) leaves the word untouched entirely — the length
+ *  collapse task-7-review-findings.md's B1 measured on the segmented case (47c -> 22c instead of the
+ *  `for Men` twin's 46c -> 38c, clause-only). Deriving this fixes BOTH gaps at the ONE call site that
+ *  decides tail-vs-segment granularity, at once. */
+const AUDIENCE_TAIL_RE = new RegExp(`\\s*[,|]?\\s+for\\s+(?:${LEAN_FEM_CORE}|${LEAN_MASC_CORE})\\s*$`, 'i')
 
 /**
  * WORD-LEVEL scrub for the title's MONEY PHRASE — segment 0 (brand + design + noun), and the whole
@@ -839,11 +906,14 @@ function scrubMoneyPhrase(
   }
   // (b) forced gender — TITLE + unisex only, and only when the phrase names ONE gender (never an
   // inclusive "for Men and Women", which `LEAN_FEM_RE`/`LEAN_MASC_RE` both match and so cancel out).
+  // STRIPS with `LEAN_FEM_STRIP_RE`/`LEAN_MASC_STRIP_RE` — built from the SAME core the detector
+  // just tested against (fix round 1, B1) — never a hand-copied literal that can silently stop
+  // tracking the detector's own widened word list (see the strip-regex doc above `LEAN_FEM_RE_G`).
   if (ctx.field === 'title' && ctx.audienceLean === 'unisex') {
     const fem = LEAN_FEM_RE.test(s)
     const masc = LEAN_MASC_RE.test(s)
     if (fem !== masc) {
-      const re = fem ? /\b(?:for\s+)?wom[ae]n['’]?s?\b/gi : /\b(?:for\s+)?m[ae]n['’]?s?\b/gi
+      const re = fem ? LEAN_FEM_STRIP_RE : LEAN_MASC_STRIP_RE
       s = s.replace(re, (m) => (isProtected(m) ? m : ''))
     }
   }

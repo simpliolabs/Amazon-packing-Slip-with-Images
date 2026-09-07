@@ -47,6 +47,10 @@ import { selectionMode, isRankingTarget } from '@/lib/keyword-engine/selection-c
 import { readWindow } from '@/lib/keyword-engine/selectionContext'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { isProductDetailGap, getItemHighlightsApiState } from '@/lib/fba/productDetailAttrs'
+// Task 7 (2026-09-06): the ONE adult-gender-word core, shared with the title/Item-Highlights truth
+// predicate (contentTruth.ts's phraseTruthVerdict rule (c2)) — see the LEAN_FEM_RE/LEAN_MASC_RE
+// composition below (~:382). contentTruth.ts is a leaf module (verified no import cycle before this task).
+import { LEAN_FEM_CORE, LEAN_MASC_CORE } from '@/lib/fba/contentTruth'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
 import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'  // single representative-selection path (parity with push re-score)
 import { spApiReadBucket } from '@/lib/fba/spApiRateLimiter'   // global 5-rps read ceiling shared with pushExecutor + verify-push (task #23 / 2026-07-20 audit)
@@ -377,10 +381,21 @@ interface ScoringContext {
 // male/female lean the generator strips opposite-gender keywords everywhere, so counting a "…for men" term as
 // a gap on a Female listing docks the seller for obeying their own selection — an unfixable dock (live:
 // B0FKJW57H7 bullets pinned at 19/25 for 3 mens keywords the Female copy will never carry). lean_*/unisex/null
-// → no-op (cross-gender traffic is the point of a soft lean). KEEP IN SYNC with the FEM/MASC regexes in
-// listingPipeline + rankAnalysis.
-const LEAN_FEM_RE = /\bwom[ae]ns?\b|\bladies\b|\bfemale\b|\bgirls?\b/i
-const LEAN_MASC_RE = /\bm[ae]ns?\b|\bmale\b|\bboys?\b/i
+// → no-op (cross-gender traffic is the point of a soft lean).
+// COMPOSED (Task 7, PO ruling 2026-09-06 "1. Extend") from contentTruth.ts's exported LEAN_FEM_CORE/
+// LEAN_MASC_CORE — the ONE canonical adult-gender-word lexicon the title/Item-Highlights truth
+// predicate uses (phraseTruthVerdict rule (c2)) — plus this module's OWN extra axis words (female,
+// girls?, boys?), which deliberately stay OUT of the shared core (girls/boys are the KIDS axis
+// there). Composing onto the core (not hand-copying it) is what stops this file's copy from
+// drifting the way it already had (this file used to carry female/girls? that contentTruth.ts never
+// did). nicheGuards.ts (~:220) composes the same way. listingPipeline.ts and rankAnalysis.ts still
+// carry their OWN independent copies — out of scope for Task 7 (M1 fix, 2026-09-06: cites the
+// brief's "ONE lexicon, not four" paragraph and the controller's pre-stage ruling — both name only
+// these two consumers + the core; a prior version of this comment cited a "task-7-brief.md's Code
+// Organization" section that does not exist, caught by task-7-review-findings.md M1). Every
+// remaining copy is now enumerated and classified in `genderLexiconSingleSource.test.ts`'s ALLOWLIST.
+const LEAN_FEM_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE})\\b|\\bfemale\\b|\\bgirls?\\b`, 'i')
+const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b|\\bmale\\b|\\bboys?\\b`, 'i')
 function leanExcludesKeyword(kw: string, hardLean: 'male' | 'female' | null | undefined): boolean {
   if (hardLean !== 'male' && hardLean !== 'female') return false
   return hardLean === 'female'

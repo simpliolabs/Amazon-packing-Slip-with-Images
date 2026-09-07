@@ -4,10 +4,35 @@
  * never a broadcast value (there is none to give: the map has no broadcast input by construction).
  */
 import { describe, it, expect } from 'vitest'
-import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignIhRows, NO_LINE_FOR_DESIGN, type PerChildItemHighlight } from './perDesignItemHighlights'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignIhRows, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight } from './perDesignItemHighlights'
 
-const BM_LINE = 'Gym Motivation Shirts, Workout Graphic Tees, Lifting Apparel for Men, Fitness Clothing Men, Crew Neck'
-const RK_LINE = 'Real King Graphic Tee, Workout Graphic Tees, Lifting Apparel for Men, Bodybuilding Tops, Crew Neck'
+/* ─── FIX WAVE 2 ROUND 2 (F1, controller RULING, final-fix-wave-2-round-2-findings.md) ────────────
+ * `perDesignItemHighlights.ts` is imported by the CLIENT page (`fba/listing/[asin]/page.tsx`,
+ * 'use client'). Fix wave 2 (I-2b) imported `lineHasSignificantRepeat` from
+ * `itemHighlightComposer.ts` — the generation path (contentTruth -> blankSpecs -> a lazy supabase
+ * client) — so the client page transitively reached the composer. The predicate moved to
+ * `productDetailAttrs.ts` (already a leaf `page.tsx` imports directly), and this module now imports
+ * ONLY `contentContract` + `productDetailAttrs`. Pinned on the file's own `import` lines — not a
+ * runtime behavior test, a STRUCTURAL one: the next value-level import added here is RED the moment
+ * it lands, regardless of whether tree-shaking would have hidden it from the bundle. */
+describe('F1 (round 2, controller RULING): perDesignItemHighlights.ts stays client-safe by construction', () => {
+  it('imports ONLY contentContract + productDetailAttrs — no value-level import reaches itemHighlightComposer/listingPipeline/blankSpecs/a supabase client', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'perDesignItemHighlights.ts'), 'utf8')
+    const modules = src.split(/\r?\n/).filter((l) => /^import /.test(l)).map((l) => l.match(/from '([^']+)'/)?.[1])
+    expect(modules).toEqual(['./contentContract', './productDetailAttrs'])
+  })
+})
+
+// FIX WAVE 2 (I-2, 2026-09-06): BOTH lines originally repeated a folded significant word (`men`
+// twice in BM_LINE; `graphic`/`tee` twice in RK_LINE) — harmless before this fix (this describe
+// block tests SKU/twin resolution and push-through stamping, never repeat content), but
+// `buildPerSkuItemHighlightMap` now REFUSES any stored line that repeats one (see below), so a
+// fixture written before the absolute no-repeat ruling existed would now be skipped by the very
+// tests that assert it gets MAPPED. Re-worded, same shape/length, zero repeated folded tokens.
+const BM_LINE = 'Gym Motivation Shirts, Workout Graphic Tees, Lifting Apparel for Men, Fitness Clothing Line, Crew Neck'
+const RK_LINE = 'Real King Novelty Tee, Workout Graphic Apparel, Lifting Gear for Men, Bodybuilding Tops, Crew Neck'
 const ENTRIES: PerChildItemHighlight[] = [
   { sku: 'BM64000L-BK', asin: 'B0BM000001', item_highlight: BM_LINE, designKey: 'BM', designName: 'Beast Mode', hold: null },
   { sku: 'BM64000M-BK', asin: 'B0BM000002', item_highlight: BM_LINE, designKey: 'BM', designName: 'Beast Mode', hold: null },
@@ -45,6 +70,83 @@ describe('buildPerSkuItemHighlightMap', () => {
     const { values, skipped } = buildPerSkuItemHighlightMap(null, [{ sku: 'BM64000L-BK', asin: 'B0BM000001' }], null)
     expect(values.size).toBe(0)
     expect(skipped).toHaveLength(1)
+  })
+})
+
+/* ─── FIX WAVE 2 (I-2b, 2026-09-06, final whole-branch review #2 controller RULING) ───────────────
+ *
+ * The PO ruling ("2. No Repeat as per Amazon Ruules") was enforced at GENERATION only
+ * (itemHighlightComposer.ts, Task 6) — a per-design line stored BEFORE that ruling shipped (or a
+ * hand-edited row) could still carry a repeated significant word, and until this fix
+ * `buildPerSkuItemHighlightMap` mapped it straight through to the push payload (reproduced against
+ * unmodified HEAD bea1f24: a MAIN-era line carrying `tee` twice — final-review-2-findings.md
+ * section 0(a) — was MAPPED, `skipped: []`). This is the LAST pure function before Amazon, so it is
+ * the one place a terminal net can catch every path that could ever have written a bad line — stale
+ * bytes, a manual DB edit, a future producer bug — not just the composer's own output. Reuses the
+ * ONE fold (`lineHasSignificantRepeat` / `significantFolded`, `productDetailAttrs.ts` — round 2, F1:
+ * moved OUT of `itemHighlightComposer.ts` so this client-safe module never imports the generation
+ * path) rather than a new tokenizer (coherence INVARIANT 1): a folding drift between "what the
+ * composer calls a repeat" and "what the push seam calls a repeat" is exactly the class of bug this
+ * project's memory calls out (coverage-token-folding-shirt-hub-trap). */
+describe('FIX WAVE 2 (I-2b): buildPerSkuItemHighlightMap refuses a stored line that repeats a significant word', () => {
+  const STALE_LINE_REPEATED_TEE = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+
+  it('a stale stored line with `tee` twice (the reviewer-executed MAIN-era reproduction) is SKIPPED with repeat-in-stored-line, never mapped', () => {
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+    ]
+    const { values, skipped } = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK', asin: 'B0BD000001' }], null)
+    expect(values.has('BD64000L-BK')).toBe(false)
+    expect(skipped).toEqual([{ sku: 'BD64000L-BK', asin: 'B0BD000001', reason: REPEAT_IN_STORED_LINE }])
+  })
+
+  it('a clean stored line (no repeated folded token) is mapped exactly as before — the refusal is scoped to the defect, not a blanket re-check that starves healthy lines', () => {
+    const { values, skipped } = buildPerSkuItemHighlightMap(ENTRIES, [{ sku: 'BM64000L-BK', asin: 'B0BM000001' }], null)
+    expect(values.get('BM64000L-BK')).toBe(BM_LINE)
+    expect(skipped).toHaveLength(0)
+  })
+
+  it('an FBM twin resolved by ASIN through a repeated stored line is refused too — the twin resolution never bypasses the repeat check', () => {
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+    ]
+    const { values, skipped } = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK-FBM', asin: 'B0BD000001' }], null)
+    expect(values.has('BD64000L-BK-FBM')).toBe(false)
+    expect(skipped).toEqual([{ sku: 'BD64000L-BK-FBM', asin: 'B0BD000001', reason: REPEAT_IN_STORED_LINE }])
+  })
+})
+
+/* ─── FIX WAVE 2 ROUND 2 (F2, controller RULING) ──────────────────────────────────────────────────
+ * The card (`perDesignIhRows`, read by `fba/listing/[asin]/page.tsx`) must derive the SAME
+ * pre-flight classification the push seam (`buildPerSkuItemHighlightMap`) applies — `classifyStoredIhLine`
+ * is the ONE predicate both call. Before this fix the PO would see a stale line with a live Push
+ * button, then learn it was skipped only from the push report; these pins prove the row itself now
+ * carries `skipReason` so the card can show it BEFORE any push is attempted. */
+describe('FIX WAVE 2 ROUND 2 (F2): perDesignIhRows derives the push-seam skip reason PRE-FLIGHT', () => {
+  const STALE_LINE_REPEATED_TEE = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+
+  it('(a) a stored `tee`-twice line yields skipReason repeat-in-stored-line and the row is not pushable', () => {
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+    ]
+    const rows = perDesignIhRows(entries)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].skipReason).toBe(REPEAT_IN_STORED_LINE)
+    expect(pushableDesignLines(entries)).toEqual([])   // not pushable — same predicate the seam applies
+  })
+
+  it('(c) the existing no-line-for-design (HELD) rendering is unchanged: empty line, the composer\'s own hold reason, and skipReason reports no-line-for-design', () => {
+    const rows = perDesignIhRows(ENTRIES)   // DQ: item_highlight: '', hold: 'thin-candidates'
+    const dq = rows.find((r) => r.designKey === 'DQ')!
+    expect(dq.line).toBe('')
+    expect(dq.hold).toBe('thin-candidates')
+    expect(dq.skipReason).toBe(NO_LINE_FOR_DESIGN)
+  })
+
+  it('a clean, non-repeating stored line has skipReason null — never flagged when there is nothing to skip', () => {
+    const rows = perDesignIhRows(ENTRIES)   // BM: BM_LINE, no repeated folded token
+    const bm = rows.find((r) => r.designKey === 'BM')!
+    expect(bm.skipReason).toBeNull()
   })
 })
 

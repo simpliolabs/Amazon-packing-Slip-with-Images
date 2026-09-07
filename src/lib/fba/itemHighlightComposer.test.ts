@@ -13,8 +13,8 @@
  *    truth, theme-fit >= 2 on rated pools, oversized = Comfort Colors ONLY, brand waterfall INSIDE
  *    the composer (never a post-net rewrite).
  */
-import { describe, it, expect } from 'vitest'
-import { composeItemHighlight, ihTruthVerdict, ihAudienceOf } from './itemHighlightComposer'
+import { describe, it, expect, vi } from 'vitest'
+import { composeItemHighlight, composeItemHighlightDetailed, ihTruthVerdict, ihAudienceOf } from './itemHighlightComposer'
 import { ensureBlankBrandInHighlights, DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { CONTENT_CONTRACT } from './contentContract'
 import { scrubTrademarks } from './trademarkGuard'
@@ -134,6 +134,13 @@ describe('composeItemHighlight — Architecture A under the 85% floor', () => {
     expect(withUnisex).toBeTruthy()
     expect(withUnisex).toContain('Unisex Fit')
     expect(withUnisex!.length).toBeGreaterThanOrEqual(MIN)
+    // TASK 6 REGRESSION PIN (2026-09-06): "Unisex Fit" is only interesting here because "Relaxed
+    // Fit" is ALSO in the line — the pad-loop's `usedBeforePad` snapshot exemption (Task 2,
+    // 2026-08-06 ruling) lets both co-exist even though they share the literal word "Fit" this
+    // bank's own templates append. The absolute no-repeat rule (Task 6) must NOT break this: a spec
+    // fact repeating a POOL token is still rejected, but "Classic"/"Relaxed" + "Unisex" sharing only
+    // boilerplate is not a repeat in the spec's sense.
+    expect(withUnisex).toContain('Relaxed Fit')
     const { unisex: _u, ...noUnisex } = thinSpec
     void _u
     const without = composeItemHighlight(smallPool, ['THE CEO Darlin Tee | Comfort Colors Shirt'], { spec: noUnisex, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' })
@@ -516,80 +523,122 @@ describe('brand waterfall INSIDE the composer (B0FKFHSCS9: 1717 by override, tit
   })
 })
 
-/* ─── TASK 2 (2026-09-06, PO "Why is Women repeating Twice?") ──────────────────────────────────
+/* ─── TASK 2 (2026-09-06, PO "Why is Women repeating Twice?") — SUPERSEDED BY TASK 6 ────────────
  *
  * Root cause: the selection loops accepted a candidate that added only ONE new folded token
  * ("Fall Sweatshirts for Women" adds only `fall`) ahead of an all-new candidate ("Graphic Pullover
  * Top" / "Novelty Retro Graphic"), purely because the repeat-heavy one sorted higher on theme-fit
  * or volume. Amazon's ≤2-per-word cap then passed the line because each repeat landed exactly
- * twice. The fix ranks in two tiers — Tier A (every token new) fills before Tier B (repeats a used
- * token) — in BOTH the pool-phrase loop and the spec-fact floor-pad loop, falling back to Tier B
- * only once Tier A is exhausted and the line is still short of the fill band.
+ * twice. Task 2's fix ranked in two tiers — Tier A (every token new) fills before a Tier-B
+ * FALLBACK (repeats a used token) — in BOTH the pool-phrase loop and the spec-fact floor-pad loop,
+ * engaging Tier B only once Tier A was exhausted and the line was still short of the fill band.
  *
- * NOTE: the brief's own illustrative pool ("Graphic Pullover Top" as the all-new candidate) does
- * NOT discriminate old vs. new code with these keywords — "top" matches GARMENT_SURFACE_RE, so the
- * PRE-EXISTING "prefer a new garment surface" pass already promotes it ahead of "Fall Sweatshirts
- * for Women" on unmodified source (verified: `npx tsx` probe against 148aca0 produced the correct
- * order even without this task's fix). The tests below keep the same shape (fit/volume, the
- * `women`/`sweatshirt`/`crewneck` repeats) but swap the all-new candidate for one with NO garment
- * surface match ("Novelty Retro Graphic"/"Weekend Adventure Look"), which genuinely isolates the
- * tier rule this task adds. */
-describe('TASK 2: a phrase repeating a used token loses its slot to one that does not', () => {
-  it('Tier A (all-new tokens) is picked before Tier B (repeats `sweatshirt`/`women`) despite Tier B sorting higher on volume', () => {
+ * TASK 6 (2026-09-06, PO ruling verbatim "2. No Repeat as per Amazon Ruules" — rejecting the
+ * controller's proposed amendment "no repeat unless the 107 floor cannot otherwise be reached
+ * truthfully"): the Tier-B FALLBACK above is DELETED, not gated. Three consequences for the tests
+ * below (each documented at its own site, not just here):
+ *  1. the first test is REWRITTEN, not merely re-asserted: its original 4-phrase pool only ever
+ *     yields 2 mutually non-repeating pool phrases, which is below MIN_CANDIDATES and now HOLDS
+ *     regardless of spec (the too-few-picked gate fires before the pad loop ever runs) — a THIRD
+ *     all-new phrase is added so a genuine composition still exists to pin `womenCount === 1` on
+ *     (the assertion the final reviewer flagged as untested in the branch where it bites).
+ *  2. the second test — "the Tier-B fallback is real" — is the one the brief names to INVERT: same
+ *     pool, same absence of spec, but now proves the HOLD instead of the fallback (not deleted).
+ *  3. the third test's own pool ALSO secretly required its OWN pool loop's Tier-B fallback
+ *     ("weekend adventure look", which repeated `weekend`) to reach a length where the pad loop's
+ *     `fit` filler alone could cross MIN — under the absolute rule that candidate is rejected
+ *     forever, so it is swapped for one more all-new phrase, keeping this test isolated to the PAD
+ *     loop's tier rule (which is genuinely unchanged in shape, only Tier B is gone).
+ *
+ * NOTE (Task 2, still true): the brief's own illustrative pool ("Graphic Pullover Top" as the
+ * all-new candidate) does NOT discriminate old vs. new code with these keywords — "top" matches
+ * GARMENT_SURFACE_RE, so the PRE-EXISTING "prefer a new garment surface" pass already promotes it
+ * ahead of "Fall Sweatshirts for Women" on unmodified source. The tests below keep the same shape
+ * (fit/volume, the `women`/`sweatshirt`/`crewneck` repeats) but swap the all-new candidate for one
+ * with NO garment surface match, which genuinely isolates the tier rule. */
+describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallback (PO 2026-09-06)', () => {
+  it('the absolute rule composes with the repeat-heavy candidates excluded entirely — `women` appears exactly ONCE even though the repeat candidate sorts higher on volume (the pin the final reviewer flagged as untested)', () => {
     const pool = [
       { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
-      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // Tier B: adds only `fall`
-      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },        // Tier A: all new, no garment-surface head start
-      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // Tier B: adds `long`/`sleeve`, repeats `crewneck`
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // repeats `sweatshirt`/`women` — NEVER composes since Task 6
+      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },        // all new, no garment-surface head start
+      { keyword: 'weekend getaway vibe', searchVolume: 750, themeFit: 3 },         // TASK 6: 3rd all-new pool phrase — MIN_CANDIDATES needs 3, and the original 2-pick pool now HOLDS regardless of spec (see file-header note)
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // repeats `crewneck` — NEVER composes since Task 6
     ]
-    const spec = { material: '100% Cotton Blend' } // pads the line into the [MIN, MAX] band
+    const spec = { material: '100% Cotton Blend', fit: 'Relaxed', unisex: true, neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed' }
     const out = composeItemHighlight(pool, [], { spec: spec as any })!
     expect(out).toBeTruthy()
     expect(out.length).toBeGreaterThanOrEqual(MIN)
     expect(out.length).toBeLessThanOrEqual(MAX)
-    const idxTierA = out.toLowerCase().indexOf('novelty retro graphic')
-    const idxTierB = out.toLowerCase().indexOf('fall sweatshirts for women')
-    expect(idxTierA).toBeGreaterThanOrEqual(0)
-    expect(idxTierB).toBeGreaterThanOrEqual(0)
-    expect(idxTierA).toBeLessThan(idxTierB)
-    // Tier A alone ("Crewneck Sweatshirts Women" + "Novelty Retro Graphic") sums to well under the
-    // 110-char fill target, so the Tier-B fallback legitimately engages and `women` MAY repeat —
-    // that repeat is not itself a defect (Amazon's ≤2 cap still governs); the ORDER above is the rule.
+    expect(out.toLowerCase()).toContain('novelty retro graphic')
+    expect(out.toLowerCase()).toContain('weekend getaway vibe')
+    // the repeat candidates never compose, full stop — not merely deprioritized behind a fallback
+    expect(out.toLowerCase()).not.toContain('fall sweatshirts for women')
+    expect(out.toLowerCase()).not.toContain('long sleeve crewneck')
     const womenCount = (out.match(/\bwomen\b/gi) ?? []).length
-    expect(womenCount).toBeLessThanOrEqual(2)
+    expect(womenCount).toBe(1)
   })
 
-  it('the Tier-B fallback is real: it fires (and reaches the 107-char floor) when Tier A alone cannot, with no spec to pad', () => {
+  it('INVERTED (PO ruling 2026-09-06, "2. No Repeat as per Amazon Ruules"): the Tier-B fallback this test used to prove was REAL is now DEAD. Tier A alone ("Crewneck Sweatshirts Women" + "Novelty Retro Graphic", ~49 chars) cannot reach the 107-char floor without repeating `sweatshirt`/`crewneck`/`women`, and no `spec` is passed, so the design HOLDS `under-floor-no-repeat` instead of composing a repeat to get there. This exact pool is the branch\'s recorded reproduction: run unmodified (HEAD f64175f), it composes a 122-char line containing `crewneck`x2/`sweatshirt`x2/`women`x2/`sleeve`x2 — the defect this ruling closes.', () => {
     const pool = [
       { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
-      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // Tier B
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // repeats sweatshirt/women
       { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },        // Tier A
-      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // Tier B
-      { keyword: 'sleeve detail graphic', searchVolume: 550, themeFit: 2 },        // Tier B (adds `detail`)
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // repeats crewneck
+      { keyword: 'sleeve detail graphic', searchVolume: 550, themeFit: 2 },        // repeats sleeve (once `long sleeve crewneck` would have composed it under the old fallback)
     ]
-    // Tier A alone ("Crewneck Sweatshirts Women" + "Novelty Retro Graphic") is ~50 chars — nowhere
-    // near the 107 floor. No `spec` is passed, so the ONLY way this reaches MIN is the pool loop's
-    // own Tier-B fallback; if that fallback were dead, this would return null (under-floor-after-pad).
-    const out = composeItemHighlight(pool, [], {})
-    expect(out).toBeTruthy()
-    expect(out!.length).toBeGreaterThanOrEqual(MIN)
-    expect(out!.length).toBeLessThanOrEqual(MAX)
-    expect(out!.toLowerCase()).toContain('fall sweatshirts for women')
-    const idxTierA = out!.toLowerCase().indexOf('novelty retro graphic')
-    const idxTierB = out!.toLowerCase().indexOf('fall sweatshirts for women')
-    expect(idxTierA).toBeLessThan(idxTierB)
+    // Tier A alone is ~49 chars — nowhere near the 107 floor — and only 2 pool phrases, under
+    // MIN_CANDIDATES(3) too. No spec is passed, so there is no pad path either. Before Task 6 this
+    // ran the pool loop's OWN Tier-B fallback to reach 107+ (the test this replaces asserted exactly
+    // that); that fallback is deleted, so this now HOLDS.
+    // FIX ROUND 1 (#1): this pool is also the CORRECT-attribution control case — a repeat-permitting
+    // (Tier-B-allowed) selection here really does reach 122 chars (well past 107), so the shadow
+    // pass (`shadowRepeatReachesFloor`) confirms it and `under-floor-no-repeat` is the true reason,
+    // unlike the mis-attribution repro pool in the next test. Assert the `why` diagnostic's
+    // `repeatBlocked` (Minor #4, same finding/round) reflects that confirmation.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.line).toBeNull()
+    expect(res.stage).toBe('under-floor-no-repeat')
+    const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(logged.repeatBlocked).toBe(true)
+    logSpy.mockRestore()
+    expect(composeItemHighlight(pool, [], {})).toBeNull()
   })
 
-  it('the spec-fact PAD loop applies the same tier rule: a repeat-token filler (`material` restating `cotton`) loses its slot to a non-repeating one (`fit`) that alone reaches the floor', () => {
+  it('FIX ROUND 1 (#1, PO-controller ruling 2026-09-06): `repeatBlocked` no longer fires merely because a Tier-B candidate fits the remaining budget — the task reviewer\'s reproduction (agent aedabd84) against unmodified HEAD 7fc05ae shows the OLD wiring named `under-floor-no-repeat` here even though the BEST any repeat-permitting selection could ever reach on this pool is 53 chars, nowhere near the 107 floor', () => {
+    const pool = [
+      { keyword: 'retro sunset vibes', searchVolume: 500, themeFit: 3 },
+      { keyword: 'coastal palm energy', searchVolume: 450, themeFit: 3 },
+      { keyword: 'retro palm', searchVolume: 400, themeFit: 3 },   // repeats BOTH `retro` and `palm` — adds nothing new, never even Tier B
+      { keyword: 'retro cactus', searchVolume: 350, themeFit: 3 }, // repeats `retro`, adds `cactus` — the ONLY Tier-B candidate, and it fits the remaining budget
+    ]
+    // Tier A alone: "Retro Sunset Vibes, Coastal Palm Energy" (~40 chars, 2 picks) — under
+    // MIN_CANDIDATES(3), no spec/pad path. Composing the one Tier-B candidate ("Retro Cactus") on
+    // top only ever reaches "Retro Sunset Vibes, Coastal Palm Energy, Retro Cactus" — 53 chars — so
+    // a repeat could NEVER have reached 107 here. The pre-Fix-Round-1 wiring still named this stage
+    // `under-floor-no-repeat` because it only checked "does a Tier-B candidate fit the remaining
+    // budget", never "would it actually reach MIN". The shadow pass now catches this: the true
+    // pre-existing reason (`too-few-picked`, only 2 mutually non-repeating candidates) ships.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.line).toBeNull()
+    expect(res.stage).toBe('too-few-picked')
+    const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(logged.repeatBlocked).toBe(false)
+    logSpy.mockRestore()
+  })
+
+  it('the spec-fact PAD loop applies the same absolute rule: a repeat-token filler (`material` restating `cotton`) never composes; a non-repeating one (`fit`) that alone reaches the floor does', () => {
     const pool = [
       { keyword: 'soft cotton graphic tee', searchVolume: 900, themeFit: 3 },
       { keyword: 'retro vibes design', searchVolume: 800, themeFit: 3 },
       { keyword: 'casual weekend style', searchVolume: 700, themeFit: 3 },
-      { keyword: 'weekend adventure look', searchVolume: 650, themeFit: 3 },
+      { keyword: 'bright bold statement print', searchVolume: 650, themeFit: 3 },  // TASK 6: swapped in for the original "weekend adventure look" (repeated `weekend`, only ever composed via the pool loop's own now-deleted Tier-B fallback) — this pool is now fully Tier-A internally, isolating the PAD loop's own tier rule
     ]
-    // `material` is FIRST in the filler priority bank but repeats `cotton` (Tier B); `fit` is later
-    // in priority but all-new (Tier A) and, alone, sufficient to cross MIN. The Tier-A filler must
-    // be tried first and, once it reaches the floor, the Tier-B filler must never be added at all.
+    // `material` is FIRST in the filler priority bank but repeats `cotton` — REJECTED absolutely,
+    // never merely deprioritized. `fit` is later in priority but all-new and, alone, sufficient to
+    // cross MIN once the (now fully Tier-A) pool phrases have filled the line.
     const spec = { material: '100% Cotton', fit: 'Super Relaxed' }
     const out = composeItemHighlight(pool, [], { spec: spec as any })!
     expect(out).toBeTruthy()
@@ -597,5 +646,89 @@ describe('TASK 2: a phrase repeating a used token loses its slot to one that doe
     expect(out.length).toBeLessThanOrEqual(MAX)
     expect(out).toContain('Super Relaxed Fit')
     expect(out).not.toContain('100% Cotton')
+  })
+})
+
+/* ─── FIX WAVE 2 (I-1, 2026-09-06 final whole-branch review #2, controller RULING) ────────────────
+ *
+ * `shadowRepeatReachesFloor` answers "could a repeat-permitting selection reach the 107-char floor?"
+ * so the composer can tell the PO the TRUE cause (`under-floor-no-repeat`) instead of a generic
+ * "pool too thin" reason. Before this fix its own greedy walk ignored TWO caps the real selection
+ * loop enforces on every candidate: Amazon's <=2-per-word cap (`ihRepeatViolations`) and the 7-pick
+ * cap — so it could report a repeat-permitting selection "reachable" using a combination the real
+ * loop, even with repeats allowed, could never actually produce. Reviewer-executed reproduction
+ * (final-review-2-findings.md I-1): the `summer` pool below reports `under-floor-no-repeat` at HEAD
+ * bea1f24 even though MAIN's own Tier-B pass proves the true ceiling is 52 chars (picked 2, phrase
+ * 3 would be a THIRD mention of `summer` — the <=2 cap, not a thin pool, is what blocks it).
+ *
+ * THE FIX: `admitCandidate` (below `classifyTier`) is the real loop's own per-candidate ADMISSION
+ * decision — tier (repeat rule, `allowRepeat`-gated), the named pick cap, the budget fit, Amazon's
+ * <=2 cap, and the brand-once rule — extracted so the live pool loop and the shadow call the SAME
+ * function; the shadow inherits every one of those rules by construction instead of re-modeling a
+ * subset of them. Garment-surface-variety ordering stays OUT of admission on purpose (Ruling, same
+ * finding): it decides which Tier-A candidate goes first among equals, never whether 107 chars is
+ * reachable at all, so omitting it from the shared function cannot itself cause a mis-attribution. */
+describe('FIX WAVE 2 (I-1): the shadow reachability pass enforces the <=2 word cap AND the pick cap, exactly like the live selection', () => {
+  it("the reviewer's `summer` pool: HEAD mis-reported under-floor-no-repeat even though the <=2-per-word cap caps any repeat-permitting selection at 52 chars (picked 2) — must report the pre-existing reason (too-few-picked), not under-floor-no-repeat", () => {
+    const pool = [
+      { keyword: 'summer beach vibes only', searchVolume: 900, themeFit: 3 },
+      { keyword: 'summer mountain trail escape', searchVolume: 850, themeFit: 3 },
+      { keyword: 'summer desert canyon roadtrip', searchVolume: 800, themeFit: 3 },
+      { keyword: 'summer winter holiday festival', searchVolume: 750, themeFit: 3 },
+    ]
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.line).toBeNull()
+    expect(res.stage).toBe('too-few-picked')
+    const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(logged.repeatBlocked).toBe(false)
+    logSpy.mockRestore()
+  })
+
+  it('a pool where the 7-pick cap (not the <=2 cap, not the char budget) is what blocks the only repeat-permitting route to 107: 4 word-disjoint pairs (each shared word appears exactly twice, legal under the <=2 cap) reach 122 chars using all 8 phrases, but the real loop never admits an 8th pick — the true ceiling under the pick cap is 7 phrases / 106 chars, one char short of the floor', () => {
+    const pool = [
+      { keyword: 'quiet fox aim', searchVolume: 800, themeFit: 3 },
+      { keyword: 'quiet fox run', searchVolume: 790, themeFit: 3 },
+      { keyword: 'amber owl dip', searchVolume: 780, themeFit: 3 },
+      { keyword: 'amber owl jog', searchVolume: 770, themeFit: 3 },
+      { keyword: 'coral wolf hop', searchVolume: 760, themeFit: 3 },
+      { keyword: 'coral wolf nap', searchVolume: 750, themeFit: 3 },
+      { keyword: 'olive lynx zip', searchVolume: 740, themeFit: 3 },
+      { keyword: 'olive lynx tap', searchVolume: 730, themeFit: 3 },
+    ]
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.line).toBeNull()
+    // Real Tier-A-only selection picks exactly one phrase per pair (4 total, ~60 chars) — passes the
+    // MIN_CANDIDATES(3) gate, so this fails at the FLOOR check, not the too-few-picked gate.
+    expect(res.stage).toBe('under-floor-after-pad')
+    const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(logged.picked).toBe(4)
+    expect(logged.lineLen).toBe(60)
+    expect(logged.repeatBlocked).toBe(false)
+    logSpy.mockRestore()
+  })
+
+  it('control: the Task 6 repro pool still reports under-floor-no-repeat (a repeat-permitting selection genuinely reaches 122 chars there, well within both the <=2 cap and the 7-pick cap)', () => {
+    const pool = [
+      { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },
+      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },
+      { keyword: 'sleeve detail graphic', searchVolume: 550, themeFit: 2 },
+    ]
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.stage).toBe('under-floor-no-repeat')
+  })
+
+  it('control: the fix-round-1 4-phrase pool still reports the pre-existing reason (too-few-picked) — the best any repeat-permitting selection can ever reach there is 53 chars', () => {
+    const pool = [
+      { keyword: 'retro sunset vibes', searchVolume: 500, themeFit: 3 },
+      { keyword: 'coastal palm energy', searchVolume: 450, themeFit: 3 },
+      { keyword: 'retro palm', searchVolume: 400, themeFit: 3 },
+      { keyword: 'retro cactus', searchVolume: 350, themeFit: 3 },
+    ]
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.stage).toBe('too-few-picked')
   })
 })
