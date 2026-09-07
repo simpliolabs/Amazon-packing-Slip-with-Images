@@ -4536,7 +4536,7 @@ export default function ListingDetailPage() {
                                  designs" row naming the designs it covers. */}
                               <div className="mt-1 divide-y divide-slate-100 border border-slate-200 rounded-lg bg-white">
                                 {collapseSharedIhRows(ihRows).map((r, ri) => (
-                                  <div key={`${ri}-${r.designs[0]?.designKey ?? ''}`} className={`px-2 py-1.5 ${r.line ? '' : 'bg-amber-50/60'}`}>
+                                  <div key={`${ri}-${r.designs[0]?.designKey ?? ''}`} className={`px-2 py-1.5 ${!r.line || r.skipReason ? 'bg-amber-50/60' : ''}`}>
                                     <div className="flex items-center gap-1.5 flex-wrap">
                                       {r.designs.length > 1 ? (
                                         <span className="text-[10px] font-semibold text-slate-800" title={r.designs.map((d) => `${d.designName} (${d.designKey})`).join(' · ')}>
@@ -4552,8 +4552,15 @@ export default function ListingDetailPage() {
                                       {/* Every hold reason gets ITS OWN explanation (IH_HOLD_MESSAGES) — never a generic
                                           blank, and never lumped into one bucket regardless of which reason fired. */}
                                       {!r.line && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={r.hold ? IH_HOLD_MESSAGES[r.hold] : 'These designs ship NO Item Highlight until a truthful line composes — never another design’s line.'}>Held{r.hold ? ` · ${r.hold}` : ''}</span>}
+                                      {/* FIX WAVE 2 ROUND 2 (F2, controller RULING): a stored line that the push seam would
+                                          REFUSE (repeats a significant word — a pre-ruling stored value, a manual DB edit,
+                                          or a future producer bug) is flagged PRE-FLIGHT, derived from `perDesignIhRows`'
+                                          own `skipReason` (the SAME `classifyStoredIhLine` the seam applies) — never a
+                                          second decision made here in the page. */}
+                                      {r.line && r.skipReason && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title="This stored line repeats a significant word — Amazon's push seam refuses to ship it. Click ↻ Regen to compose a compliant line.">Skip at push</span>}
                                     </div>
                                     {r.line ? <p className="text-xs text-slate-700 break-words">{r.line}</p> : <p className="text-[11px] text-amber-800 italic">Skipped at push (no-line-for-design)</p>}
+                                    {r.line && r.skipReason && <p className="text-[11px] text-amber-800 italic">Skipped at push ({r.skipReason})</p>}
                                   </div>
                                 ))}
                               </div>

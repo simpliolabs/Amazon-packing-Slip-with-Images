@@ -84,7 +84,7 @@ const create = vi.fn(async () => { throw new Error('OpenAI must never be called 
 vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { create } } } }))
 
 import { buildItemHighlightsPerDesign } from './listingPipeline'
-import { buildPerSkuItemHighlightMap, NO_LINE_FOR_DESIGN } from './perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, perDesignIhRows, NO_LINE_FOR_DESIGN, type PerChildItemHighlight } from './perDesignItemHighlights'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { ihFoldWord, IH_INSIGNIFICANT } from './productDetailAttrs'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
@@ -394,5 +394,55 @@ describe('FIX ROUND 1 (#2 + #3): a genuinely COMPOSING six-design pool, own mutu
     expect(bd.value).toContain('Classic Fit')
     expect(bd.value).not.toContain('Crew Neck')                      // pad stopped at `fit` — 108 >= 107
     expect(bd.value.length).toBe(108)
+  })
+})
+
+/**
+ * FIX WAVE 2 ROUND 2 (F2 PARITY, controller RULING, final-fix-wave-2-round-2-findings.md pin (b)):
+ * the card (`perDesignIhRows`) and the push seam (`buildPerSkuItemHighlightMap`) must never disagree
+ * about which SKU is pushable. Runs BOTH functions on the SAME `perChild` array — never two
+ * independently-built fixtures — across every scenario this file already builds: the all-held
+ * `POOL`, the RK-unrated partial, and a genuinely-composing pool (`OWN_PHRASES` + a disjoint
+ * two-phrase bank, reusing this file's own `SHARED2` wording so it is proven to compose, no `ADV2`
+ * needed since those phrases are rejected either way and never reach the composed value).
+ */
+describe('F2 PARITY (round 2, controller RULING): perDesignIhRows.skipReason and buildPerSkuItemHighlightMap.skipped AGREE for every design, on every perChild array this file builds', () => {
+  const assertParity = (perChild: PerChildItemHighlight[]) => {
+    const rows = perDesignIhRows(perChild)
+    const rowByKey = new Map(rows.map((r) => [r.designKey, r]))
+    const { values, skipped } = buildPerSkuItemHighlightMap(perChild, ALL_TARGETS, null)
+    const seamReasonBySku = new Map(skipped.map((s) => [s.sku, s.reason]))
+    for (const g of GROUPS) {
+      const row = rowByKey.get(g.key)
+      for (const s of g.skus) {
+        const seamReason = seamReasonBySku.get(s.sku) ?? null
+        if (values.has(s.sku)) {
+          expect(seamReason).toBeNull()
+          expect(row?.skipReason ?? null).toBeNull()
+        } else {
+          expect(row?.skipReason ?? null).toBe(seamReason)
+        }
+      }
+    }
+  }
+
+  it('all-held POOL scenario: every design holds under-floor-no-repeat — row.skipReason and the seam reason agree (both no-line-for-design) for every SKU', () => {
+    assertParity(build(POOL).perChild)
+  })
+
+  it('RK-unrated partial scenario: RK holds designs-unrated, its siblings hold under-floor-no-repeat — parity holds design-by-design, never spreading RK\'s reason to a sibling', () => {
+    const partial = POOL.map((k) => {
+      const { RK: _rk, ...rest } = (k.themeFitByDesign ?? {}) as Record<string, { fit: 0 | 1 | 2 | 3 }>
+      return { ...k, themeFitByDesign: rest } as AnalyzedKeyword
+    })
+    assertParity(build(partial).perChild)
+  })
+
+  it('a genuinely-composing pool (OWN_PHRASES + a disjoint two-phrase bank, no ADV2 needed): every design composes a pushable line — parity holds when nothing is skipped too (both null)', () => {
+    const SHARED3: AnalyzedKeyword[] = [
+      kw('graphic novelty print', 9000, 3),
+      kw('funny gift idea today', 8000, 3),
+    ]
+    assertParity(build([...OWN_PHRASES, ...SHARED3]).perChild)
   })
 })

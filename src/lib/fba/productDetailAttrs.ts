@@ -454,8 +454,8 @@ export function ihRepeatViolations(value: string): string[] {
  * import. This module is already a leaf `page.tsx` imports directly and already hosts the sibling
  * predicate (`ihRepeatViolations`, Amazon's own ≤2-per-word cap) — ONE home for both Item-Highlight
  * repeat predicates. `itemHighlightComposer.ts` now imports `GENDER_FOLDS`/`significantFolded`/
- * `lineHasSignificantRepeat` from HERE instead of defining them; `perDesignItemHighlights.ts` still
- * imports `lineHasSignificantRepeat`, but from HERE, never from the composer again. */
+ * `lineHasSignificantRepeat` from HERE instead of defining them; `perDesignItemHighlights.ts` never
+ * imports anything from the composer again. */
 
 /** Gender/audience irregular plurals fold together (woman≡women, ladies≡lady, man≡men) — without
  *  this, "alligator shirt women" + "alligator shirts woman" both pass novelty and the line becomes
@@ -482,6 +482,23 @@ export const lineHasSignificantRepeat = (line: string): boolean => {
   }
   return false
 }
+
+/** FIX WAVE 2 ROUND 2 (F2, controller RULING): the ONE classification of a STORED per-design Item
+ *  Highlight line, shared by the push seam (`buildPerSkuItemHighlightMap`) and the card's row
+ *  builder (`perDesignIhRows`, `perDesignItemHighlights.ts`) — so the card can show the seam's
+ *  refusal PRE-FLIGHT (before any push is attempted) instead of learning it only from a push
+ *  report. `'no-line-for-design'` — an empty/missing line (a HELD design, the pre-existing case).
+ *  `'repeat-in-stored-line'` — a non-empty line that repeats a folded significant word (a
+ *  pre-ruling stored value, a manual DB edit, or a future producer bug). `'ok'` — a non-empty,
+ *  compliant line; the only classification that is ever pushable. */
+export type IhLineClassification = 'ok' | 'no-line-for-design' | 'repeat-in-stored-line'
+export function classifyStoredIhLine(value: string | null | undefined): IhLineClassification {
+  const line = (value || '').trim()
+  if (!line) return 'no-line-for-design'
+  if (lineHasSignificantRepeat(line)) return 'repeat-in-stored-line'
+  return 'ok'
+}
+
 export function capItemHighlightRepeats(value: string): string {
   const fold = (w: string): string => {
     let b = w.toLowerCase().replace(/[^a-z0-9]/g, '')

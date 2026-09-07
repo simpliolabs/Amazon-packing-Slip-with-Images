@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignIhRows, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight } from './perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignIhRows, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight } from './perDesignItemHighlights'
 
 /* ─── FIX WAVE 2 ROUND 2 (F1, controller RULING, final-fix-wave-2-round-2-findings.md) ────────────
  * `perDesignItemHighlights.ts` is imported by the CLIENT page (`fba/listing/[asin]/page.tsx`,
@@ -83,10 +83,11 @@ describe('buildPerSkuItemHighlightMap', () => {
  * section 0(a) — was MAPPED, `skipped: []`). This is the LAST pure function before Amazon, so it is
  * the one place a terminal net can catch every path that could ever have written a bad line — stale
  * bytes, a manual DB edit, a future producer bug — not just the composer's own output. Reuses the
- * composer's OWN fold (`lineHasSignificantRepeat` / `significantFolded`, itemHighlightComposer.ts)
- * rather than a new tokenizer (coherence INVARIANT 1): a folding drift between "what the composer
- * calls a repeat" and "what the push seam calls a repeat" is exactly the class of bug this project's
- * memory calls out (coverage-token-folding-shirt-hub-trap). */
+ * ONE fold (`lineHasSignificantRepeat` / `significantFolded`, `productDetailAttrs.ts` — round 2, F1:
+ * moved OUT of `itemHighlightComposer.ts` so this client-safe module never imports the generation
+ * path) rather than a new tokenizer (coherence INVARIANT 1): a folding drift between "what the
+ * composer calls a repeat" and "what the push seam calls a repeat" is exactly the class of bug this
+ * project's memory calls out (coverage-token-folding-shirt-hub-trap). */
 describe('FIX WAVE 2 (I-2b): buildPerSkuItemHighlightMap refuses a stored line that repeats a significant word', () => {
   const STALE_LINE_REPEATED_TEE = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
 
@@ -112,6 +113,40 @@ describe('FIX WAVE 2 (I-2b): buildPerSkuItemHighlightMap refuses a stored line t
     const { values, skipped } = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK-FBM', asin: 'B0BD000001' }], null)
     expect(values.has('BD64000L-BK-FBM')).toBe(false)
     expect(skipped).toEqual([{ sku: 'BD64000L-BK-FBM', asin: 'B0BD000001', reason: REPEAT_IN_STORED_LINE }])
+  })
+})
+
+/* ─── FIX WAVE 2 ROUND 2 (F2, controller RULING) ──────────────────────────────────────────────────
+ * The card (`perDesignIhRows`, read by `fba/listing/[asin]/page.tsx`) must derive the SAME
+ * pre-flight classification the push seam (`buildPerSkuItemHighlightMap`) applies — `classifyStoredIhLine`
+ * is the ONE predicate both call. Before this fix the PO would see a stale line with a live Push
+ * button, then learn it was skipped only from the push report; these pins prove the row itself now
+ * carries `skipReason` so the card can show it BEFORE any push is attempted. */
+describe('FIX WAVE 2 ROUND 2 (F2): perDesignIhRows derives the push-seam skip reason PRE-FLIGHT', () => {
+  const STALE_LINE_REPEATED_TEE = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+
+  it('(a) a stored `tee`-twice line yields skipReason repeat-in-stored-line and the row is not pushable', () => {
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+    ]
+    const rows = perDesignIhRows(entries)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].skipReason).toBe(REPEAT_IN_STORED_LINE)
+    expect(pushableDesignLines(entries)).toEqual([])   // not pushable — same predicate the seam applies
+  })
+
+  it('(c) the existing no-line-for-design (HELD) rendering is unchanged: empty line, the composer\'s own hold reason, and skipReason reports no-line-for-design', () => {
+    const rows = perDesignIhRows(ENTRIES)   // DQ: item_highlight: '', hold: 'thin-candidates'
+    const dq = rows.find((r) => r.designKey === 'DQ')!
+    expect(dq.line).toBe('')
+    expect(dq.hold).toBe('thin-candidates')
+    expect(dq.skipReason).toBe(NO_LINE_FOR_DESIGN)
+  })
+
+  it('a clean, non-repeating stored line has skipReason null — never flagged when there is nothing to skip', () => {
+    const rows = perDesignIhRows(ENTRIES)   // BM: BM_LINE, no repeated folded token
+    const bm = rows.find((r) => r.designKey === 'BM')!
+    expect(bm.skipReason).toBeNull()
   })
 })
 
