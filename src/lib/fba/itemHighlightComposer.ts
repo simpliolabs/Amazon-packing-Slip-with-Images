@@ -132,12 +132,29 @@ export const titleCasePhrase = (p: string): string =>
 
 /** Gender/audience irregular plurals fold together (woman≡women, ladies≡lady, man≡men) — without
  *  this, "alligator shirt women" + "alligator shirts woman" both pass novelty and the line becomes
- *  the exact permutation-spam the PO rejected. */
-const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
-const significantFolded = (phrase: string): string[] =>
+ *  the exact permutation-spam the PO rejected. EXPORTED (FIX WAVE 2, I-2, 2026-09-06): the ONE fold
+ *  every repeat check in this file uses — `buildPerSkuItemHighlightMap` (perDesignItemHighlights.ts)
+ *  reuses it verbatim at the push seam rather than hand-copying a second tokenizer (coherence
+ *  INVARIANT 1 — a folding drift is how the `shirt`/coverage-token class of bug happens). */
+export const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
+export const significantFolded = (phrase: string): string[] =>
   phrase.toLowerCase().split(/\s+/)
     .map((w) => { const f = ihFoldWord(w); return GENDER_FOLDS[f] ?? f })
     .filter((w) => w && !IH_INSIGNIFICANT.has(w))
+
+/** TRUE when `line` (the composer's own comma-joined shipped bytes, or any candidate stored line)
+ *  repeats a folded significant word — the ABSOLUTE rule (PO ruling 2026-09-06, "2. No Repeat as
+ *  per Amazon Ruules") stated as a predicate over bytes rather than over the live selection state,
+ *  so a caller holding only the STORED line (no `usedFolded` set — the push seam, a stale per-child
+ *  entry) can still ask the same question the composer's own selection loop asks incrementally. */
+export const lineHasSignificantRepeat = (line: string): boolean => {
+  const seen = new Set<string>()
+  for (const w of significantFolded(line)) {
+    if (seen.has(w)) return true
+    seen.add(w)
+  }
+  return false
+}
 
 /** TASK 2 (2026-09-06, PO "Why is Women repeating Twice?"): a candidate that adds ONE new token
  *  while repeating others used to outrank a candidate whose tokens are ALL new, merely by sorting

@@ -47,7 +47,7 @@ import {
   type DetailAttribute, type ItemHighlightsApiState,
 } from '@/lib/fba/productDetailAttrs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
-import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerCurrent, NO_LINE_FOR_DESIGN, type PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerCurrent, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight, type IhSkuSkipReason } from '@/lib/fba/perDesignItemHighlights'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
@@ -269,8 +269,12 @@ interface DiffRow {
    *  phantom "Missing offer" ASIN instead of updating (the 2026-06-16 B0GHH4MQ7N incident). */
   notLive?: boolean
   /** PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): this SKU's design has no composed line (held) — the
-   *  push SKIPS it; it is never given another design's line nor the broadcast value. */
-  skipReason?: 'no-line-for-design'
+   *  push SKIPS it; it is never given another design's line nor the broadcast value.
+   *  FIX WAVE 2 (I-2b, 2026-09-06): a line CAN exist and still be refused — 'repeat-in-stored-line',
+   *  when the terminal net at the seam (buildPerSkuItemHighlightMap) catches a stale/pre-ruling or
+   *  manually-edited line repeating a significant word. Sourced from `perDesign.skipped`, never
+   *  hand-copied. */
+  skipReason?: IhSkuSkipReason
   /** The design this row's proposed line belongs to (per-design IH rows only; for the modal). */
   designKey?: string
   designName?: string
@@ -793,7 +797,11 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
   //   (b) a BROADCAST IH on a family the seller/detector says is multi-design (the pre-ruling lie);
   //   (c) every design held (nothing composed).
   const isIh = !!match && isItemHighlightsField(detailValueToString(match.field_name), match.sp_api_key)
-  const perDesignLines = perDesignEntries.filter((e) => (e.item_highlight || '').trim())
+  // FIX WAVE 2 (I-2, 2026-09-06): pushableDesignLines (not a bare `.trim()` filter) so a family whose
+  // stored lines are ALL refused by the seam's repeat net (pre-ruling bytes, a manual edit) reads as
+  // "every design held" here too — perDesignLines.length > 0 alone could otherwise make a stale
+  // family look pushable even though buildPerSkuItemHighlightMap below would skip every SKU.
+  const perDesignLines = pushableDesignLines(perDesignEntries)
   const perDesignMode = isIh && (match?.per_design === true || perDesignLines.length > 0)
   if (perDesignMode) {
     if ((valueOverride ?? '').trim()) return { ctx: null, error: PER_DESIGN_IH_OVERRIDE_REASON }
@@ -1081,6 +1089,9 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
     : null
   const designOf = new Map<string, { designKey?: string | null; designName?: string | null }>()
   for (const e of ctx.perDesignEntries ?? []) { designOf.set(e.sku, e); if (e.asin && !designOf.has(`asin:${e.asin}`)) designOf.set(`asin:${e.asin}`, e) }
+  // FIX WAVE 2 (I-2b): the REAL reason the seam skipped this SKU — never hand-copied/hardcoded, so a
+  // 'repeat-in-stored-line' refusal reads as itself here too, not as the generic 'no-line-for-design'.
+  const skipReasonBySku = new Map((perDesign?.skipped ?? []).map((s) => [s.sku, s.reason] as const))
 
   const diff: DiffRow[] = []
   for (const r of expanded) {
@@ -1099,7 +1110,7 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
       // Propagate the ground-truth phantom-gate signal so single-attribute detail push (executePush
       // details branch) can skip offerless-backfilled rows — parity with content-path's own notLive.
       notLive: r.notLive === true ? true : false,
-      ...(perDesign && !own ? { skipReason: NO_LINE_FOR_DESIGN } : {}),
+      ...(perDesign && !own ? { skipReason: skipReasonBySku.get(r.sku) ?? NO_LINE_FOR_DESIGN } : {}),
       ...(d ? { designKey: d.designKey ?? undefined, designName: d.designName ?? undefined } : {}),
     })
   }
@@ -3712,7 +3723,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
               pushed: 0, failed: 0, total: 0,
               message: ctx.perDesignEntries
-                ? `Nothing to push — every SKU already carries its own design's ${ctx.detailField}${rawDetailDiff.some((d) => d.skipReason) ? ` (${rawDetailDiff.filter((d) => d.skipReason).length} SKU(s) skipped: their design has no composed line)` : ''}.`
+                ? `Nothing to push — every SKU already carries its own design's ${ctx.detailField}${rawDetailDiff.some((d) => d.skipReason) ? ` (${rawDetailDiff.filter((d) => d.skipReason).length} SKU(s) skipped: ${rawDetailDiff.some((d) => d.skipReason === REPEAT_IN_STORED_LINE) ? 'their stored line has no composed value, or repeats a significant word' : 'their design has no composed line'})` : ''}.`
                 : `Nothing to push — every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".`,
               results: [],
             })
@@ -3886,8 +3897,13 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             }
             // PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): the SKU's OWN design line (loadDetailDiff
             // resolved it from per_child_item_highlights). A held design's SKU never reaches Amazon.
-            if (ctx.perDesignEntries && (item.skipReason === NO_LINE_FOR_DESIGN || !item.raw)) {
-              const reason = 'Skipped — this SKU\'s design has no composed Item Highlight (held); it is never given another design\'s line.'
+            // FIX WAVE 2 (I-2b): 'repeat-in-stored-line' gets its OWN accurate message — a line DID
+            // exist, the terminal net at the seam refused it for repeating a significant word, which
+            // is a different fact than "held, nothing composed" and must not be reported as that.
+            if (ctx.perDesignEntries && (item.skipReason === NO_LINE_FOR_DESIGN || item.skipReason === REPEAT_IN_STORED_LINE || !item.raw)) {
+              const reason = item.skipReason === REPEAT_IN_STORED_LINE
+                ? 'Skipped — this SKU\'s stored Item Highlight repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit to recompose it.'
+                : 'Skipped — this SKU\'s design has no composed Item Highlight (held); it is never given another design\'s line.'
               results.push({ sku: item.sku, status: 'skipped', submissionId: null, error: reason, isParent })
               emit({ type: 'progress', sku: item.sku, status: 'skipped', error: reason })
               continue
@@ -3961,9 +3977,13 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           }
           // PER-DESIGN IH: surface the SKUs whose design has no composed line (held) — they never
           // entered `diff` (proposed '' ⇒ changed:false) so the seller sees WHICH were skipped and why.
+          // FIX WAVE 2 (I-2b): also surfaces 'repeat-in-stored-line' refusals with their OWN accurate
+          // reason (a line existed; the seam refused it — not "held, nothing composed").
           if (ctx.perDesignEntries) {
-            for (const d of rawDetailDiff.filter((r) => r.skipReason === NO_LINE_FOR_DESIGN && r.asin !== parent_asin)) {
-              const reason = `Skipped (${NO_LINE_FOR_DESIGN}) — ${d.designName || d.designKey || 'this design'} has no composed Item Highlight; never given another design's line.`
+            for (const d of rawDetailDiff.filter((r) => (r.skipReason === NO_LINE_FOR_DESIGN || r.skipReason === REPEAT_IN_STORED_LINE) && r.asin !== parent_asin)) {
+              const reason = d.skipReason === REPEAT_IN_STORED_LINE
+                ? `Skipped (${REPEAT_IN_STORED_LINE}) — ${d.designName || d.designKey || 'this design'}'s stored Item Highlight repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit.`
+                : `Skipped (${NO_LINE_FOR_DESIGN}) — ${d.designName || d.designKey || 'this design'} has no composed Item Highlight; never given another design's line.`
               results.push({ sku: d.sku, status: 'skipped', submissionId: null, error: reason, isParent: false })
               emit({ type: 'progress', sku: d.sku, status: 'skipped', error: reason })
             }

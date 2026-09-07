@@ -27,6 +27,10 @@
  *    never handed another design's line, and never the broadcast value.
  */
 import { CONTENT_CONTRACT } from './contentContract'
+// FIX WAVE 2 (I-2b, 2026-09-06): the composer's OWN fold/repeat check — reused verbatim at the push
+// seam rather than a second tokenizer (coherence INVARIANT 1). No cycle: itemHighlightComposer.ts
+// never imports this module.
+import { lineHasSignificantRepeat } from './itemHighlightComposer'
 
 /** Why an Item Highlight is HELD (the composer returned null). Each names ONE PO action.
  *  MOVED HERE (2026-09-04, closing the SILENT-HOLD defect class) from listingPipeline.ts: this
@@ -87,6 +91,13 @@ export interface PerChildItemHighlight {
 }
 
 export const NO_LINE_FOR_DESIGN = 'no-line-for-design' as const
+/** FIX WAVE 2 (I-2b, 2026-09-06, controller RULING): the ruling was enforced at GENERATION only
+ *  (itemHighlightComposer.ts Task 6) — a line stored before it shipped, or written by any future
+ *  producer bug or manual edit, could still carry a repeated significant word. `NO_LINE_FOR_DESIGN`
+ *  names "no line exists"; this names the distinct case "a line exists but the push seam — the LAST
+ *  pure function before Amazon — refuses to ship it". */
+export const REPEAT_IN_STORED_LINE = 'repeat-in-stored-line' as const
+export type IhSkuSkipReason = typeof NO_LINE_FOR_DESIGN | typeof REPEAT_IN_STORED_LINE
 
 /** A compact one-row-per-design view of the stored array (first SKU of each design is representative). */
 export interface PerDesignIhRow {
@@ -154,12 +165,19 @@ export function isPerDesignIhRow(row: { per_design?: unknown } | null | undefine
  * resolution every other per-child push applies). A SKU whose design holds ('' line) or that
  * matches no entry is SKIPPED with 'no-line-for-design' — NEVER given another design's line.
  * The variation PARENT hub (asin === parentAsin) is skipped the same way: a hub has no design.
+ *
+ * FIX WAVE 2 (I-2b, 2026-09-06): a resolved line that repeats a folded significant word is ALSO
+ * refused — 'repeat-in-stored-line' — before it reaches `values`. This is the terminal net on the
+ * SHIPPED bytes: it catches a pre-ruling stored line, a manual DB edit, or a future producer bug,
+ * not just what the current composer would produce today. Amazon's own ≤2-per-word cap
+ * (`capItemHighlightRepeats`) still runs downstream as defence in depth for the legacy/broadcast
+ * path — this refusal is STRICTER (any repeat, not just a 3rd+ mention) and runs first.
  */
 export function buildPerSkuItemHighlightMap(
   entries: PerChildItemHighlight[] | null | undefined,
   targets: { sku: string; asin: string }[],
   parentAsin?: string | null,
-): { values: Map<string, string>; skipped: { sku: string; asin: string; reason: typeof NO_LINE_FOR_DESIGN }[] } {
+): { values: Map<string, string>; skipped: { sku: string; asin: string; reason: IhSkuSkipReason }[] } {
   const bySku = new Map<string, string>()
   const byAsin = new Map<string, string>()
   for (const e of Array.isArray(entries) ? entries : []) {
@@ -169,14 +187,28 @@ export function buildPerSkuItemHighlightMap(
     if (e.asin && !byAsin.has(e.asin)) byAsin.set(e.asin, line)
   }
   const values = new Map<string, string>()
-  const skipped: { sku: string; asin: string; reason: typeof NO_LINE_FOR_DESIGN }[] = []
+  const skipped: { sku: string; asin: string; reason: IhSkuSkipReason }[] = []
   for (const t of targets) {
     const isHub = !!parentAsin && t.asin === parentAsin && !bySku.has(t.sku)
     const line = isHub ? undefined : (bySku.get(t.sku) ?? (t.asin ? byAsin.get(t.asin) : undefined))
-    if (line) values.set(t.sku, line)
-    else skipped.push({ sku: t.sku, asin: t.asin, reason: NO_LINE_FOR_DESIGN })
+    if (!line) { skipped.push({ sku: t.sku, asin: t.asin, reason: NO_LINE_FOR_DESIGN }); continue }
+    if (lineHasSignificantRepeat(line)) { skipped.push({ sku: t.sku, asin: t.asin, reason: REPEAT_IN_STORED_LINE }); continue }
+    values.set(t.sku, line)
   }
   return { values, skipped }
+}
+
+/** FIX WAVE 2 (I-2, 2026-09-06, controller RULING): the ONE predicate for "does this per-design
+ *  entry contribute a pushable line" — non-empty AND not refused by the terminal repeat net above.
+ *  `pushExecutor.loadDetailContext`'s "every design held" gate consults THIS (not a hand-rolled
+ *  `.trim()` filter) so a family whose remaining lines would ALL be refused at the seam is treated
+ *  exactly as unpushable as a family that composed nothing — `perDesignLines.length > 0` alone can
+ *  no longer make a stale family look pushable one layer up from the seam that actually refuses it. */
+export function pushableDesignLines(entries: PerChildItemHighlight[] | null | undefined): PerChildItemHighlight[] {
+  return (Array.isArray(entries) ? entries : []).filter((e) => {
+    const line = (e.item_highlight || '').trim()
+    return !!line && !lineHasSignificantRepeat(line)
+  })
 }
 
 /** Stamp the write-through mirror on the entries whose SKU (or ASIN twin) just had `line` ACCEPTED. */

@@ -512,7 +512,9 @@ export default function ListingDetailPage() {
   // attribute key (see lib/fba/productDetailAttrs.ts).
   type PushField = 'title' | 'bullets' | 'description' | 'keywords' | 'details'
   const FIELD_LABEL: Record<PushField, string> = { title: 'Title', bullets: 'Bullets', description: 'Description', keywords: 'Backend Keywords', details: 'Product Detail' }
-  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean; isParent?: boolean; asin?: string; skipReason?: 'no-line-for-design'; designKey?: string; designName?: string }
+  // FIX WAVE 2 (I-2b, 2026-09-06): skipReason mirrors pushExecutor.ts's DiffRow (IhSkuSkipReason) —
+  // 'repeat-in-stored-line' joins 'no-line-for-design' as a real value this row can carry.
+  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean; isParent?: boolean; asin?: string; skipReason?: 'no-line-for-design' | 'repeat-in-stored-line'; designKey?: string; designName?: string }
   interface PushResultRow { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }
   interface PushPreview {
     field: PushField; label: string; broadcast: boolean; count: number; changed: number;

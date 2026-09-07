@@ -2554,6 +2554,41 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
   }
 }
 
+/** The Item Highlights field's editorial description — shown to the PO on every detail row for this
+ *  attribute, single- or multi-design, held or composed. Module-scope (was function-local) so
+ *  `buildPerDesignIhDetailPatch` below — and the regenerate-item-highlight route, which imports it —
+ *  can both use the SAME text. */
+export const IH_REASON = 'NEW Amazon field (launches July 27, 2026 with the 75-char title limit): up to 125 characters of short customer-facing phrases — material, fit, features, use-case — shown near the title. Human-readable phrases, not a keyword list.'
+
+/**
+ * THE per-design Item Highlight detail-row PATCH (FIX WAVE 2, I-2a, 2026-09-06 final whole-branch
+ * review #2, controller RULING): shared VERBATIM by this file's own multi-design branch (below) and
+ * the regenerate-item-highlight route's all-held branch. Before this fix the route persisted NOTHING
+ * when every design held (`composed.length === 0`), so a pre-ruling stored line — or any stale line
+ * — stayed pushable and the card showed no Held badge until a full AI audit ran (Important #2 of the
+ * review). Path parity (fba-generation-invariants INVARIANT 3): the route now writes the identical
+ * `{per_design, recommended_value, hold, reason}` shape the full audit writes, through this ONE
+ * function, for BOTH the partial-hold and all-held cases — never a second writer computing the same
+ * fields differently. This does NOT touch the #352 outage-blanking rule: a HOLD here is a
+ * deterministic ruling verdict with a named reason (`built.shared.hold` is guaranteed non-null
+ * whenever `composed === 0` — see `sharedHold` above), never an ambiguous empty result; a genuine
+ * exception or an empty result WITHOUT a hold reason still preserves (the caller's try/catch, or the
+ * route's pre-existing early-return paths, are untouched by this function). */
+export function buildPerDesignIhDetailPatch(
+  built: { shared: SharedItemHighlight; perDesign: PerDesignItemHighlight[] },
+  ihReasonText: string,
+): { per_design: true; recommended_value: ''; hold: IhHoldReason | null; reason: string } {
+  const composed = built.perDesign.filter((d) => d.value).length
+  return {
+    per_design: true,
+    recommended_value: '',
+    hold: built.shared.hold,
+    reason: composed > 0
+      ? `${ihReasonText} MULTI-DESIGN family (PO 2026-08-21): one Item Highlight line PER DESIGN, each rated under its own design (${composed} of ${built.shared.designKeys.length} designs composed) — carried per SKU through per_child_item_highlights.`
+      : `${ihReasonText} MULTI-DESIGN family (PO 2026-08-21): HELD for every design — ${IH_HOLD_MESSAGES[built.shared.hold ?? 'under-floor']}${built.shared.missingDesigns.length ? ` (unrated: ${built.shared.missingDesigns.join(', ')})` : ''}.`,
+  }
+}
+
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
 
 export function validateTitle(
@@ -11858,7 +11893,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // a Comfort-Colors-only PO ruling — the old LLM-era scrubFitClaims pass here rewrote that
     // sanctioned fact into "Can be worn as Relaxed" on THIS path only (the regen route never ran
     // it). The route and the pipeline now ship byte-identical output for the same inputs.
-    const IH_REASON = 'NEW Amazon field (launches July 27, 2026 with the 75-char title limit): up to 125 characters of short customer-facing phrases — material, fit, features, use-case — shown near the title. Human-readable phrases, not a keyword list.'
+    // IH_REASON is now MODULE-SCOPE (was function-local) — see its declaration above
+    // `buildPerDesignIhDetailPatch` — so the regenerate-item-highlight route can share it too.
     if (apparelMultiDesign && designGroupContexts.length >= 2) {
       // PER DESIGN (PO 2026-08-21, B0DQ5YZH38): ONE line per design group through the SAME producer,
       // scoped to the group's own titles + the family pool minus other designs' tokens. The
@@ -11880,7 +11916,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         audienceLeanByDesign: input.audienceLeanByDesign,
       })
       perChildItemHighlights = built.perChild
-      const composed = built.perDesign.filter((d) => d.value).length
       // SILENT-HOLD CLASS CLOSED (2026-09-04): the marker row ships EVERY TIME the attribute is in
       // the menu — composed>0 or not. Before this, `composed === 0` (every design held, e.g. a family
       // whose pool carries FAMILY-level theme_fit but no per-design rating — migration 061) pushed
@@ -11892,15 +11927,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (built.shared.hold) {
         console.warn(JSON.stringify({ tag: 'IH_SHARED_HELD', parent: input.parentAsin ?? null, hold: built.shared.hold, missing: built.shared.missingDesigns }))
       }
+      // FIX WAVE 2 (I-2a): the SAME writer the regenerate-item-highlight route now calls for its own
+      // all-held and partial-hold branches — path parity, never a second construction of this shape.
       pdiFinal.push({
         field_name: highlightsAttr.title,
         current_value: null,
-        recommended_value: '',
-        per_design: true,
-        hold: built.shared.hold,
-        reason: composed > 0
-          ? `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): one Item Highlight line PER DESIGN, each rated under its own design (${composed} of ${built.shared.designKeys.length} designs composed) — carried per SKU through per_child_item_highlights.`
-          : `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): HELD for every design — ${IH_HOLD_MESSAGES[built.shared.hold ?? 'under-floor']}${built.shared.missingDesigns.length ? ` (unrated: ${built.shared.missingDesigns.join(', ')})` : ''}.`,
+        ...buildPerDesignIhDetailPatch(built, IH_REASON),
       })
     } else {
       const { value: hl, hold } = buildItemHighlights({

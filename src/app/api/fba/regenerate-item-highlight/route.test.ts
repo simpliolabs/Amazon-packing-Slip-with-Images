@@ -69,3 +69,36 @@ describe('regenerate-item-highlight route: audience-lean parity with the pipelin
     for (const a of assignments) expect(a).toMatch(/^apparel\s*\?/)
   })
 })
+
+describe('regenerate-item-highlight route: ONE writer for the per-design detail row, both branches (FIX WAVE 2, I-2a)', () => {
+  it('persistPerDesignItemHighlights is called exactly once before either branch returns (path parity — never two writers)', () => {
+    const calls = [...ROUTE.matchAll(/await persistPerDesignItemHighlights\(/g)]
+    expect(calls).toHaveLength(1)
+  })
+
+  it('the write happens BEFORE the composed.length === 0 (all-held) branch checks/returns — the held case is no longer write-free', () => {
+    const writeIdx = ROUTE.indexOf('await persistPerDesignItemHighlights(')
+    const heldBranchIdx = ROUTE.indexOf('if (composed.length === 0) {')
+    expect(writeIdx).toBeGreaterThan(-1)
+    expect(heldBranchIdx).toBeGreaterThan(-1)
+    expect(writeIdx).toBeLessThan(heldBranchIdx)
+  })
+
+  it('the all-held error message no longer claims "kept the existing values" (the held state is now persisted)', () => {
+    const heldMessageIdx = ROUTE.indexOf('Item Highlight HELD for every design')
+    expect(heldMessageIdx).toBeGreaterThan(-1)
+    // The whole all-held return block, up to its own closing `}, { status: 422 })`.
+    const block = ROUTE.slice(heldMessageIdx, ROUTE.indexOf('}, { status: 422 })', heldMessageIdx))
+    expect(block).not.toMatch(/kept the existing values/)
+    expect(block).toMatch(/held state has been saved/)
+  })
+
+  it('a DB write failure from the shared writer short-circuits with a 500 before either branch\'s own return', () => {
+    expect(ROUTE).toMatch(/if \(persisted\.error\) \{\s*\n\s*return NextResponse\.json\(\{ error: persisted\.error \}, \{ status: 500 \}\)/)
+  })
+
+  it('buildPerDesignIhDetailPatch and IH_REASON are imported from listingPipeline.ts — the SAME writer the full audit uses, never a second construction', () => {
+    expect(ROUTE).toMatch(/import \{[^}]*buildPerDesignIhDetailPatch[^}]*\} from '@\/lib\/fba\/listingPipeline'/)
+    expect(ROUTE).toMatch(/import \{[^}]*\bIH_REASON\b[^}]*\} from '@\/lib\/fba\/listingPipeline'/)
+  })
+})

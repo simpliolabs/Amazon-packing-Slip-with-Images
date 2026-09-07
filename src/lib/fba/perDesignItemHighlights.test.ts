@@ -4,10 +4,16 @@
  * never a broadcast value (there is none to give: the map has no broadcast input by construction).
  */
 import { describe, it, expect } from 'vitest'
-import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignIhRows, NO_LINE_FOR_DESIGN, type PerChildItemHighlight } from './perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignIhRows, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight } from './perDesignItemHighlights'
 
-const BM_LINE = 'Gym Motivation Shirts, Workout Graphic Tees, Lifting Apparel for Men, Fitness Clothing Men, Crew Neck'
-const RK_LINE = 'Real King Graphic Tee, Workout Graphic Tees, Lifting Apparel for Men, Bodybuilding Tops, Crew Neck'
+// FIX WAVE 2 (I-2, 2026-09-06): BOTH lines originally repeated a folded significant word (`men`
+// twice in BM_LINE; `graphic`/`tee` twice in RK_LINE) — harmless before this fix (this describe
+// block tests SKU/twin resolution and push-through stamping, never repeat content), but
+// `buildPerSkuItemHighlightMap` now REFUSES any stored line that repeats one (see below), so a
+// fixture written before the absolute no-repeat ruling existed would now be skipped by the very
+// tests that assert it gets MAPPED. Re-worded, same shape/length, zero repeated folded tokens.
+const BM_LINE = 'Gym Motivation Shirts, Workout Graphic Tees, Lifting Apparel for Men, Fitness Clothing Line, Crew Neck'
+const RK_LINE = 'Real King Novelty Tee, Workout Graphic Apparel, Lifting Gear for Men, Bodybuilding Tops, Crew Neck'
 const ENTRIES: PerChildItemHighlight[] = [
   { sku: 'BM64000L-BK', asin: 'B0BM000001', item_highlight: BM_LINE, designKey: 'BM', designName: 'Beast Mode', hold: null },
   { sku: 'BM64000M-BK', asin: 'B0BM000002', item_highlight: BM_LINE, designKey: 'BM', designName: 'Beast Mode', hold: null },
@@ -45,6 +51,48 @@ describe('buildPerSkuItemHighlightMap', () => {
     const { values, skipped } = buildPerSkuItemHighlightMap(null, [{ sku: 'BM64000L-BK', asin: 'B0BM000001' }], null)
     expect(values.size).toBe(0)
     expect(skipped).toHaveLength(1)
+  })
+})
+
+/* ─── FIX WAVE 2 (I-2b, 2026-09-06, final whole-branch review #2 controller RULING) ───────────────
+ *
+ * The PO ruling ("2. No Repeat as per Amazon Ruules") was enforced at GENERATION only
+ * (itemHighlightComposer.ts, Task 6) — a per-design line stored BEFORE that ruling shipped (or a
+ * hand-edited row) could still carry a repeated significant word, and until this fix
+ * `buildPerSkuItemHighlightMap` mapped it straight through to the push payload (reproduced against
+ * unmodified HEAD bea1f24: a MAIN-era line carrying `tee` twice — final-review-2-findings.md
+ * section 0(a) — was MAPPED, `skipped: []`). This is the LAST pure function before Amazon, so it is
+ * the one place a terminal net can catch every path that could ever have written a bad line — stale
+ * bytes, a manual DB edit, a future producer bug — not just the composer's own output. Reuses the
+ * composer's OWN fold (`lineHasSignificantRepeat` / `significantFolded`, itemHighlightComposer.ts)
+ * rather than a new tokenizer (coherence INVARIANT 1): a folding drift between "what the composer
+ * calls a repeat" and "what the push seam calls a repeat" is exactly the class of bug this project's
+ * memory calls out (coverage-token-folding-shirt-hub-trap). */
+describe('FIX WAVE 2 (I-2b): buildPerSkuItemHighlightMap refuses a stored line that repeats a significant word', () => {
+  const STALE_LINE_REPEATED_TEE = 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit'
+
+  it('a stale stored line with `tee` twice (the reviewer-executed MAIN-era reproduction) is SKIPPED with repeat-in-stored-line, never mapped', () => {
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+    ]
+    const { values, skipped } = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK', asin: 'B0BD000001' }], null)
+    expect(values.has('BD64000L-BK')).toBe(false)
+    expect(skipped).toEqual([{ sku: 'BD64000L-BK', asin: 'B0BD000001', reason: REPEAT_IN_STORED_LINE }])
+  })
+
+  it('a clean stored line (no repeated folded token) is mapped exactly as before — the refusal is scoped to the defect, not a blanket re-check that starves healthy lines', () => {
+    const { values, skipped } = buildPerSkuItemHighlightMap(ENTRIES, [{ sku: 'BM64000L-BK', asin: 'B0BM000001' }], null)
+    expect(values.get('BM64000L-BK')).toBe(BM_LINE)
+    expect(skipped).toHaveLength(0)
+  })
+
+  it('an FBM twin resolved by ASIN through a repeated stored line is refused too — the twin resolution never bypasses the repeat check', () => {
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'BD64000L-BK', asin: 'B0BD000001', item_highlight: STALE_LINE_REPEATED_TEE, designKey: 'BD', designName: 'Boss Definition', hold: null },
+    ]
+    const { values, skipped } = buildPerSkuItemHighlightMap(entries, [{ sku: 'BD64000L-BK-FBM', asin: 'B0BD000001' }], null)
+    expect(values.has('BD64000L-BK-FBM')).toBe(false)
+    expect(skipped).toEqual([{ sku: 'BD64000L-BK-FBM', asin: 'B0BD000001', reason: REPEAT_IN_STORED_LINE }])
   })
 })
 
