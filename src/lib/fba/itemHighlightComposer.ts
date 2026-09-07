@@ -33,7 +33,7 @@
  */
 import { CONTENT_CONTRACT } from './contentContract'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
-import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations, GENDER_FOLDS, significantFolded, ihRepeatBudget } from './productDetailAttrs'
+import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations, GENDER_FOLDS, significantFolded, ihRepeatBudget, ihSpecFactFillers } from './productDetailAttrs'
 import { scrubTrademarks } from './trademarkGuard'
 import { type BlankSpec } from './blankSpecs'
 import {
@@ -310,10 +310,9 @@ function shadowRepeatReachesFloor(
     const phrase = titleCasePhrase(c.keyword)
     if (!basePicked.includes(phrase)) tryAdd(phrase, significantFolded(c.keyword))
   }
-  const factFillers = spec ? [
-    spec.material || '', spec.fit ? `${spec.fit} Fit` : '', spec.unisex === true ? 'Unisex Fit' : '',
-    spec.neck || '', spec.sleeve || '', spec.dye ? `${spec.dye} Fabric` : '',
-  ].filter(Boolean) : []
+  // TASK 8 ROUND 2 (R1): the ONE pad bank (`productDetailAttrs.ts`) — was hand-written here a second
+  // time, independently of the live loop's own copy below; now both read the same definition.
+  const factFillers = ihSpecFactFillers(spec)
   for (const f of factFillers) tryAdd(titleCasePhrase(f), significantFolded(f))
   return len >= min
 }
@@ -508,14 +507,9 @@ export function composeItemHighlightDetailed(
   const MIN = CONTENT_CONTRACT.itemHighlights.min
   if (lineLen() < MIN && opts?.spec) {
     const sp = opts.spec
-    const factFillers = [
-      sp.material || '',
-      sp.fit ? `${sp.fit} Fit` : '',
-      sp.unisex === true ? 'Unisex Fit' : '',
-      sp.neck || '',
-      sp.sleeve || '',
-      sp.dye ? `${sp.dye} Fabric` : '',
-    ].filter(Boolean)
+    // TASK 8 ROUND 2 (R1): the ONE pad bank (`productDetailAttrs.ts`) — was hand-written here AND in
+    // the shadow reachability pass above; now both read the same definition, so they cannot drift.
+    const factFillers = ihSpecFactFillers(sp)
     // TASK 2: same tier order as the pool loop above — a filler that merely repeats a token the
     // line ALREADY SHOWS (pool phrases / brand / the wear-fact) loses its priority-order slot to a
     // later, non-repeating filler whenever that non-repeating one alone can still reach the floor.
