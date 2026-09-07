@@ -289,6 +289,22 @@ const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b`, 'i')
 const LEAN_FEM_RE_G = new RegExp(LEAN_FEM_RE.source, 'gi')
 const LEAN_MASC_RE_G = new RegExp(LEAN_MASC_RE.source, 'gi')
 
+/** Rule (b)'s STRIP halves (fix round 1, 2026-09-06, controller ruling on B1) — built from the SAME
+ *  `LEAN_FEM_CORE`/`LEAN_MASC_CORE` the DETECTOR (`LEAN_FEM_RE`/`LEAN_MASC_RE` above) tests against,
+ *  reusing the rule (b2) idiom one rule below ("reuses the EXACT helpers the predicate gates on ...
+ *  so this can never structurally disagree"). Before this fix rule (b) detected with the widened
+ *  core but REMOVED with a hand-copied `wom[ae]n['’]?s?` / `m[ae]n['’]?s?` literal that was never
+ *  widened for the nine new adult-slang words — so `applyTitleTruthNet` left "for Guys"/"for Gals"/
+ *  "for Dudes"/"for Bros"/"for Gents" byte-identical, `verdictForAssembledTitle`'s net-idempotence
+ *  ship gate read the untouched string as CLEAN, and the PO's exact live specimen
+ *  ("…Novelty Shirts for Guys") shipped on the title path while its "for Men" twin was blocked
+ *  (task-7-review-findings.md, B1). Hoisted to module scope, never rebuilt per call — a fresh
+ *  `new RegExp` on every `scrubMoneyPhrase` invocation would just be the same bug in a new shape
+ *  (a second, independently-maintained copy that could silently stop tracking the core). Global so
+ *  `.replace()` removes every offending mention in the phrase, not just the first. */
+const LEAN_FEM_STRIP_RE = new RegExp(`\\b(?:for\\s+)?(?:${LEAN_FEM_CORE})\\b`, 'gi')
+const LEAN_MASC_STRIP_RE = new RegExp(`\\b(?:for\\s+)?(?:${LEAN_MASC_CORE})\\b`, 'gi')
+
 /** PipelineInput.audienceLean → the truth rule's view. `lean_male`/`lean_female` are SOFT
  *  re-weightings (cross-gender traffic is the point of a lean), so they are NOT unisex and never
  *  trigger the forced-gender rule. */
@@ -780,8 +796,20 @@ export function titleNetActsOn(reason: PhraseTruthReason, ctx: PhraseTruthCtx): 
   return false
 }
 
-/** The trailing audience clause every title producer can emit. */
-const AUDIENCE_TAIL_RE = /\s*[,|]?\s+for\s+(?:men|women)(?:['’]s)?\s*$/i
+/** The trailing audience clause every title producer can emit. Derived from the SAME
+ *  `LEAN_FEM_CORE`/`LEAN_MASC_CORE` the forced-gender rule's detector and (fix round 1) strip regex
+ *  use — the core already carries the `['’]?s?` apostrophe/plural forms for men/women, so this needed
+ *  no separate handling for those. Before this fix this was a hand-copied `(?:men|women)` literal
+ *  that pre-dated Task 7's lexicon widening entirely: its ONE caller (below, `applyTitleTruthNet`'s
+ *  step 1) never recognised "for Guys"/"for Gals"/"for Dudes"/"for Bros"/"for Gents" as an audience
+ *  tail at all — and, pre-existing even before Task 7, never recognised "for Ladies" either (the
+ *  "orphan set" B1 names: `ladies`/`lady` were detector-only from the day rule (c2) first shipped).
+ *  A tail this regex cannot see falls through to the coarser segment-sweep/whole-string scrub below,
+ *  which drops the WHOLE segment or (pre-fix) leaves the word untouched entirely — the length
+ *  collapse task-7-review-findings.md's B1 measured on the segmented case (47c -> 22c instead of the
+ *  `for Men` twin's 46c -> 38c, clause-only). Deriving this fixes BOTH gaps at the ONE call site that
+ *  decides tail-vs-segment granularity, at once. */
+const AUDIENCE_TAIL_RE = new RegExp(`\\s*[,|]?\\s+for\\s+(?:${LEAN_FEM_CORE}|${LEAN_MASC_CORE})\\s*$`, 'i')
 
 /**
  * WORD-LEVEL scrub for the title's MONEY PHRASE — segment 0 (brand + design + noun), and the whole
@@ -852,11 +880,14 @@ function scrubMoneyPhrase(
   }
   // (b) forced gender — TITLE + unisex only, and only when the phrase names ONE gender (never an
   // inclusive "for Men and Women", which `LEAN_FEM_RE`/`LEAN_MASC_RE` both match and so cancel out).
+  // STRIPS with `LEAN_FEM_STRIP_RE`/`LEAN_MASC_STRIP_RE` — built from the SAME core the detector
+  // just tested against (fix round 1, B1) — never a hand-copied literal that can silently stop
+  // tracking the detector's own widened word list (see the strip-regex doc above `LEAN_FEM_RE_G`).
   if (ctx.field === 'title' && ctx.audienceLean === 'unisex') {
     const fem = LEAN_FEM_RE.test(s)
     const masc = LEAN_MASC_RE.test(s)
     if (fem !== masc) {
-      const re = fem ? /\b(?:for\s+)?wom[ae]n['’]?s?\b/gi : /\b(?:for\s+)?m[ae]n['’]?s?\b/gi
+      const re = fem ? LEAN_FEM_STRIP_RE : LEAN_MASC_STRIP_RE
       s = s.replace(re, (m) => (isProtected(m) ? m : ''))
     }
   }

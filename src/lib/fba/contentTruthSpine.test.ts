@@ -29,6 +29,7 @@ import {
   type PhraseTruthCtx,
 } from './contentTruth'
 import { ihTruthVerdict } from './itemHighlightComposer'
+import { verdictForAssembledTitle, type AssembledTitleCtx } from './titleBand'
 import { leanExcludesKeyword } from '@/lib/keyword-engine/nicheGuards'
 import {
   pooledNovelFragment,
@@ -661,17 +662,80 @@ describe('Task 7: forced-gender lexicon extended with adult slang — ONE lexico
       expect(leanExcludesKeyword('tee for guys', 'male')).toBe(false)   // same-gender keyword is KEPT
       expect(leanExcludesKeyword('tee for guys', null)).toBe(false)     // soft/unisex lean: no-op, unchanged
     })
-    it('nicheGuards.ts and syncListingContent.ts import and compose the shared core — enumeration/source pin (fails if either reverts to a hand-copied literal)', () => {
-      const guards = readFileSync(join(process.cwd(), 'src', 'lib', 'keyword-engine', 'nicheGuards.ts'), 'utf8')
-      const sync = readFileSync(join(process.cwd(), 'src', 'lib', 'sync', 'syncListingContent.ts'), 'utf8')
-      for (const src of [guards, sync]) {
-        expect(src).toContain("from '@/lib/fba/contentTruth'")
-        expect(src).toContain('LEAN_FEM_CORE')
-        expect(src).toContain('LEAN_MASC_CORE')
-      }
-      // listingPipeline.ts and rankAnalysis.ts still carry their OWN independent copies of a SIMILAR
-      // but already-diverged lexicon — explicitly out of scope for Task 7 (task-7-brief.md's Code
-      // Organization names only these two consumers + the core). Documented, not silently ignored.
-    })
+    // The old "enumeration/source pin" that lived here (an `expect(src).toContain('LEAN_FEM_CORE')`
+    // identifier-anywhere check) is DELETED (fix round 1, I1): the opus reviewer proved by executed
+    // perturbation that re-drifting syncListingContent.ts's regex to a hand-copied literal, with the
+    // now-decorative import line left in place, stayed GREEN under that pin — a false assurance. It
+    // is replaced by `genderLexiconSingleSource.test.ts`'s SOURCE-SCAN ENUMERATION TEST, which reads
+    // the consumer's actual regex body (not merely whether the identifier appears somewhere in the
+    // file) and fails on a re-drift, a brand-new copy anywhere in src/lib, or an edited allowlist
+    // entry — see that file's header doc for the full mechanism. `listingPipeline.ts` and
+    // `rankAnalysis.ts` still carry their OWN independent copies of a similar, already-diverged
+    // lexicon — out of scope for Task 7 (the brief's and controller's "ONE lexicon, not four"
+    // paragraph names only `nicheGuards.ts`/`syncListingContent.ts` + the core); every one of those
+    // legacy sites is now enumerated and classified in that test's `ALLOWLIST`, not silently ignored.
+  })
+})
+
+/**
+ * FIX ROUND 1 (2026-09-06, controller ruling on the opus reviewer's B1) — the DETECTOR (`LEAN_FEM_RE`/
+ * `LEAN_MASC_RE`) was widened by Task 7; the REMOVER was not. `scrubMoneyPhrase`'s rule (b) detected
+ * "for Guys" as a forced-gender lie but stripped with a hand-copied `wom[ae]n['’]?s?`/`m[ae]n['’]?s?`
+ * literal that never learned the nine new words, and `AUDIENCE_TAIL_RE` (the ONE thing standing
+ * between a whole-segment DROP and a surgical clause-only strip) was the same story. Because
+ * `verdictForAssembledTitle`'s ship gate judges truth by NET IDEMPOTENCE (`netted !== t` -> blocked),
+ * a lie the net could not touch read as CLEAN: "…Novelty Shirts for Guys" SHIPPED, byte-identical to
+ * BASE, while its "for Men" twin was BLOCKED (task-7-review-findings.md, B1, executed evidence (a)).
+ * THE FIX derives both halves from the SAME `LEAN_FEM_CORE`/`LEAN_MASC_CORE` the detector already
+ * uses (see `LEAN_FEM_STRIP_RE`/`LEAN_MASC_STRIP_RE` and the widened `AUDIENCE_TAIL_RE`, both above)
+ * — the rule (b2) idiom one rule below, now applied to rule (b) too.
+ */
+describe('Fix round 1 (B1): the title REMOVER now derives from the SAME core the DETECTOR uses', () => {
+  const ADULT_UNISEX: PhraseTruthCtx = { ...TEE, audienceLean: 'unisex', field: 'title' }
+  const shipCtx: AssembledTitleCtx = { truth: ADULT_UNISEX, protect: '' }
+
+  it('PIN 1 — ship gate: every adult-slang audience word is BLOCKED on a unisex title exactly like "for Men"/"for Women" already were (RED at 675e8a1: "for Guys"/"for Gals"/"for Dudes"/"for Bros"/"for Gents" all SHIPPED, byte-identical to BASE — task-7-review-findings.md B1, executed evidence (a))', () => {
+    for (const w of ['Men', 'Women', 'Guys', 'Gals', 'Dudes', 'Bros', 'Gents']) {
+      const title = `THE CEO Grind Mode Novelty Shirts for ${w}`
+      expect(verdictForAssembledTitle(title, shipCtx), title).toEqual({ ok: false, reason: 'untrue-or-foreign-segment-present' })
+    }
+  })
+
+  it('PIN 2 — segmented case: the audience clause is the ONLY thing lost — "for Guys" nets to the IDENTICAL string as its "for Men" twin, never the whole-segment collapse (RED at 675e8a1: 47c "…Tee | Novelty Shirt for Guys" collapsed to 22c "…Tee" — losing "Novelty Shirt" too — while the "for Men" twin lost only its 8-char clause, 46c -> 38c)', () => {
+    const menTitle = 'THE CEO Grind Mode Tee | Novelty Shirt for Men'
+    const guysTitle = 'THE CEO Grind Mode Tee | Novelty Shirt for Guys'
+    const menNetted = applyTitleTruthNet(menTitle, ADULT_UNISEX)
+    const guysNetted = applyTitleTruthNet(guysTitle, ADULT_UNISEX)
+    const CLAUSE_ONLY_SHAPE = 'THE CEO Grind Mode Tee | Novelty Shirt'
+    expect(guysNetted).toBe(CLAUSE_ONLY_SHAPE)                 // NOT the 675e8a1 whole-segment collapse ("…Tee")
+    expect(menNetted).toBe(CLAUSE_ONLY_SHAPE)                  // same shape, modulo the audience word
+    expect(guysNetted).toBe(menNetted)
+    expect(guysNetted.length).toBe(guysTitle.length - ' for Guys'.length)   // clause-removed length, not less
+    expect(menNetted.length).toBe(menTitle.length - ' for Men'.length)
+  })
+
+  it('PIN 3 — the AUDIENCE_TAIL_RE caller (contentTruth.ts, applyTitleTruthNet step 1): "for guys"/"for gals"/"for ladies" are recognised as the TAIL (clause-only loss) the same way "for men"/"for women" already are; "for guys only" mid-segment and "germany" are NOT tails', () => {
+    // "ladies" is the PRE-EXISTING orphan this fix also closes (B1: "ladies"/"lady" were
+    // detector-only from the day rule (c2) shipped, before Task 7 ever touched the masculine side).
+    expect(applyTitleTruthNet('THE CEO Grind Mode Tee | Novelty Shirt for Ladies', ADULT_UNISEX))
+      .toBe('THE CEO Grind Mode Tee | Novelty Shirt')
+    // A non-tail: "for Guys" is followed by more content ("Only") before the string ends, so
+    // AUDIENCE_TAIL_RE's `$`-anchor cannot match it — the segment-sweep's coarser whole-segment drop
+    // fires instead (observably different: "Novelty Shirt" is lost WITH it, unlike the true-tail
+    // case above where "Novelty Shirt" survives).
+    expect(applyTitleTruthNet('THE CEO Grind Mode Tee | Novelty Shirt for Guys Only', ADULT_UNISEX))
+      .toBe('THE CEO Grind Mode Tee')
+    // "germany" is not a gender word at all — untouched, ships clean (no false positive from the
+    // widened core or the derived tail regex).
+    const germanyTitle = 'THE CEO Grind Mode Novelty Shirts for Germany'
+    expect(applyTitleTruthNet(germanyTitle, ADULT_UNISEX)).toBe(germanyTitle)
+    expect(verdictForAssembledTitle(germanyTitle, shipCtx)).toEqual({ ok: true })
+  })
+
+  it('PIN 4 — net idempotence on a TRUE title is unchanged: a lean_male title keeps "for Guys" and a lean_female title keeps "for Gals" untouched (rule (b) is unisex-only — pre-existing gating, unaffected by this fix)', () => {
+    const maleLeanTitle = 'THE CEO Grind Mode Novelty Shirt for Guys'
+    const femaleLeanTitle = 'THE CEO Grind Mode Novelty Shirt for Gals'
+    expect(applyTitleTruthNet(maleLeanTitle, { ...TEE, audienceLean: 'men', field: 'title' })).toBe(maleLeanTitle)
+    expect(applyTitleTruthNet(femaleLeanTitle, { ...TEE, audienceLean: 'women', field: 'title' })).toBe(femaleLeanTitle)
   })
 })
