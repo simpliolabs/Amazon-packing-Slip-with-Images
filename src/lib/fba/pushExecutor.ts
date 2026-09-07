@@ -3336,19 +3336,59 @@ async function negotiateParentRecordFix(
   return out
 }
 
+/** One raw PATCH op as `patchSkuMulti` (and `firstEmptyReplaceOp`) accept it: a fully-built
+ *  {op,path,value} — or a value-less {op:'delete',path} that removes the whole attribute. */
+export type PatchOp = { op: 'replace'; path: string; value: unknown } | { op: 'delete'; path: string; value?: unknown }
+
+/** THE REJOIN GUARD (BLOCKING 1, fix round 2, controller RULING on
+ *  phase-1-fix-round-2-findings.md): a refused terminal net (Item Highlights) — or any genuinely
+ *  empty resolved value — must never become an unexamined `replace` against a live, shopper-visible
+ *  Amazon field. Fix round 1 closed this at `patchSkuDetail` (the single-attribute PATCH sender)
+ *  but the BULK/raw path (`opFor`, `specializePlanValue`, the Phase-2 calibration loop — all inside
+ *  `executeBulkDetailsPush`) builds its own ops and hands them straight to `patchSkuMulti`,
+ *  unguarded — the same class of defect reached by a different branch (round 2's finding).
+ *  `patchSkuMulti` is the LAST function before the network for every raw/bulk op (~20 call sites —
+ *  see phase-1-report.md "Fix round 2" for the full trace), so the guard lives HERE — one choke
+ *  point instead of three call-site checks that could each be forgotten.
+ *  `op:'delete'` is EXEMPT: a delete's `value` is a SELECTOR naming what Amazon should remove
+ *  (the twin-heal `delOnly` path, the parent composite delete-partial-container strategy) —
+ *  stored/absent values there are load-bearing production behaviour, not an accident.
+ *  Pure + exported for unit tests. */
+export function firstEmptyReplaceOp(ops: PatchOp[]): { op: 'replace'; path: string; value: unknown } | null {
+  for (const op of ops) {
+    if (op.op !== 'replace') continue
+    const v = op.value
+    const isEmpty = Array.isArray(v)
+      ? v.length === 0
+      : typeof v === 'object' && v !== null && Object.keys(v).length === 0
+    if (isEmpty) return op
+  }
+  return null
+}
+
 /** PATCH MULTIPLE attributes on one SKU in a SINGLE submission (the bulk Auto Push efficiency
  *  core — Amazon's patchListingsItem accepts many ops per call). Each op is a fully-built
  *  {op,path,value} — or a value-less {op:'delete',path} that removes the whole attribute (heal v2
  *  delete-partial-container; the ONLY delete caller is the guardrailed healParentComposite strategy 2).
  *  Amazon validates the submission ATOMICALLY: any ERROR-severity issue →
  *  status INVALID and NOTHING applies — so the caller previews first and falls back to
- *  per-attribute pushes when a batch preview fails, preserving failure isolation. */
+ *  per-attribute pushes when a batch preview fails, preserving failure isolation.
+ *  `allowEmptyReplace` (fix round 2, ruling item 2) is an explicit opt-in for a genuinely intended
+ *  clear-via-replace — traced against every current call site (phase-1-report.md "Fix round 2"):
+ *  NONE need it today. Default is refuse. */
 async function patchSkuMulti(
   sellerId: string, token: string, productType: string, sku: string,
-  ops: ({ op: 'replace'; path: string; value: unknown } | { op: 'delete'; path: string; value?: unknown })[],
+  ops: PatchOp[],
   mode: 'VALIDATION_PREVIEW' | 'LIVE',
+  allowEmptyReplace = false,
 ): Promise<PatchResult> {
   if (ops.length === 0) return { ok: true, submissionId: null }
+  if (!allowEmptyReplace) {
+    const bad = firstEmptyReplaceOp(ops)
+    if (bad) {
+      return { ok: false, submissionId: null, error: `Nothing to patch for "${bad.path}" — the value resolved to empty (a terminal net refused it, or it was genuinely blank); never sent as an empty PATCH.` }
+    }
+  }
   await spApiWriteBucket.acquire()   // global 5-rps ceiling (task #23) — after the no-op guard
   const body = { productType, patches: ops }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''

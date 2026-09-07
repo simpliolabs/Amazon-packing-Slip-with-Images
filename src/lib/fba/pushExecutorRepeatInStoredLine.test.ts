@@ -21,6 +21,8 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { firstEmptyReplaceOp, MARKETPLACE_ID, type PatchOp } from './pushExecutor'
+import { buildDetailPatchValue, type DetailAttribute } from './productDetailAttrs'
 
 const SRC = readFileSync(join(process.cwd(), 'src/lib/fba/pushExecutor.ts'), 'utf8')
 
@@ -105,5 +107,76 @@ describe('pushExecutor.ts never forwards an empty resolved patch value to Amazon
     expect(guardIdx).toBeGreaterThan(-1)
     expect(fetchIdx).toBeGreaterThan(-1)
     expect(guardIdx).toBeLessThan(fetchIdx)
+  })
+})
+
+/**
+ * BLOCKING 1, fix round 2 (2026-09-07, controller RULING on phase-1-fix-round-2-findings.md): fix
+ * round 1 closed the choke point ONLY on the single-attribute path (`patchSkuDetail` above). The
+ * BULK/raw path — `opFor` (pushExecutor.ts:4722-4723), `specializePlanValue`, and the Phase-2
+ * calibration loop, all inside `executeBulkDetailsPush` — builds its own ops from the SAME
+ * `buildDetailPatchValue` and hands them straight to `patchSkuMulti`, which had NO emptiness check:
+ * a refused Item Highlight reaching Auto Push / bulk details still became a live `replace` with an
+ * empty value. The ruling: close it at `patchSkuMulti` (the REJOIN point every raw/bulk op funnels
+ * through — ~20 call sites, phase-1-report.md "Fix round 2" traces every one), not at the three
+ * call-site builders. `op:'delete'` is exempt (twin-heal `delOnly` + composite-delete carry
+ * stored/selector values by design, load-bearing production behaviour — memory
+ * `parent-hub-dead-tokens-cure`).
+ */
+describe('pushExecutor.ts never forwards an empty resolved patch value to Amazon via the BULK/raw path (BLOCKING 1, fix round 2)', () => {
+  it('patchSkuMulti calls firstEmptyReplaceOp and refuses (no HTTP call) BEFORE the fetch call', () => {
+    const fn = SRC.match(/async function patchSkuMulti\([\s\S]*?\r?\n\}\r?\n/)?.[0] ?? ''
+    expect(fn).not.toBe('')
+    const guardIdx = fn.search(/firstEmptyReplaceOp\(ops\)/)
+    const fetchIdx = fn.search(/await fetch\(/)
+    expect(guardIdx).toBeGreaterThan(-1)
+    expect(fetchIdx).toBeGreaterThan(-1)
+    expect(guardIdx).toBeLessThan(fetchIdx)
+  })
+
+  it('op:delete is exempt from the guard even with an empty-looking value (twin-heal delOnly / composite-delete selector shape)', () => {
+    const deleteOps: PatchOp[] = [{ op: 'delete', path: '/attributes/shirt_size', value: [] }]
+    expect(firstEmptyReplaceOp(deleteOps)).toBeNull()
+    const deleteNoValue: PatchOp[] = [{ op: 'delete', path: '/attributes/shirt_size' }]
+    expect(firstEmptyReplaceOp(deleteNoValue)).toBeNull()
+  })
+
+  it('a non-empty composite op:replace (the twin-heal shirt_size rewrite / parent-hub mirror shape — value:[item]) is NOT refused', () => {
+    const compositeOps: PatchOp[] = [{
+      op: 'replace', path: '/attributes/shirt_size',
+      value: [{ size: 'L', size_system: 'as1', size_class: 'alpha', marketplace_id: MARKETPLACE_ID }],
+    }]
+    expect(firstEmptyReplaceOp(compositeOps)).toBeNull()
+  })
+
+  it('REJOIN PROOF: a REFUSED Item Highlight value reaches neither the SINGLE-path builder nor the BULK-path builder\'s constructed op — both resolve to the SAME empty shape the guard refuses', () => {
+    // The reviewer's / round-1's exact fixture: 218-char comma-less line — every phrase nets to
+    // non-empty via the repeat cap but none fits under the 125-char length cap alone -> refusal.
+    const H11 = 'A remarkably durable garment constructed from ringspun combed fibres finished with double needle stitching throughout every seam so it survives repeated laundering while keeping its original silhouette and vivid colour'
+    expect(H11.length).toBe(218)
+    const attr: DetailAttribute = { spApiKey: 'item_highlights', scope: 'broadcast' }
+
+    // SINGLE path: patchSkuDetail's own `resolvedValue` (no valueShape/patchValue override) —
+    // guarded since fix round 1 (the describe block above).
+    const singleResolvedValue = buildDetailPatchValue(attr, H11, MARKETPLACE_ID, 'en_US')
+    expect(singleResolvedValue).toEqual([])
+
+    // BULK path: opFor's LITERAL expression (pushExecutor.ts:4722-4723) — `p.patchValue` is
+    // undefined for a FLAT field like item_highlights (patchValue is only set by the Phase-2
+    // calibration loop for COMPOSITE/valueShape fields), so it falls through to the exact same
+    // buildDetailPatchValue call the single path uses. `patchValue` is typed as a real optional
+    // (not a bare `undefined` literal) so this mirrors BulkFieldPlan's own field type instead of
+    // tripping tsc's "always nullish" check on a literal cast.
+    let patchValue: { value: unknown }[] | undefined
+    const bulkOp: PatchOp = {
+      op: 'replace', path: `/attributes/${attr.spApiKey}`,
+      value: patchValue ?? buildDetailPatchValue(attr, H11, MARKETPLACE_ID),
+    }
+    expect(bulkOp.value).toEqual([])
+
+    // Both builders produced the identical empty shape for the identical refused input — and the
+    // REJOIN guard (patchSkuMulti's firstEmptyReplaceOp) catches the bulk-path op, closing the gap
+    // fix round 1 left open.
+    expect(firstEmptyReplaceOp([bulkOp])).toBe(bulkOp)
   })
 })
