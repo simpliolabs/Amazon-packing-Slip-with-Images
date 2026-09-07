@@ -648,3 +648,87 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     expect(out).not.toContain('100% Cotton')
   })
 })
+
+/* ─── FIX WAVE 2 (I-1, 2026-09-06 final whole-branch review #2, controller RULING) ────────────────
+ *
+ * `shadowRepeatReachesFloor` answers "could a repeat-permitting selection reach the 107-char floor?"
+ * so the composer can tell the PO the TRUE cause (`under-floor-no-repeat`) instead of a generic
+ * "pool too thin" reason. Before this fix its own greedy walk ignored TWO caps the real selection
+ * loop enforces on every candidate: Amazon's <=2-per-word cap (`ihRepeatViolations`) and the 7-pick
+ * cap — so it could report a repeat-permitting selection "reachable" using a combination the real
+ * loop, even with repeats allowed, could never actually produce. Reviewer-executed reproduction
+ * (final-review-2-findings.md I-1): the `summer` pool below reports `under-floor-no-repeat` at HEAD
+ * bea1f24 even though MAIN's own Tier-B pass proves the true ceiling is 52 chars (picked 2, phrase
+ * 3 would be a THIRD mention of `summer` — the <=2 cap, not a thin pool, is what blocks it).
+ *
+ * THE FIX: `admitCandidate` (below `classifyTier`) is the real loop's own per-candidate ADMISSION
+ * decision — tier (repeat rule, `allowRepeat`-gated), the named pick cap, the budget fit, Amazon's
+ * <=2 cap, and the brand-once rule — extracted so the live pool loop and the shadow call the SAME
+ * function; the shadow inherits every one of those rules by construction instead of re-modeling a
+ * subset of them. Garment-surface-variety ordering stays OUT of admission on purpose (Ruling, same
+ * finding): it decides which Tier-A candidate goes first among equals, never whether 107 chars is
+ * reachable at all, so omitting it from the shared function cannot itself cause a mis-attribution. */
+describe('FIX WAVE 2 (I-1): the shadow reachability pass enforces the <=2 word cap AND the pick cap, exactly like the live selection', () => {
+  it("the reviewer's `summer` pool: HEAD mis-reported under-floor-no-repeat even though the <=2-per-word cap caps any repeat-permitting selection at 52 chars (picked 2) — must report the pre-existing reason (too-few-picked), not under-floor-no-repeat", () => {
+    const pool = [
+      { keyword: 'summer beach vibes only', searchVolume: 900, themeFit: 3 },
+      { keyword: 'summer mountain trail escape', searchVolume: 850, themeFit: 3 },
+      { keyword: 'summer desert canyon roadtrip', searchVolume: 800, themeFit: 3 },
+      { keyword: 'summer winter holiday festival', searchVolume: 750, themeFit: 3 },
+    ]
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.line).toBeNull()
+    expect(res.stage).toBe('too-few-picked')
+    const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(logged.repeatBlocked).toBe(false)
+    logSpy.mockRestore()
+  })
+
+  it('a pool where the 7-pick cap (not the <=2 cap, not the char budget) is what blocks the only repeat-permitting route to 107: 4 word-disjoint pairs (each shared word appears exactly twice, legal under the <=2 cap) reach 122 chars using all 8 phrases, but the real loop never admits an 8th pick — the true ceiling under the pick cap is 7 phrases / 106 chars, one char short of the floor', () => {
+    const pool = [
+      { keyword: 'quiet fox aim', searchVolume: 800, themeFit: 3 },
+      { keyword: 'quiet fox run', searchVolume: 790, themeFit: 3 },
+      { keyword: 'amber owl dip', searchVolume: 780, themeFit: 3 },
+      { keyword: 'amber owl jog', searchVolume: 770, themeFit: 3 },
+      { keyword: 'coral wolf hop', searchVolume: 760, themeFit: 3 },
+      { keyword: 'coral wolf nap', searchVolume: 750, themeFit: 3 },
+      { keyword: 'olive lynx zip', searchVolume: 740, themeFit: 3 },
+      { keyword: 'olive lynx tap', searchVolume: 730, themeFit: 3 },
+    ]
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.line).toBeNull()
+    // Real Tier-A-only selection picks exactly one phrase per pair (4 total, ~60 chars) — passes the
+    // MIN_CANDIDATES(3) gate, so this fails at the FLOOR check, not the too-few-picked gate.
+    expect(res.stage).toBe('under-floor-after-pad')
+    const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(logged.picked).toBe(4)
+    expect(logged.lineLen).toBe(60)
+    expect(logged.repeatBlocked).toBe(false)
+    logSpy.mockRestore()
+  })
+
+  it('control: the Task 6 repro pool still reports under-floor-no-repeat (a repeat-permitting selection genuinely reaches 122 chars there, well within both the <=2 cap and the 7-pick cap)', () => {
+    const pool = [
+      { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },
+      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },
+      { keyword: 'sleeve detail graphic', searchVolume: 550, themeFit: 2 },
+    ]
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.stage).toBe('under-floor-no-repeat')
+  })
+
+  it('control: the fix-round-1 4-phrase pool still reports the pre-existing reason (too-few-picked) — the best any repeat-permitting selection can ever reach there is 53 chars', () => {
+    const pool = [
+      { keyword: 'retro sunset vibes', searchVolume: 500, themeFit: 3 },
+      { keyword: 'coastal palm energy', searchVolume: 450, themeFit: 3 },
+      { keyword: 'retro palm', searchVolume: 400, themeFit: 3 },
+      { keyword: 'retro cactus', searchVolume: 350, themeFit: 3 },
+    ]
+    const res = composeItemHighlightDetailed(pool, [], {})
+    expect(res.stage).toBe('too-few-picked')
+  })
+})

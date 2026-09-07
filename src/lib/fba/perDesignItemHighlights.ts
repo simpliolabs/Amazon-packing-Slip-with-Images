@@ -55,10 +55,19 @@ export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
   // FIX ROUND 1 (#1, 2026-09-06): the ORIGINAL wiring named this stage the moment a Tier-B candidate
   // merely fit the remaining character budget — not when a repeat would truly have crossed the floor
   // (reproduced: a 4-phrase pool whose best repeat-permitting reach was 53 chars, far under 107,
-  // still got this exact message). `itemHighlightComposer.ts`'s `shadowRepeatReachesFloor` now gates
-  // this stage on a cheap deterministic check that a repeat-permitting selection actually reaches
-  // `CONTENT_CONTRACT.itemHighlights.min` before this reason (and this message) can be returned — so
-  // the claim below is now guaranteed true, not merely usually true.
+  // still got this exact message). `itemHighlightComposer.ts`'s `shadowRepeatReachesFloor` gates this
+  // stage on a deterministic check that a repeat-permitting selection actually reaches
+  // `CONTENT_CONTRACT.itemHighlights.min` before this reason (and this message) can be returned.
+  // FIX WAVE 2 (I-1, 2026-09-06 final whole-branch review #2): that shadow check was still an
+  // APPROXIMATION — it ignored Amazon's own ≤2-per-word cap and the composer's 7-pick cap, so it
+  // could answer "reachable" using a repeat-permitting combination the real selection loop, even
+  // with repeats allowed, could never actually admit (reproduced: the `summer` pool and the 8-phrase
+  // pick-cap pool in itemHighlightComposer.test.ts). The shadow now calls `admitCandidate` — the
+  // real loop's OWN per-candidate admission gate (tier, pick cap, budget, ≤2 cap, brand-once), with
+  // `allowRepeat: true` — so it inherits every one of those rules BY CONSTRUCTION, not as a second,
+  // separately-maintained model of them. The claim below is now guaranteed true (the one thing still
+  // not modeled, garment-surface-variety ordering, only ever affects WHICH phrases compose, never
+  // whether the floor is reachable at all — see the comment on `admitCandidate`).
   'under-floor-no-repeat': `Held: truthful phrases + blank facts reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor only by repeating a significant word, which is never allowed (PO ruling 2026-09-06) — rate/harvest more keywords for this family`,
 }
 
