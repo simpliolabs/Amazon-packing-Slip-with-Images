@@ -272,3 +272,39 @@ pins above; title-path pins above; lexicon-parity enumeration test (or the share
 
 **Verify:** as Task 6; plus the title-path suites (`titleBand`, `truthBandGate`, `titleMoneyTail`,
 `lockedTitleTruth`) and `syncListingContent`/`nicheGuards` tests.
+
+
+## Task 8: the garment head noun may repeat up to Amazon's cap — ONE budget, both surfaces of the rule
+
+**PO RULING 2026-09-07**, verbatim: *"A: 2 - Sweatshirt/ crewneck/, Tee Shirt/t-Shirt/tshirt/Shirt"* — answering the
+Task 6 fork (absolute / exempt garment head nouns up to 2 / repeat instead of hold). Option 2. Under the absolute
+rule every truthful line long enough to reach 107 on the live sweatshirt pool needs the garment noun twice, so all
+six B0DSCDZC6K designs HELD; the PO exempts the garment head noun alone.
+
+**The rule:** each folded significant token has a REPEAT BUDGET: `IH_MAX_WORD_REPEATS` (2, Amazon's cap) if it is a
+garment head noun, else 1. The garment set is DERIVED — `GARMENT_HEAD_WORDS` (`garmentNoun.ts`, a leaf; already
+holds shirt/t-shirt/tshirt/tee/sweatshirt/crewneck/pullover/hoodie…) mapped through `ihFoldWord` — never a second
+list. A candidate that would push any token over its budget is rejected; the pad exemption (`usedBeforePad`) and the
+"must add ≥1 new token" rule are unchanged; a garment noun a THIRD time is still rejected (Amazon's cap, already
+enforced by `ihRepeatViolations`).
+
+**ONE budget, every consumer:** `ihRepeatBudget(folded)` lives in `productDetailAttrs.ts` beside `ihFoldWord`,
+`IH_MAX_WORD_REPEATS`, `ihRepeatViolations`, `lineHasSignificantRepeat`, `classifyStoredIhLine`. Consumers: the
+composer's `classifyTier`/`admitCandidate` (and therefore the shadow reachability pass, by construction), and
+`lineHasSignificantRepeat` (and therefore the push seam's refusal and the card's pre-flight reason). No consumer may
+re-derive "repeat" from a bare Set — the loop state becomes a count map. `capItemHighlightRepeats` drops its local
+copy of the fold and calls `ihFoldWord` (same class of hand-copy; byte-identical).
+
+**Hold message:** `under-floor-no-repeat` now says the floor is reachable only by repeating a word beyond its
+allowance (garment noun twice; every other word once).
+
+**Tests (RED first):** acceptance seam pool → all six designs COMPOSE, `tee` ≤2 per line, every other significant
+token once, and the bytes equal the #673-era lines recorded in `final-review-2-findings.md` §0(a) (report any
+difference); Task 6 repro pool → whatever composes carries no non-garment token twice (`women`, `sleeve`); a pool
+where only a THIRD garment mention would reach the floor → HOLD (Amazon's cap); stored lines: `tee`×2 → `ok`,
+`tee`×3 → `repeat-in-stored-line`, `women`×2 → `repeat-in-stored-line`, the LIVE stored line (`Crewneck Sweatshirts
+Women, Fall Sweatshirts for Women, Graphic Crewneck, …`) → `repeat-in-stored-line` (women twice); the shadow-reason
+pins (`summer` pool) unchanged; every one of the PO's six forms folds INTO the derived set (enumeration over the
+verbatim ruling); the realistic T5-g fixture re-run and its dated consequence note updated to the truth.
+
+**Verify:** `npx tsc --noEmit` → 0; whole repo `npx vitest run` green except the 4 pre-existing expected-fails.

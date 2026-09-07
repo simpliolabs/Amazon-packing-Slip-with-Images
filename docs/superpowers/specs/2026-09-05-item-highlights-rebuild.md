@@ -43,7 +43,7 @@ field Google reads.
 | Weighting | keyword-led, per the PO's 70% ruling |
 | Truth | every claim provable from `blank_specs` or the design; **no fit/fabric claim the blank does not state** |
 | Audience | no gendered term a design's audience does not support (same rule titles now use) |
-| No repeats | no significant word twice — `Women, … Women` is a FAIL (stricter than Amazon's cap of 2) |
+| No repeats | no significant word twice — `Women, … Women` is a FAIL (stricter than Amazon's cap of 2). **PO RULING 2026-09-07, verbatim "A: 2 - Sweatshirt/ crewneck/, Tee Shirt/t-Shirt/tshirt/Shirt": the GARMENT HEAD NOUN is the ONE exception — it may appear up to Amazon's cap of 2; every other significant word stays at once.** The exempt set is the canonical `GARMENT_HEAD_WORDS` (`garmentNoun.ts`), folded by the Item-Highlight fold — never a second list. A design that cannot reach the floor within these budgets still HOLDS. |
 | Length | <=125; existing "MIN 85% of MAX 125" PO ruling stands |
 | Per-design | **PO RULING 2026-09-05: PER-DESIGN, not one shared line** |
 

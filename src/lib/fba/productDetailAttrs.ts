@@ -22,6 +22,7 @@
 import type { PatchValueEntry } from '@/lib/fba/pushFields'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { GARMENT_HEAD_WORDS } from '@/lib/fba/garmentNoun'
 
 /**
  * LLM/schema-sourced detail values are NOT guaranteed to be strings: the audit model can
@@ -424,6 +425,112 @@ export const ihFoldWord = (w: string): string => {
   return b.replace(/s$/, '')
 }
 
+/* ── TASK 8 (2026-09-07, PO RULING verbatim "A: 2 - Sweatshirt/ crewneck/, Tee Shirt/t-Shirt/
+ * tshirt/Shirt", option 2 of the Task 6 fork): the absolute no-repeat rule (below) made every
+ * truthful sweatshirt/tee family HOLD, because the product's own garment noun must appear twice to
+ * reach the 107-char floor once the pool's phrases are all-brand-name/category copy. The PO exempts
+ * the GARMENT HEAD NOUN alone, up to Amazon's own cap — every other significant word stays at 1.
+ * The exempt set is DERIVED from `GARMENT_HEAD_WORDS` (`garmentNoun.ts`, a leaf, zero imports —
+ * confirmed no cycle) folded through `ihFoldWord`, never a second hand-maintained list: adding a
+ * noun to the canonical set extends this budget automatically (see the derivation test in
+ * `itemHighlightOneRule.test.ts`). `ihRepeatBudget` is the ONE function every consumer of "is this a
+ * repeat" reads — the composer's `classifyTier`/`admitCandidate` (and therefore the shadow
+ * reachability pass, by construction) and `lineHasSignificantRepeat`/`classifyStoredIhLine` (and
+ * therefore the push seam's refusal and the card's pre-flight reason). Never write the literal `2`
+ * anywhere else — `IH_MAX_WORD_REPEATS` above is the one constant. */
+export const IH_GARMENT_HEAD_FOLDED: ReadonlySet<string> = new Set([...GARMENT_HEAD_WORDS].map(ihFoldWord))
+
+/* ── TASK 8 ROUND 2 (2026-09-07, controller RULING, task-8-round-2-findings.md, R1) ─────────────
+ * FIX ROUND 1 closed the Blocking finding (the pad's `${spec.fit} Fit` / `Unisex Fit` boilerplate
+ * collision) with a hand-written `IH_BOILERPLATE_BUDGET_2 = new Set(['fit'])` — a REMEMBERED fact
+ * about the pad-bank templates ("fit happens to be the only word two templates append today"),
+ * not something derived from the templates themselves. And the pad bank that fact was about existed
+ * TWICE in `itemHighlightComposer.ts` (the shadow reachability pass, `:313-314` at HEAD 1d24425, and
+ * the live pad loop, `:511-514`) — the I-1 class again, on the pad side.
+ *
+ * `IhPadSpec` is a LOCAL structural type (not a value import of `blankSpecs.ts` — this module's
+ * value imports stay `contentContract` + `garmentNoun` only, per the brief's F1 leaf pin); any
+ * `Pick<BlankSpec, 'material'|'fit'|'unisex'|'neck'|'sleeve'|'dye'>`-shaped object satisfies it
+ * structurally, so the composer can pass its own `opts.spec` (a superset) with no cast. */
+export interface IhPadSpec {
+  material?: string | null
+  fit?: string | null
+  unisex?: boolean | null
+  neck?: string | null
+  sleeve?: string | null
+  dye?: string | null
+}
+
+/** The boilerplate SUFFIX words the pad templates append — named ONCE so a template is built FROM
+ *  the constant instead of a repeated literal, and so the budget derivation (below) can fold on it. */
+export const IH_PAD_SUFFIX_FIT = 'Fit'
+export const IH_PAD_SUFFIX_FABRIC = 'Fabric'
+
+/** One pad-bank template: a fact slot the composer's pad loop may fill from `IhPadSpec`, and — if
+ *  the filler appends a fixed boilerplate word to the spec value — which suffix that is. `suffix:
+ *  null` means the filler is the raw spec value with nothing appended (material/neck/sleeve today).
+ *  `suffix` is what the budget derivation below folds on; it is independent of exactly how `build`
+ *  spells the filler, so a template's wording can change without touching the derivation. */
+interface IhPadFillerDescriptor {
+  readonly key: string
+  readonly suffix: string | null
+  readonly build: (spec: IhPadSpec) => string
+}
+
+/** THE pad bank — the ONE template list, moved verbatim from the composer (same order, same
+ *  conditions: `material`, `${fit} Fit`, `Unisex Fit` when `unisex === true`, `neck`, `sleeve`,
+ *  `${dye} Fabric`). Both the composer's live pad loop and its shadow reachability pass build their
+ *  filler candidates from `ihSpecFactFillers` below instead of hand-writing this array a second
+ *  time — the day one drifts from the other is now structurally impossible because there is only
+ *  one array. */
+// Exported so a test can reference the SAME list the production derivation and both composer call
+// sites read (perturbing a COPY of it, never this one) — never a second hand-typed template list.
+// TASK 8 ROUND 3: every descriptor that declares a `suffix` must BUILD it from the same constant
+// (never a literal that merely happens to spell the same word today) — the self-consistency pin in
+// itemHighlightOneRule.test.ts enforces this so `deriveIhBoilerplateBudget` (reads `suffix`) can
+// never silently diverge from the bytes `build` actually appends.
+export const IH_PAD_FILLER_DESCRIPTORS: readonly IhPadFillerDescriptor[] = [
+  { key: 'material', suffix: null, build: (sp) => sp.material || '' },
+  { key: 'fit', suffix: IH_PAD_SUFFIX_FIT, build: (sp) => (sp.fit ? `${sp.fit} ${IH_PAD_SUFFIX_FIT}` : '') },
+  { key: 'unisex', suffix: IH_PAD_SUFFIX_FIT, build: (sp) => (sp.unisex === true ? `Unisex ${IH_PAD_SUFFIX_FIT}` : '') },
+  { key: 'neck', suffix: null, build: (sp) => sp.neck || '' },
+  { key: 'sleeve', suffix: null, build: (sp) => sp.sleeve || '' },
+  { key: 'dye', suffix: IH_PAD_SUFFIX_FABRIC, build: (sp) => (sp.dye ? `${sp.dye} ${IH_PAD_SUFFIX_FABRIC}` : '') },
+]
+
+/** The ONE pad bank. Returns the true, non-empty filler phrases for `spec`, in priority order,
+ *  exactly as `composeItemHighlightDetailed`'s live pad loop and its shadow reachability pass used
+ *  to each hand-write independently. `titleCasePhrase` remains the CALLER's responsibility (as it
+ *  was before) — this function returns raw fact strings, not display-cased ones, so byte-identity
+ *  with the pre-round-2 output holds exactly. */
+export function ihSpecFactFillers(spec: IhPadSpec | null | undefined): string[] {
+  if (!spec) return []
+  return IH_PAD_FILLER_DESCRIPTORS.map((d) => d.build(spec)).filter(Boolean)
+}
+
+/** COMPUTED, not remembered: fold every template's appended suffix word (skipping templates with no
+ *  suffix) and keep any suffix appended by >= 2 templates — two independent spec facts that happen
+ *  to share only that one boilerplate word are not a real customer-visible repeat (PO 2026-08-06
+ *  unisex ruling; fix round 1's Blocking finding). A suffix appended by exactly one template (today:
+ *  "fabric", from `dye` alone) stays at the default budget of 1. Exported so a test can perturb a
+ *  COPY of the descriptor list and prove this derives — the day a template appends a THIRD shared
+ *  suffix, or a new suffix starts being shared, this recomputes automatically; a hand-written Set
+ *  could not have. */
+export function deriveIhBoilerplateBudget(descriptors: readonly Pick<IhPadFillerDescriptor, 'suffix'>[]): ReadonlySet<string> {
+  const counts = new Map<string, number>()
+  for (const d of descriptors) {
+    if (!d.suffix) continue
+    const folded = ihFoldWord(d.suffix)
+    counts.set(folded, (counts.get(folded) ?? 0) + 1)
+  }
+  return new Set([...counts.entries()].filter(([, c]) => c >= 2).map(([w]) => w))
+}
+
+const IH_BOILERPLATE_BUDGET_2: ReadonlySet<string> = deriveIhBoilerplateBudget(IH_PAD_FILLER_DESCRIPTORS)
+export function ihRepeatBudget(folded: string): number {
+  return IH_GARMENT_HEAD_FOLDED.has(folded) || IH_BOILERPLATE_BUDGET_2.has(folded) ? IH_MAX_WORD_REPEATS : 1
+}
+
 /** Words that never count toward the repeat cap. Union of both historical sets — see the block
  *  comment above for why union rather than a pick. */
 export const IH_INSIGNIFICANT: ReadonlySet<string> = new Set([
@@ -475,10 +582,13 @@ export const significantFolded = (phrase: string): string[] =>
  *  so a caller holding only the STORED line (no `usedFolded` set — the push seam, a stale per-child
  *  entry) can still ask the same question the composer's own selection loop asks incrementally. */
 export const lineHasSignificantRepeat = (line: string): boolean => {
-  const seen = new Set<string>()
+  // TASK 8 (2026-09-07): counts, not a seen-Set — the garment head noun's budget is 2, so only a
+  // count PAST that budget (`ihRepeatBudget`) is a repeat; every other word's budget is still 1.
+  const counts = new Map<string, number>()
   for (const w of significantFolded(line)) {
-    if (seen.has(w)) return true
-    seen.add(w)
+    const c = (counts.get(w) ?? 0) + 1
+    counts.set(w, c)
+    if (c > ihRepeatBudget(w)) return true
   }
   return false
 }
@@ -500,21 +610,23 @@ export function classifyStoredIhLine(value: string | null | undefined): IhLineCl
 }
 
 export function capItemHighlightRepeats(value: string): string {
-  const fold = (w: string): string => {
-    let b = w.toLowerCase().replace(/[^a-z0-9]/g, '')
-    if (b === 'tshirt' || b === 'tshirts') b = 'shirt'
-    return b.replace(/s$/, '')
-  }
+  // TASK 8 (2026-09-07): the local hand-copy of the fold is gone — this is the SAME hand-copy class
+  // this function's own docstring history already names; `ihFoldWord` is byte-identical (proven on
+  // this function's own pre-existing tests). The cap below is Amazon's own cap
+  // (`IH_MAX_WORD_REPEATS`), unchanged and unrelated to the garment exemption — this is the terminal
+  // push-boundary net, not the composer's stricter budget.
+  // TASK 8 ROUND 2 (R1, reviewer Minor M1): the literal `2` is gone — `IH_MAX_WORD_REPEATS` above is
+  // the one constant, never written as a bare number anywhere else in this file.
   const counts = new Map<string, number>()
   const kept: string[] = []
   for (const phrase of value.split(',').map((p) => p.trim()).filter(Boolean)) {
     const local = new Map<string, number>()
-    for (const w of phrase.split(/[\s/-]+/).map(fold)) {
+    for (const w of phrase.split(/[\s/-]+/).map(ihFoldWord)) {
       if (w.length <= 1 || IH_TRIVIAL.has(w)) continue
       local.set(w, (local.get(w) ?? 0) + 1)
     }
     let ok = true
-    for (const [w, c] of local) if ((counts.get(w) ?? 0) + c > 2) { ok = false; break }
+    for (const [w, c] of local) if ((counts.get(w) ?? 0) + c > IH_MAX_WORD_REPEATS) { ok = false; break }
     if (!ok) continue
     for (const [w, c] of local) counts.set(w, (counts.get(w) ?? 0) + c)
     kept.push(phrase)

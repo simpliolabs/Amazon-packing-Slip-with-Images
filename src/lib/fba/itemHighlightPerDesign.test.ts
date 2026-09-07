@@ -60,7 +60,7 @@ vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { c
 
 import { buildItemHighlights, buildItemHighlightsPerDesign, IH_HOLD_MESSAGES } from './listingPipeline'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
-import { ihFoldWord, IH_INSIGNIFICANT } from './productDetailAttrs'
+import { ihFoldWord, IH_INSIGNIFICANT, classifyStoredIhLine } from './productDetailAttrs'
 import { applyStickyDetails } from './stickyDetails'
 import { collapseSharedIhRows, perDesignIhRows } from './perDesignItemHighlights'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
@@ -133,8 +133,13 @@ const holdFor = (r: ReturnType<typeof build>, key: string) => r.perDesign.find((
  *  round 2, F1; was `itemHighlightComposer.ts`) — so this proves the wire's output obeys the PO's
  *  ruling, not merely the production fold's own bookkeeping (`test-proves-the-mock-not-the-wire`).
  *  Mirrors the same fold RULES (`ihFoldWord` + the same gender-plural collapse) using only the
- *  exported primitives. */
+ *  exported primitives.
+ *  TASK 8 (2026-09-07): the budget itself is now an INDEPENDENT hand-written rule too — a literal
+ *  garment list IN THE TEST (not `IH_GARMENT_HEAD_FOLDED`), so this test does not validate the
+ *  production predicate with itself. */
 const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
+const TEST_GARMENT_WORDS = new Set(['sweatshirt', 'crewneck', 'tee', 'shirt', 'hoodie', 'pullover'])
+const testBudget = (w: string): number => (TEST_GARMENT_WORDS.has(w) ? 2 : 1)
 const dupedFoldedTokens = (line: string): string[] => {
   const counts = new Map<string, number>()
   for (const raw of line.toLowerCase().split(/[\s,]+/).filter(Boolean)) {
@@ -143,7 +148,7 @@ const dupedFoldedTokens = (line: string): string[] => {
     if (!w || IH_INSIGNIFICANT.has(w)) continue
     counts.set(w, (counts.get(w) ?? 0) + 1)
   }
-  return [...counts.entries()].filter(([, c]) => c > 1).map(([w]) => w)
+  return [...counts.entries()].filter(([w, c]) => c > testBudget(w)).map(([w]) => w)
 }
 
 describe('each design composes its OWN line (PO 2026-09-06, refining the shared-line ruling)', () => {
@@ -226,6 +231,17 @@ describe('each design composes its OWN line (PO 2026-09-06, refining the shared-
     expect(rows).toHaveLength(KEYS.length)
     const collapsed = collapseSharedIhRows(rows)
     expect(collapsed.length).toBe(KEYS.length)   // nothing to fold — every line is distinct
+  })
+
+  it('TASK 8 ROUND 2 (R1): composer/seam agreement PROPERTY on this file\'s own realistic six-design fixture — every composed design line classifies "ok" at the push seam\'s classifier', () => {
+    let composedCount = 0
+    for (const k of KEYS) {
+      const line = lineFor(r, k)
+      if (!line) continue
+      composedCount++
+      expect(classifyStoredIhLine(line), `${k}: "${line}"`).toBe('ok')
+    }
+    expect(composedCount).toBe(KEYS.length)   // this fixture composes for all six — never a vacuous check
   })
 })
 
@@ -573,5 +589,12 @@ describe('T5-g: the realistic six-design fixture — TASK 6+7 CONSEQUENCE: now H
       expect(d.hold).toBe('thin-candidates')
       expect(d.value).toBe('')
     }
+    // TASK 8 ROUND 2 (R1) NOTE: this is the fixture named "the realistic fixture" in the round-2
+    // findings' composer/seam-agreement property. It composes ZERO lines (all six HOLD, as asserted
+    // above) — unchanged since Task 7 (see this file's own header) — so it contributes nothing to
+    // that property here BY CONSTRUCTION, not because the property was skipped for it. The property
+    // is checked non-vacuously against this file's OTHER realistic fixture (Task 1's own six-design
+    // POOL/GILDAN family, which DOES compose) in the "each design composes its OWN line" describe
+    // block above, and against the acceptance seam + Blocking fixtures in the sibling test files.
   })
 })

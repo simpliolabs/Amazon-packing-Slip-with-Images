@@ -33,7 +33,7 @@
  */
 import { CONTENT_CONTRACT } from './contentContract'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
-import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations, GENDER_FOLDS, significantFolded, lineHasSignificantRepeat } from './productDetailAttrs'
+import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations, GENDER_FOLDS, significantFolded, ihRepeatBudget, ihSpecFactFillers } from './productDetailAttrs'
 import { scrubTrademarks } from './trademarkGuard'
 import { type BlankSpec } from './blankSpecs'
 import {
@@ -162,18 +162,33 @@ export const titleCasePhrase = (p: string): string =>
  *  the true cause is the absolute rule, not a starved pool. `classifyTier` plays no part in selection
  *  any more; it is read-only, for that one detection.
  *
- *  Tier A = every significant token is new (zero overlap with `usedFolded`). Tier B = adds at least
- *  one new token but repeats at least one used token (NEVER composes since Task 6). `null` = adds
- *  nothing new — never composes, same as before Task 2.
+ *  Tier A = every significant token is within its BUDGET (zero tokens over `ihRepeatBudget`). Tier
+ *  B = adds at least one new token but pushes at least one token over its budget (NEVER composes
+ *  since Task 6, except through the shadow's `allowRepeat`). `null` = adds nothing new — never
+ *  composes, same as before Task 2.
+ *
+ *  TASK 8 (2026-09-07, PO RULING "A: 2 - Sweatshirt/…"): `usedFolded` is now a COUNT MAP, not a
+ *  Set — the garment head noun's budget is 2 (`ihRepeatBudget`), so a SECOND mention is legal
+ *  (still Tier A), a THIRD is not (Tier B, same as Amazon's own cap already enforces at
+ *  `ihRepeatViolations`). Occurrences of the SAME token WITHIN one candidate phrase count too
+ *  ("Sweatshirt Sweatshirt" is one phrase with two mentions) — `seenInPhrase` below tracks that
+ *  without touching the caller's running `usedFolded`.
  *
  *  Shared by BOTH selection loops (pool phrases below, spec-fact pad further down) so the tier rule
  *  lives in exactly one place — the two loops rank different candidate shapes but must never fork
- *  the definition of "new" vs "repeat". */
+ *  the definition of "new" vs "over budget". */
 type CandidateTier = 'A' | 'B' | null
-const classifyTier = (folded: readonly string[], usedFolded: ReadonlySet<string>): CandidateTier => {
-  const addsNew = folded.some((w) => !usedFolded.has(w))
+const classifyTier = (folded: readonly string[], usedFolded: ReadonlyMap<string, number>): CandidateTier => {
+  const addsNew = folded.some((w) => (usedFolded.get(w) ?? 0) === 0)
   if (!addsNew) return null
-  return folded.some((w) => usedFolded.has(w)) ? 'B' : 'A'
+  const seenInPhrase = new Map<string, number>()
+  for (const w of folded) {
+    const before = usedFolded.get(w) ?? 0
+    const inPhraseSoFar = seenInPhrase.get(w) ?? 0
+    seenInPhrase.set(w, inPhraseSoFar + 1)
+    if (before + inPhraseSoFar + 1 > ihRepeatBudget(w)) return 'B'
+  }
+  return 'A'
 }
 
 /** FIX WAVE 2 (I-1, 2026-09-06, controller RULING on the final whole-branch review #2): the real
@@ -199,7 +214,7 @@ const classifyTier = (folded: readonly string[], usedFolded: ReadonlySet<string>
 function admitCandidate(
   phrase: string,
   folded: readonly string[],
-  tierBasis: ReadonlySet<string>,
+  tierBasis: ReadonlyMap<string, number>,
   allowRepeat: boolean,
   picked: readonly string[],
   len: number,
@@ -273,7 +288,7 @@ export interface ComposerResult {
 function shadowRepeatReachesFloor(
   candidates: readonly ComposerPoolRow[],
   basePicked: readonly string[],
-  baseUsedFolded: ReadonlySet<string>,
+  baseUsedFolded: ReadonlyMap<string, number>,
   spec: ComposerOpts['spec'],
   min: number,
   max: number,
@@ -281,24 +296,23 @@ function shadowRepeatReachesFloor(
   brandPick: string | null,
 ): boolean {
   const picked = [...basePicked]
-  const used = new Set(baseUsedFolded)
+  const used = new Map(baseUsedFolded)
   let len = picked.reduce((n, p, i) => n + p.length + (i ? 2 : 0), 0)
   const tryAdd = (phrase: string, folded: readonly string[]) => {
     if (len >= min) return
     if (!admitCandidate(phrase, folded, used, true, picked, len, max, picked, brandRe, brandPick)) return
     len += (picked.length ? 2 : 0) + phrase.length
     picked.push(phrase)
-    folded.forEach((w) => used.add(w))
+    folded.forEach((w) => used.set(w, (used.get(w) ?? 0) + 1))
   }
   for (const c of candidates) {
     if (len >= min) break
     const phrase = titleCasePhrase(c.keyword)
     if (!basePicked.includes(phrase)) tryAdd(phrase, significantFolded(c.keyword))
   }
-  const factFillers = spec ? [
-    spec.material || '', spec.fit ? `${spec.fit} Fit` : '', spec.unisex === true ? 'Unisex Fit' : '',
-    spec.neck || '', spec.sleeve || '', spec.dye ? `${spec.dye} Fabric` : '',
-  ].filter(Boolean) : []
+  // TASK 8 ROUND 2 (R1): the ONE pad bank (`productDetailAttrs.ts`) — was hand-written here a second
+  // time, independently of the live loop's own copy below; now both read the same definition.
+  const factFillers = ihSpecFactFillers(spec)
   for (const f of factFillers) tryAdd(titleCasePhrase(f), significantFolded(f))
   return len >= min
 }
@@ -412,13 +426,17 @@ export function composeItemHighlightDetailed(
   const AIM = CONTENT_CONTRACT.itemHighlights.fillTarget - RESERVE
 
   const picked: string[] = []
-  const usedFolded = new Set<string>()
+  // TASK 8 (2026-09-07): a COUNT map, not a Set — the garment head noun's budget is 2
+  // (`ihRepeatBudget`), so `classifyTier` needs how MANY times a token is already used, not merely
+  // whether it is used at all.
+  const usedFolded = new Map<string, number>()
+  const bumpUsed = (w: string): void => { usedFolded.set(w, (usedFolded.get(w) ?? 0) + 1) }
   const usedGarmentSurfaces = new Set<string>()
   const lineLen = () => picked.reduce((n, p, i) => n + p.length + (i ? 2 : 0), 0)
   /** The phrases a repeat/novelty check must see — the reserved brand phrase is already "in". */
   const withBrand = (arr: string[]): string[] => (brandPick ? [...arr, brandPick] : arr)
   if (brandPick) {
-    significantFolded(brandPick).forEach((w) => usedFolded.add(w))
+    significantFolded(brandPick).forEach(bumpUsed)
     const gm = brandPick.match(GARMENT_SURFACE_RE)?.[0]?.toLowerCase().replace(/[-\s]/g, '').replace(/s$/, '')
     if (gm) usedGarmentSurfaces.add(gm)
   }
@@ -448,7 +466,7 @@ export function composeItemHighlightDetailed(
       // false` here so only tier 'A' is ever admitted (the absolute rule, unchanged in effect).
       if (!admitCandidate(phrase, folded, usedFolded, false, picked, lineLen(), MAX, withBrand(picked), brandRe, brandPick)) continue
       picked.push(phrase)
-      folded.forEach((w) => usedFolded.add(w))
+      folded.forEach(bumpUsed)
       if (gm) usedGarmentSurfaces.add(gm)
     }
   }
@@ -489,14 +507,9 @@ export function composeItemHighlightDetailed(
   const MIN = CONTENT_CONTRACT.itemHighlights.min
   if (lineLen() < MIN && opts?.spec) {
     const sp = opts.spec
-    const factFillers = [
-      sp.material || '',
-      sp.fit ? `${sp.fit} Fit` : '',
-      sp.unisex === true ? 'Unisex Fit' : '',
-      sp.neck || '',
-      sp.sleeve || '',
-      sp.dye ? `${sp.dye} Fabric` : '',
-    ].filter(Boolean)
+    // TASK 8 ROUND 2 (R1): the ONE pad bank (`productDetailAttrs.ts`) — was hand-written here AND in
+    // the shadow reachability pass above; now both read the same definition, so they cannot drift.
+    const factFillers = ihSpecFactFillers(sp)
     // TASK 2: same tier order as the pool loop above — a filler that merely repeats a token the
     // line ALREADY SHOWS (pool phrases / brand / the wear-fact) loses its priority-order slot to a
     // later, non-repeating filler whenever that non-repeating one alone can still reach the floor.
@@ -509,7 +522,7 @@ export function composeItemHighlightDetailed(
     // true) below a lower-priority filler ("Crew Neck") for no reason a customer would recognize as
     // "repetition". A pool phrase repeating pool/brand/wear-fact vocabulary (a real customer-visible
     // repeat) still correctly falls to Tier B against this snapshot.
-    const usedBeforePad = new Set(usedFolded)
+    const usedBeforePad = new Map(usedFolded)
     // TASK 6: the same absolute rule as the pool loop above — Tier B (vs. the FROZEN `usedBeforePad`
     // snapshot, so the exemption in the comment above is untouched) is deleted, not gated. A spec
     // fact that repeats a POOL token is still rejected outright; `tierBFitBudgetSeen` is the SAME
@@ -526,7 +539,7 @@ export function composeItemHighlightDetailed(
       if (lineLen() + 2 + phrase.length > CONTENT_CONTRACT.itemHighlights.max) continue
       if (ihRepeatViolations([...picked, phrase].join(', ')).length > 0) continue
       picked.push(phrase)
-      folded.forEach((w) => usedFolded.add(w))
+      folded.forEach(bumpUsed)
     }
   }
   why.picked = picked.length; why.lineLen = lineLen()
