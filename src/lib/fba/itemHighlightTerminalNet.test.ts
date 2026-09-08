@@ -338,7 +338,11 @@ describe('FIX ROUND 3 (I-1, controller RULING): listingPipeline.ts per-child per
 
   it('computes the scrub ONCE into a named `scrubbed` variable, fed to BOTH the verdict and the kept value', () => {
     expect(pipelineSrc).toMatch(/const scrubbed = scrubPub\(c\.item_highlight, 'per-child-item-highlight'\)/)
-    expect(pipelineSrc).toMatch(/const capResult = capItemHighlightRepeats\(scrubbed\)/)
+    // IH TERMINAL NET PHASE 2 (2026-09-08): the call now carries a real `contentCtx` (designSeasons
+    // derived from the design's own name + line — never the terminal net's blanket `[]` default,
+    // which would wrongly refuse a legitimately on-season design; see listingPipeline.ts's own
+    // comment at this call site) — still fed `scrubbed`, still the ONE computed-once variable.
+    expect(pipelineSrc).toMatch(/const capResult = capItemHighlightRepeats\(scrubbed, \{ contentCtx \}\)/)
   })
 
   it('on refusal, the persisted item_highlight is `scrubbed` -- never the pre-scrub `c.item_highlight` (the reviewer\'s exact reproduced bypass)', () => {

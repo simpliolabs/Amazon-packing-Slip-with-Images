@@ -31,6 +31,7 @@ import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
 import { identityPhrases, readDesignGroupIdentity } from '@/lib/fba/designGroupIdentity'
 import { perDesignIhRows } from '@/lib/fba/perDesignItemHighlights'
+import { seasonsIn } from '@/lib/keyword-engine/seasonalTerms'
 
 function admin() {
   return createClient(
@@ -270,7 +271,11 @@ export async function POST(req: NextRequest) {
     // line — an edge case, since the composer already floor-checks) maps onto the SAME
     // IhHoldReason vocabulary this route already used (no new hold semantics); the pre-existing
     // "built.value was already empty" HOLD path below is unchanged.
-    const capResult = capItemHighlightRepeats((built.value || '').trim())
+    // PHASE 2 content-rule context: real designSeasons from the title this line will sit beside
+    // (never the terminal net's blanket `[]` default — see listingPipeline.ts's buildItemHighlights
+    // for why: a Valentine family's own "valentine" must read as ON-season, not off).
+    const contentCtx = { designSeasons: seasonsIn(title) }
+    const capResult = capItemHighlightRepeats((built.value || '').trim(), { contentCtx })
     if (!capResult.ok) {
       const reason: IhHoldReason = built.hold ?? (capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor')
       return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason }, { status: 422 })

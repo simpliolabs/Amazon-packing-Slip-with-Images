@@ -83,7 +83,11 @@ export async function POST(req: NextRequest) {
     // never persists or pushes anything), so a refusal is reported honestly as `null` +
     // `refusalReason`, never as `''` (which used to read as "will ship empty", the same sentinel
     // collision BLOCKING 1/2 closed at the real push/persistence sites).
-    const netResult = capItemHighlightRepeats(trimmed)
+    // IH TERMINAL NET PHASE 2 (2026-09-08): the SAME brandName/capacityFamily/designSeasons context
+    // `validateItemHighlights` above just used — this is exactly the "two rulebooks" class the
+    // Phase-2 move closes: this route's own `problems` and `wouldShip` preview must never be able to
+    // disagree with each other by reading two different contexts for the SAME five rules.
+    const netResult = capItemHighlightRepeats(trimmed, { contentCtx: { brandName, capacityFamily, designSeasons } })
     const wouldShip = netResult.ok ? netResult.value : null
     const refusalReason = netResult.ok ? null : netResult.reason
 

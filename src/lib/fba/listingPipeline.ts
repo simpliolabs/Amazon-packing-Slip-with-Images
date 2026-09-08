@@ -51,7 +51,10 @@ import { guaranteedIdentitySynonyms, identitySynonymPhrases, getSeedPool, normal
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
-import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck, ihRepeatViolations, IH_MAX_WORD_REPEATS, mergeDetailRowsByPrecedence, type EnumCoercer } from '@/lib/fba/productDetailAttrs'
+import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck, ihRepeatViolations, IH_MAX_WORD_REPEATS, mergeDetailRowsByPrecedence, type EnumCoercer, findThirdPartyBrands, ownBrandTokenSet, THIRD_PARTY_BRANDS, CAPACITY_RE, ihContentRuleViolations } from '@/lib/fba/productDetailAttrs'
+// Re-exported (IH terminal net Phase 2 move) — `scripts/stress-*.ts` import `findThirdPartyBrands`
+// from THIS file by historical path; re-exporting keeps them byte-identical without editing them.
+export { findThirdPartyBrands, ownBrandTokenSet }
 import { coerceToEnum, coerceGenderToEnum } from '@/lib/fba/productTypeDefinitions'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversaryTrademarkClause } from '@/lib/fba/trademarkGuard'
 import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalCompounds'
@@ -1034,54 +1037,14 @@ function enforceHardAudience(text: string, audience: 'Men' | 'Women'): string {
 // now lives once in designName.ts; this alias keeps all eight call sites below unchanged.
 const BASIC_COLOR_RE = BASIC_COLOR_WORD_RE
 
-/**
- * Third-party brand names that REQUIRE 'for [Brand]' or 'compatible with [Brand]' framing
- * in titles and bullets. Amazon's Jan 2025 enforcement (tightened Q4 2025): bare third-party
- * brand references in titles trigger listing suppression and can lead to ASIN takedown.
- * Sources: DAM Law Firm 2026 Q4 enforcement report; Amazon Seller Central Product Title
- * Guidelines effective Jan 21, 2025.
- *
- * The seller's own brand (input.brandName) is exempted at runtime — this list is
- * COMPETITORS / accessories ecosystems the seller's product is compatible WITH, not made by.
- *
- * Apparel "blank" brands (Comfort Colors, Bella Canvas, Gildan…) are deliberately NOT here.
- * Amazon has long tolerated them as material/style descriptors and the existing pipeline
- * handles them via `attributePin`. This list focuses on actively-enforcing trademark holders.
- */
-const THIRD_PARTY_BRANDS = new Set([
-  // Cameras & imaging
-  'canon', 'nikon', 'sony', 'fujifilm', 'fuji', 'olympus', 'panasonic', 'pentax', 'leica',
-  'kodak', 'gopro', 'insta360', 'dji', 'ricoh', 'sigma', 'tamron',
-  // Memory / storage manufacturers
-  'sandisk', 'samsung', 'lexar', 'kingston', 'pny', 'toshiba', 'transcend', 'adata', 'patriot',
-  'crucial', 'seagate', 'maxell', 'micron',
-  // Phones & computing
-  'apple', 'iphone', 'ipad', 'macbook', 'imac', 'galaxy', 'pixel', 'microsoft', 'surface',
-  'huawei', 'xiaomi', 'oneplus', 'motorola',
-  // Drones
-  'parrot', 'autel', 'skydio', 'yuneec',
-  // Gaming
-  'nintendo', 'playstation', 'xbox', 'switch',
-  // Audio
-  'bose', 'beats', 'jbl', 'sennheiser',
-  // Apparel / athletic competitor RETAIL brands (2026-07-07, B0FRYMM56C: "why do we have NIKE"). The
-  // keyword research pulls the #1 competitor's ranking terms ("nike shirts women") into the pool as
-  // proven converters, and — until now — no filter knew Nike was a brand, so the bullet coverage
-  // backstop wove it straight into customer copy. A graphic tee is NOT "compatible with" Nike, so these
-  // are DROPPED (like trademark phrases), never framed "for [Brand]". OMITTED pending a context-guard
-  // because they double as legit design words: champion / gap / columbia / express (common words),
-  // puma (animal), wrangler (cowboy/Jeep), levis / hollister (names).
-  'nike', 'adidas', 'reebok', 'lululemon', 'athleta', 'underarmour', 'vuori', 'gymshark',
-  'fabletics', 'aeropostale', 'abercrombie', 'nautica',
-])
-
-/** Multi-word brand phrases (checked verbatim, not per-word). */
-const THIRD_PARTY_BRAND_PHRASES = [
-  'western digital', 'audio technica', 'sea gate', 'go pro',
-  // Apparel/athletic competitor brands whose name is multi-word (per-word checks would false-positive
-  // on 'under'/'new'/'north'/'face'). See the apparel block in THIRD_PARTY_BRANDS above.
-  'under armour', 'new balance', 'north face',
-]
+// THIRD_PARTY_BRANDS / THIRD_PARTY_BRAND_PHRASES / findThirdPartyBrands / ownBrandTokenSet MOVED
+// (IH terminal net Phase 2, spec docs/superpowers/specs/2026-09-07-item-highlight-terminal-net.md,
+// finish-line-rulings.md "MOVE them (do not copy)") to productDetailAttrs.ts — the pure, client-safe
+// leaf that also hosts `capItemHighlightRepeats` (the terminal net) and its new
+// `ihContentRuleViolations`, so the third-party-brand rule reaches the push seam and the compose
+// path from the SAME data + function this file's other ~17 call sites already used, instead of a
+// second, unreachable copy. Re-imported below for those call sites; byte-identical relocation, no
+// behaviour change.
 
 /**
  * Sports teams, college athletic programs, media franchises, and other licensed
@@ -1200,20 +1163,6 @@ export function findTrademarkPhrases(text: string): string[] {
   return [...found]
 }
 
-/** Find every third-party brand token in `text`, excluding the seller's own brand. */
-export function findThirdPartyBrands(text: string, ownBrandTokens: Set<string>): string[] {
-  const lc = text.toLowerCase()
-  const found = new Set<string>()
-  for (const w of lc.split(/[^a-z0-9]+/).filter(Boolean)) {
-    if (ownBrandTokens.has(w)) continue
-    if (THIRD_PARTY_BRANDS.has(w)) found.add(w)
-  }
-  for (const phrase of THIRD_PARTY_BRAND_PHRASES) {
-    if (lc.includes(phrase)) found.add(phrase)
-  }
-  return [...found]
-}
-
 /**
  * True if EVERY occurrence of `brandToken` in `text` is properly preceded by a framing
  * word ('for' / 'compatible with' / 'works with' / 'fits') within the prior 2-3 content
@@ -1261,19 +1210,6 @@ export function isBrandProperlyFramed(text: string, brandToken: string): boolean
   return true
 }
 
-/** Get the seller's own brand tokens for exemption from brand checks. Includes NORMALIZED forms
- *  (apostrophe-deleted, punctuation-stripped) alongside the raw tokens (adversarial 2026-07-08):
- *  the backend ban sites compare against normalized tokens ("Darlin' Co." must ban "darlin"), and
- *  a raw-only set silently no-ops for any punctuated brand. Superset — raw consumers unaffected. */
-function ownBrandTokenSet(brandName: string): Set<string> {
-  const s = new Set<string>()
-  for (const t of brandName.toLowerCase().split(/\s+/).filter(Boolean)) {
-    s.add(t)
-    const stripped = t.replace(/['’]/g, '').replace(/[^a-z0-9]/g, '')
-    if (stripped) s.add(stripped)
-  }
-  return s
-}
 // Product-type words capped at 2 total in the backend core (Amazon's bag-of-words already
 // has them from the title; >2 is the "shirt ×7" waste the PO flagged).
 const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees'])
@@ -1955,9 +1891,10 @@ function looksApparel(category?: string | null, repTitle?: string | null, produc
 // "ring-spun cotton", "for men", etc. Only applied when the product is non-apparel.
 const APPAREL_CONTAMINANTS = /\b(?:t[-\s]?shirts?|tees?|shirts?|graphic\s*tees?|hoodie|sweat\s?shirts?|sweater|apparel|clothing|garments?|fabric|cotton|ring[-\s]?spun|jersey|knit(?:ted)?|relaxed\s*fit|regular\s*fit|comfort\s*colors|bella\s*canvas|gildan|next\s*level|unisex|m[ae]ns?|wom[ae]ns?|fashion|outfit|wardrobe|sleeves?|crew\s?neck|tank\s?tops?|garment[-\s]?dyed|\bdye\b|wear|wearable)\b/i
 
-// A storage-capacity token ("128GB", "1 TB"). When children span >=2 distinct capacities the
-// title is per-child (each carries its own capacity) — NOT a concept that ever matches apparel.
-const CAPACITY_RE = /\b(\d{1,4})\s?(t|g)b?\b/i // GB/TB only — "MB" is usually a transfer speed, not capacity
+// CAPACITY_RE MOVED (IH terminal net Phase 2) to productDetailAttrs.ts, re-imported below — the
+// same relocation as THIRD_PARTY_BRANDS/findThirdPartyBrands above, for the SAME reason: the
+// hardcoded-capacity Item-Highlight rule needs it from the client-safe pure leaf that hosts the
+// terminal net, and this file's other 3 call sites (unchanged) now read the ONE definition too.
 function capacityOf(s: string | null | undefined): string | null {
   const m = (s ?? '').match(CAPACITY_RE)
   // "32G"/"64G." -> 32GB/64GB, "128GB" -> 128GB, "1T"/"1TB" -> 1TB
@@ -2252,13 +2189,17 @@ import { capTitle75 } from './titleCap'
 // ONE named reason. `validateItemHighlights` below remains the seller-facing checker (the
 // check-item-highlight route) for hand-edited values.
 
-// Pricing/promo language never belongs in a customer-facing highlight. "% off" and "$" match
-// anywhere (a \b next to "$" could never fire — it is not a word char); the words need boundaries.
-const HIGHLIGHT_PROMO_RE = /\b(?:sale|discount|cheap|free|deal)\b|% ?off|\$/i
-
 /** Deterministic Item Highlights gates — ALL must pass. Returns the violations (empty = compliant).
  *  Callers scrub trademarks BEFORE validating (the scrubbed string is what ships), so the
- *  trademark gate only fires if a mark somehow survives the scrub. */
+ *  trademark gate only fires if a mark somehow survives the scrub.
+ *
+ *  IH TERMINAL NET, PHASE 2 (2026-09-08, spec docs/superpowers/specs/2026-09-07-item-highlight-
+ *  terminal-net.md; finish-line-rulings.md): the off-season/promo-pricing/hardcoded-capacity/third-
+ *  party-brand/sentence-shape checks that used to be hand-rolled inline here MOVED to
+ *  `productDetailAttrs.ts`'s `ihContentRuleViolations` — the SAME predicate `capItemHighlightRepeats`
+ *  (the terminal net every producer, the Regen route, and the actual SP-API push all call) now
+ *  enforces. This function CALLS that shared predicate rather than re-implementing it, so the
+ *  checker route and the push boundary read one rulebook and can never disagree again. */
 export function validateItemHighlights(
   s: string, brandName: string, capacityFamily: boolean,
   /** Canonical occasions THIS design is about (deriveDesignSeasons). Default [] = the historical
@@ -2272,7 +2213,6 @@ export function validateItemHighlights(
   // ~120-char comma-sentence live (B0FKKN8XKV). Cap 75 + ban sentence punctuation so the corrective-retry
   // loop + the deterministic fallback both converge on short phrases.
   if (s.length > CONTENT_CONTRACT.itemHighlights.max) problems.push(`${s.length} characters — keep it ≤${CONTENT_CONTRACT.itemHighlights.max}; short feature/benefit phrases, not a sentence`)
-  if (/[.!?](\s|$)/.test(s)) problems.push('reads as a full sentence — use short comma-separated feature/benefit phrases with NO sentence punctuation (. ! ?)')
   /* ONE RULE, shared with the push boundary (productDetailAttrs.ihRepeatViolations, 2026-08-18).
    * This used to count locally with `c > 1` — STRICTER than Amazon, which allows a word twice. The
    * generator therefore rejected values `capItemHighlightRepeats` would have shipped unchanged, so
@@ -2282,16 +2222,8 @@ export function validateItemHighlights(
   const repeated = ihRepeatViolations(s)
   if (repeated.length) problems.push(`these words appear more than ${IH_MAX_WORD_REPEATS}x: ${repeated.join(', ')} — Amazon rejects the SKU above that`)
   if (scrubTrademarks(s).trim() !== s.trim()) problems.push('contains a protected trademark (e.g. "World Cup" — the safe phrasing is "World Futbol Cup")')
-  const brands = findThirdPartyBrands(s, ownBrandTokenSet(brandName))
-  if (brands.length) problems.push(`contains third-party brand(s)/team(s): ${brands.join(', ')}`)
-  const lc = s.toLowerCase()
-  // OFF-SEASON only (2026-07-23): "evergreen" means "not about a holiday we are not about". A Valentine
-  // design's own "Valentine" is its subject, not a seasonal claim, so it is no longer a violation.
-  const season = SEASONAL_TERMS.find((t) => lc.includes(t) && isOffSeasonKeyword(t, designSeasons))
-  if (season) problems.push(`contains the seasonal term "${season}" — this is an evergreen field`)
-  if (HIGHLIGHT_PROMO_RE.test(s)) problems.push('contains pricing/promotional language (sale/discount/cheap/free/deal/$/% off)')
-  if (capacityFamily && CAPACITY_RE.test(s)) problems.push('hardcodes a storage capacity — the field is shared across all capacity variants')
-  if (s.split(',').map((p) => p.trim()).filter(Boolean).length < 2) problems.push('must be at least 2 comma-separated phrases')
+  // MOVED (Phase 2): sentence-shape, off-season, promo/pricing, hardcoded-capacity, third-party-brand.
+  problems.push(...ihContentRuleViolations(s, { brandName, capacityFamily, designSeasons }).map((v) => v.message))
   return problems
 }
 
@@ -2372,7 +2304,18 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
     // the same fact `under-floor-no-repeat` already names (a repeat-permitting selection was the
     // only way to reach the floor and the PO's absolute no-repeat ruling forbids it); every other
     // refusal (over-max, or a length/repeat-driven drop landing under the floor) is `under-floor`.
-    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand))
+    // PHASE 2 content-rule context: real, not the terminal net's blanket default, because the
+    // blanket `designSeasons: []` default would WRONGLY refuse a legitimately on-season composed
+    // line (a Valentine family's pool can rate "valentine shirt women" as its own top phrase —
+    // seasonalTerms.ts's own docstring, "Valentine Not being in Descriptions" — and the composer has
+    // no seasonal exemption of its own; it trusts the net's `designSeasons` to know the design's OWN
+    // occasion). `seasonsIn(finalTitle)` is cheap and always available (`finalTitle` is required):
+    // the title already carries the design's own name, so a Valentine design's title names
+    // "valentine" and the off-season check correctly treats it as ON-season. `capacityFamily` is
+    // real too — non-apparel + a capacity token in the title, the same non-apparel/electronics
+    // signal `garmentFamily: !apparelProduct ? 'none' : ...` above already reads.
+    const contentCtx = { designSeasons: seasonsIn(finalTitle), capacityFamily: !apparelProduct && CAPACITY_RE.test(finalTitle) }
+    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand), { contentCtx })
     if (!capResult.ok) {
       console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'buildItemHighlights', reason: capResult.reason, len: res.line.length }))
       const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
@@ -10110,7 +10053,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     per_child_item_highlights: r.per_child_item_highlights?.map((c) => {
       if (!c.item_highlight) return { ...c, item_highlight: '' }
       const scrubbed = scrubPub(c.item_highlight, 'per-child-item-highlight')
-      const capResult = capItemHighlightRepeats(scrubbed)
+      // PHASE 2 content-rule context: real designSeasons from this design's OWN name + its already-
+      // composed line (never the terminal net's blanket `[]` default — see buildItemHighlights above
+      // for why a blanket default would wrongly refuse a legitimately on-season design).
+      const contentCtx = { designSeasons: seasonsIn(`${c.designName ?? ''} ${scrubbed}`) }
+      const capResult = capItemHighlightRepeats(scrubbed, { contentCtx })
       if (!capResult.ok) {
         console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'per-child-item-highlight', sku: c.sku, reason: capResult.reason }))
         const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'

@@ -35,6 +35,12 @@ import { createClient } from '@supabase/supabase-js'
 // reused, never re-implemented (Invariant 5). No cycle: productDetailAttrs imports only a TYPE from
 // pushFields and the supabase client type; it never imports this module.
 import { capItemHighlightRepeats, isItemHighlightsField, detailValueToString } from '@/lib/fba/productDetailAttrs'
+// IH TERMINAL NET PHASE 2 (2026-09-08): real designSeasons context for every capItemHighlightRepeats
+// call in this file — the net's blanket `[]` default would WRONGLY refuse a legitimately on-season
+// composed/branded candidate (a Valentine family's own "valentine" — seasonalTerms.ts's own
+// docstring names this exact live regression class, "Valentine Not being in Descriptions"). `titles`
+// is already a parameter of every function below; `seasonsIn` is a pure, zero-import leaf.
+import { seasonsIn } from '@/lib/keyword-engine/seasonalTerms'
 // Type-only (erased at compile, zero runtime import): R1's abandonment signal reuses the EXISTING
 // IhHoldReason vocabulary — never a parallel one. No cycle: perDesignItemHighlights.ts does not
 // import blankSpecs.ts.
@@ -770,7 +776,8 @@ export function ensureBlankBrandInHighlights(
   // proven by T4.5/T4.6 in blankBrandHighlightNet.test.ts). R2's new blanket over-max refusal is
   // about a FINAL line silently losing its own meaning to amputation (H12's class) — not about this
   // net's deliberate, floor-guarded phrase eviction. The floor check still refuses unconditionally.
-  const capResult = capItemHighlightRepeats(`authentic ${brand} blank, ${hl}`, { allowLengthAmputation: true })
+  const seasonCtx = { designSeasons: seasonsIn(`${named.join(' ')} ${hl}`) }
+  const capResult = capItemHighlightRepeats(`authentic ${brand} blank, ${hl}`, { allowLengthAmputation: true, contentCtx: seasonCtx })
   if (!capResult.ok) {
     if (diag) diag.abandoned = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
     log('floor-abort', { from: hl.length, refused: capResult.reason }); return hl
@@ -871,7 +878,8 @@ export function applyBlankBrandNetToDetails(
   // now uses. `capItemHighlightRepeats` returning `''` used to be read as "no brand change" and
   // written straight over an already-compliant, PO-accepted line.
   const diag: { abandoned?: IhHoldReason | null } = {}
-  const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, titles, blank, diag))
+  const seasonCtx = { designSeasons: seasonsIn(`${titles.filter(Boolean).join(' ')} ${current}`) }
+  const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, titles, blank, diag), { contentCtx: seasonCtx })
   if (!capResult.ok) {
     console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'refused-kept-current', field: detailValueToString(arr[idx].field_name), current, reason: capResult.reason }))
     return { details: arr, changed: false }
@@ -937,7 +945,8 @@ export function applyBlankBrandNetPerDesign<T extends { sku: string; asin?: stri
     // `changed:true` — silently converting a pushable design to HELD. Keep `e` (the prior value)
     // unchanged on refusal, same as the `!title` guard immediately above.
     const diag: { abandoned?: IhHoldReason | null } = {}
-    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, [title], blank, diag))
+    const seasonCtx = { designSeasons: seasonsIn(`${title} ${current}`) }
+    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, [title], blank, diag), { contentCtx: seasonCtx })
     if (!capResult.ok) {
       console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'per-design-refused-kept', sku: e.sku, current, reason: capResult.reason }))
       return e
