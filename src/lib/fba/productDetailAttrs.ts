@@ -608,7 +608,8 @@ export const lineHasSignificantRepeat = (line: string): boolean => {
  *  pre-ruling stored value, a manual DB edit, or a future producer bug). `'under-floor'` — TASK 8
  *  ROUND 2 / IH TERMINAL NET PHASE 1 (2026-09-07, spec docs/superpowers/specs/2026-09-07-item-
  *  highlight-terminal-net.md, H13): a non-empty, non-repeating line shorter than
- *  `CONTENT_CONTRACT.itemHighlights.min` (107) — reproduced live: a stale/hand-edited/legacy stored
+ *  `CONTENT_CONTRACT.itemHighlights.min` (97 as of the 2026-09-08 "2+3" floor ruling; was 107) —
+ *  reproduced live: a stale/hand-edited/legacy stored
  *  line can sit under the floor forever because nothing at the push seam ever checked length, only
  *  repeats. `'ok'` — a non-empty, compliant line; the only classification that is ever pushable. */
 export type IhLineClassification = 'ok' | 'no-line-for-design' | 'repeat-in-stored-line' | 'under-floor'
@@ -643,7 +644,8 @@ export function classifyStoredIhLine(value: string | null | undefined): IhLineCl
  *  H12 a 186-char two-clause line, one comma: the length loop correctly drops the trailing clause
  *      (86 > "next" over budget) — the drop is real and reduces the SP-API payload to 88 chars —
  *      but nothing checks whether the 88-char SURVIVOR still clears
- *      `CONTENT_CONTRACT.itemHighlights.min` (107). Silent amputation: half the seller's sentence
+ *      `CONTENT_CONTRACT.itemHighlights.min` (97 as of the 2026-09-08 "2+3" floor ruling; was 107).
+ *      Silent amputation: half the seller's sentence
  *      ships, under the floor, and the seam does not notice.
  *
  * THE FIX. Both nets are unchanged in what they accept (repeat cap: `IH_MAX_WORD_REPEATS`/
@@ -748,7 +750,8 @@ export function capItemHighlightRepeats(value: string, opts?: CapItemHighlightRe
   // REFUSE rather than amputate (Phase 1, H12; IMPORTANT 4, fix round 1): a drop that EITHER net
   // actually performed — the LENGTH net (`capped` shorter than `kept`) OR the REPEAT net (`kept`
   // shorter than the original phrase count) — must not silently land the survivor under
-  // `CONTENT_CONTRACT.itemHighlights.min` (107). Phase 1 scoped this floor check to the length-driven
+  // `CONTENT_CONTRACT.itemHighlights.min` (97 as of the 2026-09-08 "2+3" floor ruling; was 107).
+  // Phase 1 scoped this floor check to the length-driven
   // drop only; the reviewer reproduced the same silent amputation reached via a REPEAT-only drop (a
   // 112-char, 5-phrase line whose repeat cap alone drops one "cotton" phrase, landing a 90-char
   // 4-phrase survivor — no length-driven drop ever occurred, so the old guard never fired). Scoped to

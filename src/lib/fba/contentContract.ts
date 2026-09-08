@@ -141,8 +141,29 @@ export const CONTENT_CONTRACT = {
   itemHighlights: {
     max: 125,               // Amazon's stated Item Highlights budget — the hard cap, all nets
     fillTarget: 110,        // band LOW edge: aim 110-125 so the field is actually used, not merely legal
-    min: 107,               // PO RULING 2026-08-21 verbatim "44 is NEVER approved, MIN 85% of MAX 125":
-                            // ceil(0.85*125). An under-min line is NOT SHIPPABLE — the composer pads
-                            // with TRUE spec facts or returns not-ready; it never ships short.
+    // FLOOR = 97 (PO RULING "2+3", 2026-09-07 — a three-way fork; option 3, "lower or drop the
+    // 107-char floor," executed here 2026-09-08; option 2, an LLM writer, was deliberately deferred,
+    // NOT built by this change).
+    //
+    // The OLD 107 (2026-08-21, "44 is NEVER approved, MIN 85% of MAX 125" -> ceil(0.85*125)) was
+    // derived on a premise that is REFUTED: it assumed the field was invisible to shoppers, priced
+    // purely as an indexing budget. A live DOM probe (2026-09-07) shows Item Highlights renders
+    // inside `#centerCol`, ~366x60px directly under the h1, on our own listings (B0H9VDCBZJ 124
+    // chars, B0DMXMH266 122 chars) — see ITEM_HIGHLIGHTS_TITLE_PRECONDITION's doc above. The 85%-of-
+    // max ratio has no remaining justification now that the field is known shopper-visible; it was
+    // never derived from a rendering/legibility constraint in the first place.
+    //
+    // 97 is the lowest number the evidence supports, not an arbitrary relaxation: market sampling of
+    // rendered tails found every observed rendering between 97 and 125 characters, and NONE below 97
+    // ever observed rendering — consistent with (not proof of) Amazon suppressing a short
+    // differentiator below that point. Do NOT lower this further without new evidence; do NOT remove
+    // the floor — an under-min line is still NOT SHIPPABLE, the composer still pads with TRUE spec
+    // facts or returns not-ready, it still never ships short.
+    //
+    // Live consequence this fixes: B0DSCDZC6K regenerated 2026-09-08 under the 107 floor and all six
+    // designs HELD (five `under-floor-no-repeat`, one `thin-candidates`) even though several of those
+    // pools truthfully reach 97-106 chars without repeating a word — see the reproduction in
+    // itemHighlightComposer.test.ts ("FLOOR 97 (PO 2+3, 2026-09-07/08)").
+    min: 97,
   },
 } as const

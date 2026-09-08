@@ -2295,10 +2295,13 @@ export function validateItemHighlights(
   return problems
 }
 
-/** THE 85%% FLOOR ON EVERY PATH (PO 2026-08-21, "44 is NEVER approved, MIN 85%% of MAX 125"):
- *  a generated Item Highlight under CONTENT_CONTRACT.itemHighlights.min NEVER ships. Returning ''
- *  engages the callers' keep-old-value semantics (regen route + pipeline both treat empty as "hold
- *  the stored value"), so an under-floor family is NOT-READY, never shipped short and never blanked. */
+/** THE FLOOR ON EVERY PATH (originally PO 2026-08-21, "44 is NEVER approved, MIN 85%% of MAX 125";
+ *  the floor itself is now 97, not 107 — see the PO RULING "2+3" 2026-09-07/08 comment on
+ *  `CONTENT_CONTRACT.itemHighlights.min` in contentContract.ts for why the 85%-of-max ratio no
+ *  longer applies): a generated Item Highlight under CONTENT_CONTRACT.itemHighlights.min NEVER
+ *  ships. Returning '' engages the callers' keep-old-value semantics (regen route + pipeline both
+ *  treat empty as "hold the stored value"), so an under-floor family is NOT-READY, never shipped
+ *  short and never blanked. */
 function ihFloorDoor(line: string): string {
   if (line && line.length < CONTENT_CONTRACT.itemHighlights.min) {
     console.warn(JSON.stringify({ tag: 'IH_UNDER_FLOOR_HOLD', len: line.length, min: CONTENT_CONTRACT.itemHighlights.min, held: line.slice(0, 100) }))

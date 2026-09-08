@@ -13,6 +13,7 @@ import {
   type GarmentResolution, type ChildGarmentResolution,
 } from '@/lib/fba/garmentPerDesign'
 import { perDesignIhRows, collapseSharedIhRows, IH_HOLD_MESSAGES, ihSkipReasonText, type PerChildItemHighlight, type PerDesignIhRow, type IhHoldReason } from '@/lib/fba/perDesignItemHighlights'
+import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { runThemeRerate, type ThemeRerateOutcome } from '@/lib/fba/themeRerateControl'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
@@ -4551,7 +4552,7 @@ export default function ListingDetailPage() {
                                         <span className="text-[10px] font-semibold text-slate-800 truncate max-w-[12rem]" title={r.designs[0]?.designKey}>{r.designs[0]?.designName}</span>
                                       )}
                                       <span className="text-[10px] text-slate-400">· {r.skuCount} SKU{r.skuCount === 1 ? '' : 's'}</span>
-                                      {r.line && <span className={`text-[10px] ${r.line.length < 107 ? 'text-amber-600' : 'text-slate-400'}`}>· {r.line.length}/125</span>}
+                                      {r.line && <span className={`text-[10px] ${r.line.length < CONTENT_CONTRACT.itemHighlights.min ? 'text-amber-600' : 'text-slate-400'}`}>· {r.line.length}/125</span>}
                                       {r.line && r.onAmazon && <span className="text-[10px] px-1 py-0.5 rounded bg-emerald-100 text-emerald-700 font-medium">✓ On Amazon</span>}
                                       {/* Every hold reason gets ITS OWN explanation (IH_HOLD_MESSAGES) — never a generic
                                           blank, and never lumped into one bucket regardless of which reason fired. */}
@@ -6211,7 +6212,7 @@ export default function ListingDetailPage() {
                               <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
                                 <span className="font-semibold text-slate-800" title={r.designKey}>{r.designName}</span>
                                 <span className="text-slate-400">· {r.skuCount} SKU{r.skuCount === 1 ? '' : 's'}</span>
-                                {r.line && <span className={r.line.length < 107 ? 'text-amber-600' : 'text-slate-400'}>· {r.line.length}/125 chars</span>}
+                                {r.line && <span className={r.line.length < CONTENT_CONTRACT.itemHighlights.min ? 'text-amber-600' : 'text-slate-400'}>· {r.line.length}/125 chars</span>}
                                 {r.skipReason && <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={ihSkipReasonText(r.skipReason)}>Skipped at push — {r.skipReason}</span>}
                                 {/* R1 (finish-line-rulings.md, controller RULING, 2026-09-08): the
                                     blank-brand insertion net tried and ABANDONED inserting the brand —

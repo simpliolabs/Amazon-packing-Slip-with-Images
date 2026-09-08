@@ -26,7 +26,10 @@
  * to be byte-identical (usually: every design held).
  *
  * CHANGED ASSERTIONS (were pinned to the old shared-line behavior, now updated — see each comment):
- *   - "composes ONE line >= 107 chars" -> each design's OWN line >= 107 chars (no single shared value).
+ *   - "composes ONE line >= the floor" -> each design's OWN line >= the floor (no single shared
+ *     value). FLOOR 97 (PO RULING "2+3", 2026-09-07/08, contentContract.ts): every length assertion
+ *     below reads `CONTENT_CONTRACT.itemHighlights.min` (was a hardcoded `107`), so it tracks the
+ *     live floor instead of drifting from it.
  *   - "phrase fit 3/3/3/3/1/1 excluded from the shared line" -> excluded from the ONE design that
  *     rates it fit 1; composes for the five that rate it >= 2 (this is the whole point of the fix).
  *   - "the ONE line is identical on every design" -> the SIX lines are pairwise distinct.
@@ -59,6 +62,7 @@ const create = vi.fn(async () => { throw new Error('OpenAI must never be called 
 vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { create } } } }))
 
 import { buildItemHighlights, buildItemHighlightsPerDesign, IH_HOLD_MESSAGES } from './listingPipeline'
+import { CONTENT_CONTRACT } from './contentContract'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { ihFoldWord, IH_INSIGNIFICANT, classifyStoredIhLine } from './productDetailAttrs'
 import { applyStickyDetails } from './stickyDetails'
@@ -128,6 +132,15 @@ const build = (pool: AnalyzedKeyword[], groups = GROUPS) =>
 const lineFor = (r: ReturnType<typeof build>, key: string): string => (r.perDesign.find((d) => d.designKey === key)?.value ?? '').toLowerCase()
 const holdFor = (r: ReturnType<typeof build>, key: string) => r.perDesign.find((d) => d.designKey === key)?.hold ?? null
 
+/** FLOOR 97 (PO RULING "2+3", 2026-09-07/08, contentContract.ts): every "genuinely composed, not
+ *  held" length assertion below reads the LIVE constant, never a hand-copied literal — a floor
+ *  duplicated into test files is exactly the defect class this repo has been closing all week. The
+ *  five `it()`s that used to assert a hardcoded `107` are UPDATED, not merely re-pointed: the pools
+ *  below were sized to clear the OLD 107 floor, so at the NEW (lower) 97 floor they still compose,
+ *  by a wider margin — a floor DROP can only turn a HOLD into a compose or shorten a padded line,
+ *  never the reverse, so "still composes, length >= MIN" remains a valid, non-vacuous assertion. */
+const MIN = CONTENT_CONTRACT.itemHighlights.min
+
 /** TASK 6 (2026-09-06, absolute no-repeat) test helper: an INDEPENDENT fold over the RETURNED
  *  bytes — deliberately NOT the production `significantFolded` (`productDetailAttrs.ts` as of
  *  round 2, F1; was `itemHighlightComposer.ts`) — so this proves the wire's output obeys the PO's
@@ -155,7 +168,7 @@ describe('each design composes its OWN line (PO 2026-09-06, refining the shared-
   const r = build(POOL)
 
   it('every design composes >= 107 chars, no OpenAI call', () => {
-    for (const k of KEYS) expect(lineFor(r, k).length).toBeGreaterThanOrEqual(107)
+    for (const k of KEYS) expect(lineFor(r, k).length).toBeGreaterThanOrEqual(MIN)
     expect(create).not.toHaveBeenCalled()
     expect(r.shared.designKeys).toEqual([...KEYS])
   })
@@ -267,7 +280,7 @@ describe('a design whose OWN rating is thin holds in ISOLATION — siblings stil
     // The other five: fully rated, unaffected — CHANGED from the old all-or-nothing gate.
     for (const k of ['BD', 'BM', 'DQ', 'RIACG', 'SM']) {
       expect(holdFor(r, k)).toBeNull()
-      expect(lineFor(r, k).length).toBeGreaterThanOrEqual(107)
+      expect(lineFor(r, k).length).toBeGreaterThanOrEqual(MIN)
     }
 
     // shared.hold: null because SOMETHING composed (the marker-row consumer only reports "held"
@@ -343,7 +356,7 @@ describe('single-design parity (pin) + the per-design column parser', () => {
     const withCol = [...SHARED, ...EXTRA].map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: 3, themeFitByDesign: { RK: { fit: 0, about: 'x' } } } as unknown as AnalyzedKeyword))
     const a = buildItemHighlights({ finalTitle: BM.titles[0], pool: plain, apparelProduct: true, blankBrand: GILDAN, netTitles: BM.titles })
     const b = buildItemHighlights({ finalTitle: BM.titles[0], pool: withCol, apparelProduct: true, blankBrand: GILDAN, netTitles: BM.titles })
-    expect(a.value.length).toBeGreaterThanOrEqual(107)
+    expect(a.value.length).toBeGreaterThanOrEqual(MIN)
     expect(b).toEqual(a)
   })
 
@@ -436,7 +449,7 @@ describe('Task 5: per-design audience truth in the Item Highlight composer', () 
     })
     for (const k of KEYS) {
       expect(lineFor(r, k)).not.toContain('women')
-      expect(lineFor(r, k).length).toBeGreaterThanOrEqual(107)   // genuinely composed, not held
+      expect(lineFor(r, k).length).toBeGreaterThanOrEqual(MIN)   // genuinely composed, not held
       // TASK 6 (2026-09-06, absolute no-repeat): every design composes here (unlike T5-g's larger,
       // repeat-heavy pool — see that describe block's own comment), so this is where the "zero
       // repeated significant token" pin lives for a genuine six-design-under-unisex composition.
@@ -472,7 +485,7 @@ describe('Task 5: per-design audience truth in the Item Highlight composer', () 
     for (const k of KEYS) {
       expect(lineFor(r, k)).not.toContain('guys')
       expect(lineFor(r, k)).not.toContain('men')            // no bare masculine word leaks through either
-      expect(lineFor(r, k).length).toBeGreaterThanOrEqual(107)   // genuinely composed, not held
+      expect(lineFor(r, k).length).toBeGreaterThanOrEqual(MIN)   // genuinely composed, not held
       expect(dupedFoldedTokens(lineFor(r, k))).toEqual([])
     }
   })

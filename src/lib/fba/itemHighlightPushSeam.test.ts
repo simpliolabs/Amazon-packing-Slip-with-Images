@@ -93,6 +93,19 @@
  * `task-8-report.md`. The tests below are updated to assert the TRUE (COMPOSE) outcome again — the
  * pool is STILL untouched, exactly as the Task 6 comment above promised a future controller
  * decision, not a silent re-fixture.
+ *
+ * FLOOR 97 (PO RULING "2+3", 2026-09-07/08, contentContract.ts) CONSEQUENCE — REPORTED, NOT
+ * RE-FIXTURED, same discipline as Task 6/8 above: this file's `SHARED` bank was deliberately sized
+ * (see its own comment) so pool-only + `material` alone could never cross the OLD 107 floor, forcing
+ * the pad chain into `fit` for EVERY design — that was the whole point of the "every mapped value
+ * DOES contain Classic" test. Lowering the floor to 97 does not change the pool or the composer, but
+ * it DOES change how far the (unchanged) pad chain needs to walk: `poolOnly` alone (77-87 chars per
+ * the header) plus `material` (16 chars + separator) already clears 97 for FOUR of six designs (BD
+ * 105, BM 101, DQ 97, RK 98), so their pad chain now stops at `material` and never reaches `fit` —
+ * "Classic Fit" is truthfully absent from their lines, not a bug. Only RIACG (108) and SM (108) are
+ * still short enough after `material` to need `fit` too. Verified via an `npx tsx` probe against the
+ * real `buildItemHighlightsPerDesign` (floor-97-report.md). The `EXPECTED` map and the two
+ * "Classic"-related tests below are updated to the true, reproduced bytes — the pool is UNTOUCHED.
  */
 import { describe, it, expect, vi } from 'vitest'
 
@@ -101,6 +114,7 @@ vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { c
 
 import { buildItemHighlightsPerDesign } from './listingPipeline'
 import { buildPerSkuItemHighlightMap, perDesignIhRows, type PerChildItemHighlight } from './perDesignItemHighlights'
+import { CONTENT_CONTRACT } from './contentContract'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { ihFoldWord, IH_INSIGNIFICANT, classifyStoredIhLine } from './productDetailAttrs'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
@@ -183,7 +197,8 @@ describe('Important #6: the fixture no longer sits on the zero-margin CANDIDATE 
     for (const k of KEYS) {
       const d = r.perDesign.find((p) => p.designKey === k)!
       expect(d.hold).toBeNull()
-      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      // FLOOR 97: reads the live constant, not a hand-copied literal (see file-header note above).
+      expect(d.value.length).toBeGreaterThanOrEqual(CONTENT_CONTRACT.itemHighlights.min)
       expect(d.value.length).toBeLessThanOrEqual(125)
     }
   })
@@ -193,17 +208,21 @@ describe('push seam wire: real buildItemHighlightsPerDesign -> real buildPerSkuI
   const r = build(POOL)
   const { values, skipped } = buildPerSkuItemHighlightMap(r.perChild, ALL_TARGETS, null)
 
-  // TASK 8 (see file header): byte-identical to the #673-era lines named in this task's brief
-  // (`final-review-2-findings.md` §0(a)) — verified via an `npx tsx` probe against the real
-  // `buildItemHighlightsPerDesign`, pasted in `task-8-report.md`.
+  // FLOOR 97 (PO RULING "2+3", 2026-09-07/08) — UPDATED, not re-fixtured (see file-header note):
+  // four of six designs now stop padding at `material`, one filler short of ever reaching `fit`,
+  // because `poolOnly + material` alone already clears the NEW 97 floor for them. Only RIACG and SM
+  // are still short enough to need `fit` too. Verified via an `npx tsx` probe against the real
+  // `buildItemHighlightsPerDesign` (floor-97-report.md) — supersedes the TASK 8 (#673-era) bytes.
   const EXPECTED: Record<string, string> = {
-    BD: 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit',
-    BM: 'Beast Mode Athletic Apparel, Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit',
-    DQ: 'Graphic Novelty Tee for Men, Dont Quit Athletic Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit',
+    BD: 'Graphic Novelty Tee for Men, Boss Definition Motivation Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton',
+    BM: 'Beast Mode Athletic Apparel, Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Ring-Spun Cotton',
+    DQ: 'Graphic Novelty Tee for Men, Dont Quit Athletic Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton',
     RIACG: 'Graphic Novelty Tee for Men, Relax Ceo Energy Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit',
-    RK: 'Real King Throne Apparel, Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit',
+    RK: 'Real King Throne Apparel, Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Ring-Spun Cotton',
     SM: 'Graphic Novelty Tee for Men, Self Made Hustle Wear, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit',
   }
+  /** FLOOR 97: only these two designs' pad chain still walks into `fit` on this pool (see above). */
+  const STILL_REACHES_FIT = new Set(['RIACG', 'SM'])
 
   it('TASK 8 CONSEQUENCE (see file header): every design COMPOSES again — the garment noun `tee` legally repeats exactly twice (Amazon\'s own cap), byte-identical to the #673-era lines, no OpenAI call', () => {
     for (const k of KEYS) {
@@ -234,9 +253,21 @@ describe('push seam wire: real buildItemHighlightsPerDesign -> real buildPerSkuI
     }
   })
 
-  it('TASK 8 CONSEQUENCE: every mapped value DOES contain "Classic" — the spec-fact pad truth-fix (blank_specs.fit -> "${fit} Fit") that must ship over the live "relaxed unisex fit" defect this plan was opened against, now provable on THIS pool again since it composes.', () => {
+  it('FLOOR 97 CONSEQUENCE (PO RULING "2+3", 2026-09-07/08, see file-header note): the spec-fact pad truth-fix (blank_specs.fit -> "${fit} Fit") still ships whenever the pad chain reaches `fit` — on THIS pool that is now only RIACG and SM (the other four now stop at `material`, one filler short of `fit`, because `poolOnly + material` alone already clears the lower floor). This is NOT a coverage loss for the underlying fix: `ihSpecFactFillers`/`deriveIhBoilerplateBudget` unit-test the "${fit} Fit" template and its budget directly (itemHighlightOneRule.test.ts), independent of whether any one end-to-end pool happens to walk that far into the pad chain.', () => {
     expect(values.size).toBe(ALL_TARGETS.length)
-    for (const v of values.values()) expect(v.toLowerCase()).toContain('classic fit')
+    let sawClassicFit = false
+    for (const g of GROUPS) {
+      const v = values.get(g.skus[0].sku)!.toLowerCase()
+      if (STILL_REACHES_FIT.has(g.key)) {
+        expect(v, g.key).toContain('classic fit')
+        sawClassicFit = true
+      } else {
+        expect(v, g.key).not.toContain('classic fit')   // truthfully absent — the pad chain never needed it
+      }
+    }
+    // Never a vacuous property (test-proves-the-mock-not-the-wire): at least one design must have
+    // actually walked the pad chain into `fit` for this to prove anything about that filler at all.
+    expect(sawClassicFit).toBe(true)
   })
 
   it('TASK 8 ROUND 2 (R1): composer/seam agreement is a PROPERTY over the acceptance seam pool — every one of the six composed values classifies "ok" at the seam\'s own classifier, not merely byte-identical to the recorded lines', () => {
@@ -364,7 +395,11 @@ describe('FIX ROUND 1 (#2 + #3): a genuinely COMPOSING six-design pool, own mutu
     for (const k of KEYS) {
       const d = r2.perDesign.find((p) => p.designKey === k)!
       expect(d.hold).toBeNull()
-      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      // FLOOR 97: reads the live constant, not a hand-copied literal (see file-header note above).
+      // This pool's pad chain still reaches `fit` for every design either way (RIACG/SM land at 98,
+      // still >= material alone, so they were never in danger — see the "Classic" test below), so
+      // unlike the OTHER describe block in this file, none of THIS block's other assertions change.
+      expect(d.value.length).toBeGreaterThanOrEqual(CONTENT_CONTRACT.itemHighlights.min)
       expect(d.value.length).toBeLessThanOrEqual(125)
     }
     expect(create).not.toHaveBeenCalled()

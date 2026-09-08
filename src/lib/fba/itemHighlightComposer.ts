@@ -497,8 +497,10 @@ export function composeItemHighlightDetailed(
     picked.push(OVERSIZED_FACT)
   }
 
-  // PO RULING 2026-08-21, verbatim "44 is NEVER approved, MIN 85% of MAX 125": an under-min line
-  // never ships. Pad toward the floor with TRUE spec facts (blank_specs values — never invented),
+  // PO RULING 2026-08-21, verbatim "44 is NEVER approved, MIN 85% of MAX 125" (the ratio itself is
+  // superseded — the floor is now 97, not ceil(0.85*125)=107; see the PO RULING "2+3" 2026-09-07/08
+  // comment on `CONTENT_CONTRACT.itemHighlights.min`): an under-min line never ships, still, always.
+  // Pad toward the floor with TRUE spec facts (blank_specs values — never invented),
   // each passing the same novelty + repeat gates as pool phrases. "Unisex Fit" joins the bank when
   // blank_specs.unisex is TRUE (PO 2026-08-06: unisex sizing explicit in features/highlights,
   // never the title) — a mixed-blank intersection carries it only when every blank claims it. A family that cannot truthfully

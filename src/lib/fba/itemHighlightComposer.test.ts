@@ -6,7 +6,10 @@
  *  - 2026-08-20 "THESE ARE TERRIBLE!!!": no invented classes; pool phrases verbatim.
  *  - 2026-08-20 oversized: bare "Over(-)Sized <garment>" is a cut claim — never composes; demand
  *    surfaces only as the wear-style fact "Can be worn as Oversized".
- *  - 2026-08-21 "44 is NEVER approved, MIN 85% of MAX 125": floor = 107 (CONTENT_CONTRACT.min).
+ *  - 2026-08-21 "44 is NEVER approved, MIN 85% of MAX 125": floor = 107 (CONTENT_CONTRACT.min) —
+ *    SUPERSEDED 2026-09-07/08 by the PO RULING "2+3": floor = 97, not ceil(0.85*125). See the
+ *    ruling comment on `CONTENT_CONTRACT.itemHighlights.min` in contentContract.ts for why the 85%
+ *    ratio no longer applies (its premise — the field is shopper-invisible — was refuted).
  *    Under-floor pads with TRUE blank_specs facts; unreachable floor ⇒ null (NOT-READY, never short).
  *  - 2026-08-21 Electronics: garmentFamily 'none' composes zero garment vocabulary.
  *  - 2026-08-21 TRUTH STAGE (14-family review): garment-noun truth, capability claims, audience
@@ -54,7 +57,7 @@ const TASK8_REPRO_POOL = [
 ]
 const TASK8_REPRO_SPEC = { material: '100% Cotton Blend', fit: 'Relaxed', unisex: true, neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed' }
 
-describe('composeItemHighlight — Architecture A under the 85% floor', () => {
+describe('composeItemHighlight — Architecture A under the floor (97, PO RULING "2+3" 2026-09-07/08; was 107/"MIN 85% of MAX 125")', () => {
   it('composes verbatim pool phrases + true spec fillers, in the [MIN, MAX] band', () => {
     const out = composeItemHighlight(GATOR_POOL, GATOR_TITLES, OPTS)!
     expect(out).toBeTruthy()
@@ -600,8 +603,19 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     const spec = TASK8_REPRO_SPEC
     const res = composeItemHighlightDetailed(pool, [], { spec: spec as any })
     // Verified via an `npx tsx` probe against the real composer (task-8-report.md).
-    expect(res.line).toBe('Crewneck Sweatshirts Women, Novelty Retro Graphic, Long Sleeve Crewneck, 100% Cotton Blend, Relaxed Fit, Unisex Fit')
+    // FLOOR 97 (PO RULING "2+3", 2026-09-07/08, contentContract.ts): this fixture's expected bytes
+    // are DELIBERATELY updated, not re-fixtured blindly — the pool-phase Tier-A picks alone
+    // ("Crewneck Sweatshirts Women, Novelty Retro Graphic, Long Sleeve Crewneck, 100% Cotton Blend,
+    // Relaxed Fit") already total 103 chars, which cleared the NEW 97 floor without needing the pad
+    // loop's "Unisex Fit" filler — under the OLD 107 floor that filler WAS needed and composed. This
+    // is the acceptance criterion's own predicted case: a line whose length was floor-DEPENDENT (it
+    // only reached 107 via padding to the floor, not via the pool phase's own AIM=110 target) changes
+    // when the floor moves; the exemption this pin used to also cover — `fit` may legitimately appear
+    // twice ("Relaxed Fit" + "Unisex Fit") — is still independently unit-tested by
+    // `deriveIhBoilerplateBudget` in `itemHighlightOneRule.test.ts`, so no coverage is lost.
+    expect(res.line).toBe('Crewneck Sweatshirts Women, Novelty Retro Graphic, Long Sleeve Crewneck, 100% Cotton Blend, Relaxed Fit')
     expect(res.stage).toBeNull()
+    expect(res.line!.length).toBe(103)
     const line = res.line!
     expect((line.match(/crewneck/gi) ?? []).length).toBe(2)          // garment noun, budget 2
     expect((line.match(/\bsweatshirts?\b/gi) ?? []).length).toBe(1)  // only ONE phrase carries it here
@@ -609,15 +623,11 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     expect((line.match(/\bsleeve\b/gi) ?? []).length).toBe(1)        // not a garment noun — budget 1
     expect(line.toLowerCase()).not.toContain('fall sweatshirts for women')
     expect(line.toLowerCase()).not.toContain('sleeve detail graphic')
-    // FIX ROUND 1 (Blocking finding, reviewer task-8-review-findings.md): this exact line carries
-    // `fit` TWICE ("Relaxed Fit" + "Unisex Fit") — the pad loop's `usedBeforePad` snapshot (PO
-    // 2026-08-06, "pad exemption still holds" per the task-8 brief) legitimately lets these two
-    // INDEPENDENT spec facts co-exist even though they share the composer's own appended "Fit"
-    // boilerplate word. The composer is not the bug — `classifyStoredIhLine` disagreeing with it
-    // is: before this fix it classified this composer-produced line `repeat-in-stored-line` and the
-    // push seam refused a value the composer just legitimately shipped. `fit` now carries the SAME
-    // bounded budget-2 exemption as the garment head noun (`ihRepeatBudget`), so the seam agrees.
-    expect((line.match(/\bfit\b/gi) ?? []).length).toBe(2)
+    // `fit` appears ONCE here (only "Relaxed Fit" — the pad loop stopped before "Unisex Fit" was
+    // needed, see the FLOOR 97 note above). The budget-2 exemption that let "Relaxed Fit" +
+    // "Unisex Fit" co-exist (FIX ROUND 1, task-8-review-findings.md) is unchanged in the composer —
+    // this fixture simply no longer exercises it end-to-end; see itemHighlightOneRule.test.ts.
+    expect((line.match(/\bfit\b/gi) ?? []).length).toBe(1)
     expect(classifyStoredIhLine(line)).toBe('ok')
   })
 
@@ -782,7 +792,7 @@ describe('FIX WAVE 2 (I-1): the shadow reachability pass enforces the <=2 word c
     logSpy.mockRestore()
   })
 
-  it('a pool where the 7-pick cap (not the <=2 cap, not the char budget) is what blocks the only repeat-permitting route to 107: 4 word-disjoint pairs (each shared word appears exactly twice, legal under the <=2 cap) reach 122 chars using all 8 phrases, but the real loop never admits an 8th pick — the true ceiling under the pick cap is 7 phrases / 106 chars, one char short of the floor', () => {
+  it('FLOOR 97 (PO RULING "2+3", 2026-09-07/08): a pool where the 7-pick cap (not the <=2 cap, not the char budget) is what blocked the only repeat-permitting route to the OLD 107 floor now clears the NEW 97 floor via that same repeat-permitting route: 4 word-disjoint pairs (each shared word appears exactly twice, legal under the <=2 cap) reach 122 chars using all 8 phrases, but the real loop never admits an 8th pick, so the true ceiling under the pick cap is 7 phrases / 106 chars — one char short of the OLD 107 floor (this is this test\'s ORIGINAL reproduction, and stayed `under-floor-after-pad`) but comfortably clears the NEW 97 floor, so the true cause flips to the absolute no-repeat rule (`under-floor-no-repeat`) — exactly the class of case the "2+3" ruling exists to un-stick: a truthful, thin-but-real repeat-permitting selection that the floor itself was blocking from ever being named as reachable', () => {
     const pool = [
       { keyword: 'quiet fox aim', searchVolume: 800, themeFit: 3 },
       { keyword: 'quiet fox run', searchVolume: 790, themeFit: 3 },
@@ -797,12 +807,16 @@ describe('FIX WAVE 2 (I-1): the shadow reachability pass enforces the <=2 word c
     const res = composeItemHighlightDetailed(pool, [], {})
     expect(res.line).toBeNull()
     // Real Tier-A-only selection picks exactly one phrase per pair (4 total, ~60 chars) — passes the
-    // MIN_CANDIDATES(3) gate, so this fails at the FLOOR check, not the too-few-picked gate.
-    expect(res.stage).toBe('under-floor-after-pad')
+    // MIN_CANDIDATES(3) gate, so this fails at the FLOOR check, not the too-few-picked gate. Under
+    // the NEW 97 floor the repeat-permitting shadow (capped at 7 picks / 106 chars, computed the same
+    // way regardless of MIN) now clears MIN, so `repeatBlocked` flips true and the reported stage is
+    // `under-floor-no-repeat`, not `under-floor-after-pad` (was true under the OLD 107 floor, where
+    // 106 chars still fell one char short).
+    expect(res.stage).toBe('under-floor-no-repeat')
     const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
     expect(logged.picked).toBe(4)
     expect(logged.lineLen).toBe(60)
-    expect(logged.repeatBlocked).toBe(false)
+    expect(logged.repeatBlocked).toBe(true)   // FLOOR 97: the shadow's 106-char reach now clears MIN
     logSpy.mockRestore()
   })
 
