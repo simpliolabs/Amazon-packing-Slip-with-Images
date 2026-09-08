@@ -6,7 +6,10 @@
  *  - 2026-08-20 "THESE ARE TERRIBLE!!!": no invented classes; pool phrases verbatim.
  *  - 2026-08-20 oversized: bare "Over(-)Sized <garment>" is a cut claim — never composes; demand
  *    surfaces only as the wear-style fact "Can be worn as Oversized".
- *  - 2026-08-21 "44 is NEVER approved, MIN 85% of MAX 125": floor = 107 (CONTENT_CONTRACT.min).
+ *  - 2026-08-21 "44 is NEVER approved, MIN 85% of MAX 125": floor = 107 (CONTENT_CONTRACT.min) —
+ *    SUPERSEDED 2026-09-07/08 by the PO RULING "2+3": floor = 97, not ceil(0.85*125). See the
+ *    ruling comment on `CONTENT_CONTRACT.itemHighlights.min` in contentContract.ts for why the 85%
+ *    ratio no longer applies (its premise — the field is shopper-invisible — was refuted).
  *    Under-floor pads with TRUE blank_specs facts; unreachable floor ⇒ null (NOT-READY, never short).
  *  - 2026-08-21 Electronics: garmentFamily 'none' composes zero garment vocabulary.
  *  - 2026-08-21 TRUTH STAGE (14-family review): garment-noun truth, capability claims, audience
@@ -54,7 +57,7 @@ const TASK8_REPRO_POOL = [
 ]
 const TASK8_REPRO_SPEC = { material: '100% Cotton Blend', fit: 'Relaxed', unisex: true, neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed' }
 
-describe('composeItemHighlight — Architecture A under the 85% floor', () => {
+describe('composeItemHighlight — Architecture A under the floor (97, PO RULING "2+3" 2026-09-07/08; was 107/"MIN 85% of MAX 125")', () => {
   it('composes verbatim pool phrases + true spec fillers, in the [MIN, MAX] band', () => {
     const out = composeItemHighlight(GATOR_POOL, GATOR_TITLES, OPTS)!
     expect(out).toBeTruthy()
@@ -600,6 +603,18 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     const spec = TASK8_REPRO_SPEC
     const res = composeItemHighlightDetailed(pool, [], { spec: spec as any })
     // Verified via an `npx tsx` probe against the real composer (task-8-report.md).
+    // CONTROLLER CORRECTION to #677 (2026-09-08): #677 had updated this fixture's expected bytes
+    // (103c, dropping "Unisex Fit") on the premise that the NEW 97 floor legitimately let the pool
+    // phase's own 103-char Tier-A reach ship without ever needing the pad loop. That premise was
+    // itself a symptom of #677's own defect: the pad loop's stop condition read the accept floor
+    // (`MIN`) instead of the fill target (`AIM`), so it never WALKED past 103 to check whether more
+    // filler was available — it merely happened to already be legal. With the pad loop corrected to
+    // aim at `Math.max(AIM, MIN)` (fillTarget 110, RESERVE 0 here), it continues past 103 and adds
+    // "Unisex Fit" (fold-new: `unisex`; `fit` still budget-2, exempt), reaching 118 chars — BYTE-
+    // IDENTICAL to the pre-#677 bytes this fixture originally pinned (`fit` count 2, per the FIX
+    // ROUND 1 exemption comment restored below). Confirms the acceptance criterion: lowering the
+    // floor is byte-identical for a line the pool phase alone already cleared 97 on, once the pad
+    // loop itself is no longer the thing silently capping it.
     expect(res.line).toBe('Crewneck Sweatshirts Women, Novelty Retro Graphic, Long Sleeve Crewneck, 100% Cotton Blend, Relaxed Fit, Unisex Fit')
     expect(res.stage).toBeNull()
     const line = res.line!
@@ -782,7 +797,7 @@ describe('FIX WAVE 2 (I-1): the shadow reachability pass enforces the <=2 word c
     logSpy.mockRestore()
   })
 
-  it('a pool where the 7-pick cap (not the <=2 cap, not the char budget) is what blocks the only repeat-permitting route to 107: 4 word-disjoint pairs (each shared word appears exactly twice, legal under the <=2 cap) reach 122 chars using all 8 phrases, but the real loop never admits an 8th pick — the true ceiling under the pick cap is 7 phrases / 106 chars, one char short of the floor', () => {
+  it('FLOOR 97 (PO RULING "2+3", 2026-09-07/08): a pool where the 7-pick cap (not the <=2 cap, not the char budget) is what blocked the only repeat-permitting route to the OLD 107 floor now clears the NEW 97 floor via that same repeat-permitting route: 4 word-disjoint pairs (each shared word appears exactly twice, legal under the <=2 cap) reach 122 chars using all 8 phrases, but the real loop never admits an 8th pick, so the true ceiling under the pick cap is 7 phrases / 106 chars — one char short of the OLD 107 floor (this is this test\'s ORIGINAL reproduction, and stayed `under-floor-after-pad`) but comfortably clears the NEW 97 floor, so the true cause flips to the absolute no-repeat rule (`under-floor-no-repeat`) — exactly the class of case the "2+3" ruling exists to un-stick: a truthful, thin-but-real repeat-permitting selection that the floor itself was blocking from ever being named as reachable', () => {
     const pool = [
       { keyword: 'quiet fox aim', searchVolume: 800, themeFit: 3 },
       { keyword: 'quiet fox run', searchVolume: 790, themeFit: 3 },
@@ -797,12 +812,16 @@ describe('FIX WAVE 2 (I-1): the shadow reachability pass enforces the <=2 word c
     const res = composeItemHighlightDetailed(pool, [], {})
     expect(res.line).toBeNull()
     // Real Tier-A-only selection picks exactly one phrase per pair (4 total, ~60 chars) — passes the
-    // MIN_CANDIDATES(3) gate, so this fails at the FLOOR check, not the too-few-picked gate.
-    expect(res.stage).toBe('under-floor-after-pad')
+    // MIN_CANDIDATES(3) gate, so this fails at the FLOOR check, not the too-few-picked gate. Under
+    // the NEW 97 floor the repeat-permitting shadow (capped at 7 picks / 106 chars, computed the same
+    // way regardless of MIN) now clears MIN, so `repeatBlocked` flips true and the reported stage is
+    // `under-floor-no-repeat`, not `under-floor-after-pad` (was true under the OLD 107 floor, where
+    // 106 chars still fell one char short).
+    expect(res.stage).toBe('under-floor-no-repeat')
     const logged = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
     expect(logged.picked).toBe(4)
     expect(logged.lineLen).toBe(60)
-    expect(logged.repeatBlocked).toBe(false)
+    expect(logged.repeatBlocked).toBe(true)   // FLOOR 97: the shadow's 106-char reach now clears MIN
     logSpy.mockRestore()
   })
 

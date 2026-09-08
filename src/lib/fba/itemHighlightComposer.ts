@@ -423,6 +423,13 @@ export function composeItemHighlightDetailed(
     : null
   const RESERVE = (factEligible ? OVERSIZED_FACT.length + 2 : 0) + (brandPick ? brandPick.length + 2 : 0)
   const MAX = CONTENT_CONTRACT.itemHighlights.max - RESERVE
+  // TWO NUMBERS, TWO JOBS (controller correction to #677, 2026-09-08 — see the "PO RULING 2+3"
+  // comment further down on `MIN`). `AIM` is the FILL target — how far both the pool loop (above)
+  // AND the pad loop (below) should keep walking while candidates/fillers remain. `MIN` is the
+  // ACCEPT floor — the ONLY question it answers is whether the FINISHED line SHIPS or the design
+  // HOLDS. Never let a stop/break condition read `MIN` where the job is "keep filling" — that
+  // conflation is exactly what made every padded line ~10 chars shorter when the floor dropped
+  // 107->97 (`ihPadAimVsFloorPin.test.ts` pins the pad loop's break to `AIM` mechanically).
   const AIM = CONTENT_CONTRACT.itemHighlights.fillTarget - RESERVE
 
   const picked: string[] = []
@@ -497,8 +504,10 @@ export function composeItemHighlightDetailed(
     picked.push(OVERSIZED_FACT)
   }
 
-  // PO RULING 2026-08-21, verbatim "44 is NEVER approved, MIN 85% of MAX 125": an under-min line
-  // never ships. Pad toward the floor with TRUE spec facts (blank_specs values — never invented),
+  // PO RULING 2026-08-21, verbatim "44 is NEVER approved, MIN 85% of MAX 125" (the ratio itself is
+  // superseded — the floor is now 97, not ceil(0.85*125)=107; see the PO RULING "2+3" 2026-09-07/08
+  // comment on `CONTENT_CONTRACT.itemHighlights.min`): an under-min line never ships, still, always.
+  // Pad toward the floor with TRUE spec facts (blank_specs values — never invented),
   // each passing the same novelty + repeat gates as pool phrases. "Unisex Fit" joins the bank when
   // blank_specs.unisex is TRUE (PO 2026-08-06: unisex sizing explicit in features/highlights,
   // never the title) — a mixed-blank intersection carries it only when every blank claims it. A family that cannot truthfully
@@ -528,7 +537,26 @@ export function composeItemHighlightDetailed(
     // fact that repeats a POOL token is still rejected outright; `tierBFitBudgetSeen` is the SAME
     // composer-wide raw signal the pool loop sets (one signal, read once below via the shadow pass).
     for (const f of factFillers) {
-      if (lineLen() >= MIN) break
+      // CONTROLLER CORRECTION to #677 (2026-09-08): this is the FILL-AIM stop condition, not the
+      // accept-floor decision — it must reach for `AIM` (reserve-adjusted, same as the pool loop's
+      // own stop condition above), not settle for `MIN` the instant the line is merely LEGAL. That
+      // conflation made every padded line ship ~10 chars shorter once the floor dropped 107->97 (4
+      // of 6 designs on the acceptance seam fixture lost their trailing "Classic Fit" —
+      // itemHighlightPushSeam.test.ts).
+      //
+      // `Math.max(AIM, MIN)`, not bare `AIM`: when RESERVE is large (a long brand phrase reserved
+      // above — see `needBrand`/`brandPick`), `AIM = fillTarget - RESERVE` can fall BELOW `MIN`
+      // ("brand at most once" fixture: RESERVE 21 -> AIM 89 < MIN 97). A bare-`AIM` break would
+      // then quit the pad loop before ever reaching the floor — a strictly WORSE regression than
+      // #677's, and a direct violation of rule 2 below ("an under-min line never ships, still,
+      // always") for a line the loop could have legally reached. The floor is the hard constraint;
+      // the fill target is the stretch goal on top of it — never the other way around. `MIN` still
+      // gates ENTRY into this block above and the post-loop SHIP/HOLD check below; this `break` is
+      // the only place both numbers must be compared, so both legitimately appear here.
+      // `ihPadAimVsFloorPin.test.ts` pins this line so a bare `MIN`-only break (no `AIM` at all)
+      // cannot silently regress back in — that is the specific defect class this guards, not the
+      // presence of `MIN` as a floor guard alongside `AIM`.
+      if (lineLen() >= Math.max(AIM, MIN)) break
       const phrase = titleCasePhrase(f)
       if (picked.includes(phrase)) continue
       const folded = significantFolded(f)
