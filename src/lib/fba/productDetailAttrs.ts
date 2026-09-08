@@ -23,6 +23,12 @@ import type { PatchValueEntry } from '@/lib/fba/pushFields'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { GARMENT_HEAD_WORDS } from '@/lib/fba/garmentNoun'
+// FIX ROUND 3 (I-1, controller RULING, phase-1-fix-round-3-findings.md): `healItemHighlightOnServe`
+// below is the ONE "scrub-then-cap-keep-scrubbed" shape both `ai-recommendations/route.ts` serve
+// sites need — trademarkGuard.ts has zero imports of its own (verified: a pure pattern-matching
+// leaf), so pulling it in here does not compromise this module's client-safety (the client `page.tsx`
+// imports `classifyStoredIhLine` from here directly).
+import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 
 /**
  * LLM/schema-sourced detail values are NOT guaranteed to be strings: the audit model can
@@ -740,6 +746,30 @@ export function capItemHighlightRepeats(value: string): IhNetResult {
     return { ok: false, reason: 'under-floor' }
   }
   return { ok: true, value: joined }
+}
+
+/**
+ * FIX ROUND 3 (I-1, controller RULING, phase-1-fix-round-3-findings.md): the ONE "heal an Item
+ * Highlight value on serve" shape. The reviewer's Important 1 proved a scrub-bypass at
+ * `listingPipeline.ts:10104-10113` (the verdict was taken on `scrubPub(line)`, but the PRE-scrub
+ * value is what persisted on refusal — `scrubCelebrityNames` runs ONLY at that one choke point for
+ * this field, so a refusal silently skipped it). `ai-recommendations/route.ts`'s two serve-path
+ * heal-on-read sites (`:2208` broadcast, `:2262` per-child) carried the SAME shape — `r.ok ? r.value
+ * : <pre-scrub>` — a THIRD copy of the exact bug class this repo keeps re-discovering per-site
+ * instead of fixing once. This function is the single source: scrub ONCE, cap the SCRUBBED string,
+ * and on refusal keep the SCRUBBED value — never the raw pre-scrub one, and never `''` for a
+ * refusal (BLOCKING 2's own discipline). Empty/whitespace input is not a refusal; it stays ''.
+ *
+ * The broadcast site (`:2208`) never called `scrubTrademarks` at all before this fix (unlike title/
+ * bullets/description/per-child, which all get a serve-time trademark heal elsewhere in the same
+ * route) — adding it here closes that parity gap too, not just the bypass. Scrubbing is idempotent
+ * and pure removal/substitution, so this is safe on every already-clean historical value.
+ */
+export function healItemHighlightOnServe(rawValue: string | null | undefined): string {
+  if (!rawValue) return ''
+  const scrubbed = scrubTrademarks(rawValue)
+  const r = capItemHighlightRepeats(scrubbed)
+  return r.ok ? r.value : scrubbed
 }
 
 export function buildDetailPatchValue(

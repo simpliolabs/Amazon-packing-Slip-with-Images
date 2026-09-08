@@ -11,6 +11,17 @@ superseded rather than amended. What changed:
 - **Verified on the PO's own populated listing** (B0DSCDZC6K, pushed 2026-07-23): the string appears
   ONLY in the HTML `<title>` — the browser tab and what Google indexes:
   > `Amazon.com: THE CEO Billionare Coming Soon Sweatshirt | Long Sleeve Pullover Crewneck | cotton blend fabric, relaxed unisex fit, crew neck design, cuff sleeves : Clothing, Shoes & Jewelry`
+
+  > DOCTRINE CORRECTION (2026-09-07, IH terminal net spec, fix round 3, Minor 3 — controller RULING
+  > on `phase-1-fix-round-3-findings.md`): the two bullets above are REFUTED. A LIVE DOM probe the
+  > same day found the Item Highlights line renders inside `#centerCol`, in
+  > `document.body.innerText`, ~366×60 px directly under the h1 — measured on `B0H9VDCBZJ` (124
+  > chars) and `B0DMXMH266` (122 chars). The field IS shopper-visible on the PDP, not only in the
+  > HTML `<title>`. `src/lib/fba/contentContract.ts:43-56` and `handoff/SELLER_PROFILE.md:248` carry
+  > this same correction (Important 5, fix round 1) — this file is the THIRD copy of the refuted
+  > claim, corrected here to match. The "not conversion copy" framing this REVISION 2 built on, and
+  > the 107-char floor decisions made from it, were both made believing no shopper sees this field;
+  > re-read them against the corrected premise (neither re-litigated here).
 - The visible **"Top highlights"** panel on the PDP is a DIFFERENT thing — Fabric type, Care
   instructions, Origin, Closure — sourced from the **Product Detail attributes**, which this week's
   work already fixed.

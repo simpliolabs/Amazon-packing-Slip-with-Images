@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignIhRows, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight } from './perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignIhRows, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, UNDER_FLOOR, ihSkipReasonText, IH_HOLD_MESSAGES, type PerChildItemHighlight } from './perDesignItemHighlights'
 
 /* ─── FIX WAVE 2 ROUND 2 (F1, controller RULING, final-fix-wave-2-round-2-findings.md) ────────────
  * `perDesignItemHighlights.ts` is imported by the CLIENT page (`fba/listing/[asin]/page.tsx`,
@@ -45,7 +45,16 @@ const ENTRIES: PerChildItemHighlight[] = [
 ]
 
 describe('buildPerSkuItemHighlightMap', () => {
-  it('assigns each SKU its OWN design line and skips the held design with no-line-for-design', () => {
+  // FIX ROUND 3 (I-1, controller RULING — F2 PARITY): DQ's entry carries `hold: 'thin-candidates'`
+  // with an empty line. Before this round, the seam's setup loop discarded any empty-line entry
+  // BEFORE classification ever ran, so `entry` resolved to `undefined` and always reported the
+  // generic `NO_LINE_FOR_DESIGN` — even though the entry's OWN hold ('thin-candidates') was more
+  // specific and already what `perDesignIhRows` (the card) reported for the exact same entry. That
+  // seam-vs-card disagreement (never on WHETHER it ships — always refused either way — only on WHICH
+  // reason) was itself an instance of the class this whole round closes. The seam now registers every
+  // entry regardless of line emptiness, so `classifyIhEntry` decides uniformly for both, and DQ's
+  // real hold reason surfaces here too.
+  it("assigns each SKU its OWN design line and skips the held design with its OWN hold reason (not the generic no-line-for-design)", () => {
     const targets = [
       { sku: 'BM64000L-BK', asin: 'B0BM000001' }, { sku: 'BM64000M-BK', asin: 'B0BM000002' },
       { sku: 'DQ64000L-BK', asin: 'B0DQ000001' }, { sku: 'RK64000L-BK', asin: 'B0RK000001' },
@@ -55,7 +64,16 @@ describe('buildPerSkuItemHighlightMap', () => {
     expect(values.get('BM64000M-BK')).toBe(BM_LINE)
     expect(values.get('RK64000L-BK')).toBe(RK_LINE)
     expect(values.has('DQ64000L-BK')).toBe(false)
-    expect(skipped).toEqual([{ sku: 'DQ64000L-BK', asin: 'B0DQ000001', reason: NO_LINE_FOR_DESIGN }])
+    expect(skipped).toEqual([{ sku: 'DQ64000L-BK', asin: 'B0DQ000001', reason: 'thin-candidates' }])
+  })
+
+  it('an entry with NO hold and an empty line still reports the generic no-line-for-design — the fix only changes behavior when a hold is actually recorded', () => {
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'ZZ64000L-BK', asin: 'B0ZZ000001', item_highlight: '', designKey: 'ZZ', designName: 'No Hold No Line', hold: null },
+    ]
+    const { values, skipped } = buildPerSkuItemHighlightMap(entries, [{ sku: 'ZZ64000L-BK', asin: 'B0ZZ000001' }], null)
+    expect(values.size).toBe(0)
+    expect(skipped).toEqual([{ sku: 'ZZ64000L-BK', asin: 'B0ZZ000001', reason: NO_LINE_FOR_DESIGN }])
   })
 
   it('an FBM twin (absent by SKU, same ASIN) inherits its sibling design line — the same twin resolution every per-child push applies', () => {
@@ -165,12 +183,27 @@ describe('FIX WAVE 2 ROUND 2 (F2): perDesignIhRows derives the push-seam skip re
     expect(pushableDesignLines(entries)).toEqual(entries)
   })
 
-  it('(c) the existing no-line-for-design (HELD) rendering is unchanged: empty line, the composer\'s own hold reason, and skipReason reports no-line-for-design', () => {
+  // FIX ROUND 3 (I-1, controller RULING): `skipReason` used to be `NO_LINE_FOR_DESIGN` for EVERY
+  // empty-line entry regardless of its own hold (classifyStoredIhLine only ever sees the line).
+  // `classifyIhEntry` (hold-first) now surfaces the entry's OWN hold reason instead — "the hold's
+  // own reason travels to the card ... never a second decision that only ever looks at the line" —
+  // so a design held for 'thin-candidates' now correctly reports THAT reason, not the generic
+  // no-line-for-design. This is a deliberate, disclosed behavior change (not a re-fixture to dodge a
+  // failure): `hold` and `skipReason` now agree by construction for every held-empty entry too.
+  it('(c) a HELD-empty design surfaces its OWN hold reason as skipReason (not the generic no-line-for-design) — hold and skipReason now agree by construction', () => {
     const rows = perDesignIhRows(ENTRIES)   // DQ: item_highlight: '', hold: 'thin-candidates'
     const dq = rows.find((r) => r.designKey === 'DQ')!
     expect(dq.line).toBe('')
     expect(dq.hold).toBe('thin-candidates')
-    expect(dq.skipReason).toBe(NO_LINE_FOR_DESIGN)
+    expect(dq.skipReason).toBe('thin-candidates')
+  })
+
+  it('(c2) an empty-line entry with NO hold still reports the generic no-line-for-design — the fix only changes behavior when a hold is actually recorded', () => {
+    const entries: PerChildItemHighlight[] = [
+      { sku: 'ZZ64000L-BK', asin: 'B0ZZ000001', item_highlight: '', designKey: 'ZZ', designName: 'No Hold No Line', hold: null },
+    ]
+    const rows = perDesignIhRows(entries)
+    expect(rows[0].skipReason).toBe(NO_LINE_FOR_DESIGN)
   })
 
   it('a clean, non-repeating stored line has skipReason null — never flagged when there is nothing to skip', () => {
@@ -204,5 +237,52 @@ describe('perDesignIhRows + markPushedItemHighlights', () => {
     const rows = perDesignIhRows(marked.entries)
     expect(rows.find((r) => r.designKey === 'RK')!.onAmazon).toBe(true)
     expect(rows.find((r) => r.designKey === 'BM')!.onAmazon).toBe(false)   // one of two BM SKUs pushed
+  })
+})
+
+/* ─── FIX ROUND 3 (I-2, controller RULING, phase-1-fix-round-3-findings.md) ─────────────────────────
+ * `ihSkipReasonText` is the ONE mapper every seller-facing skip-reason surface now calls
+ * (pushExecutor.ts's single-push details branch, its "Nothing to push" summary, its held-SKU
+ * surfacing pass, executeBulkDetailsPush's per-SKU skip, and the card) instead of a hand-rolled
+ * ternary per site. Direct unit tests here prove EVERY reason in the union gets its OWN accurate
+ * text — not just the two/three a hand-rolled ternary happened to enumerate — which is exactly the
+ * gap Important 2 found (an actual `under-floor` skip read as "has no composed ... (held)" on the
+ * bulk path). The no-hand-rolled-ternary DISCIPLINE at the call sites is proven separately by
+ * `ihSkipReasonTextSingleSource.test.ts`'s source-scan pin. */
+describe('FIX ROUND 3 (I-2, controller RULING): ihSkipReasonText — every IhSkuSkipReason gets its OWN accurate text, never a generic default', () => {
+  it('no-line-for-design reads as "no composed line", never mentions repeats or a floor', () => {
+    const text = ihSkipReasonText(NO_LINE_FOR_DESIGN)
+    expect(text).toContain('no composed Item Highlight')
+    expect(text).not.toContain('repeat')
+    expect(text).not.toContain('floor')
+  })
+
+  it('repeat-in-stored-line reads as "repeats a significant word", never "no composed line"', () => {
+    const text = ihSkipReasonText(REPEAT_IN_STORED_LINE)
+    expect(text).toContain('repeats a significant word')
+    expect(text).not.toContain('no composed Item Highlight')
+  })
+
+  it("under-floor reads as the REAL under-floor message — the exact bug Important 2 found (an under-floor skip must NEVER read as 'no composed line')", () => {
+    const text = ihSkipReasonText(UNDER_FLOOR)
+    expect(text).toBe(IH_HOLD_MESSAGES[UNDER_FLOOR])
+    expect(text).not.toContain('no composed Item Highlight')
+    expect(text).not.toContain('repeats a significant word')
+  })
+
+  it('every OTHER IhHoldReason (a hold co-existing with an in-band line, the I-1 load-bearing scenario) gets its OWN IH_HOLD_MESSAGES text — never collapsed to the generic held/no-line text', () => {
+    const otherReasons: (keyof typeof IH_HOLD_MESSAGES)[] = ['unrated-pool', 'thin-candidates', 'no-spec', 'designs-unrated', 'under-floor-no-repeat']
+    for (const reason of otherReasons) {
+      const text = ihSkipReasonText(reason)
+      expect(text).toBe(IH_HOLD_MESSAGES[reason])
+      expect(text).not.toContain('no composed Item Highlight')
+      expect(text).not.toContain('repeats a significant word')
+    }
+  })
+
+  it('returns a bare fragment — no "Skipped —" prefix, no trailing period — callers compose their own surrounding sentence', () => {
+    expect(ihSkipReasonText(NO_LINE_FOR_DESIGN).startsWith('Skipped')).toBe(false)
+    expect(ihSkipReasonText(REPEAT_IN_STORED_LINE).endsWith('.')).toBe(false)
+    expect(ihSkipReasonText(UNDER_FLOOR).startsWith('Skipped')).toBe(false)
   })
 })

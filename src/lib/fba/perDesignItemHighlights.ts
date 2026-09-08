@@ -111,7 +111,55 @@ export const REPEAT_IN_STORED_LINE = 'repeat-in-stored-line' as const
  *  got one (I-2b): "under the floor" is a distinct, nameable fact from "no line at all", and the PO
  *  must see WHICH of the two is true, not a collapsed generic skip. */
 export const UNDER_FLOOR = 'under-floor' as const
-export type IhSkuSkipReason = typeof NO_LINE_FOR_DESIGN | typeof REPEAT_IN_STORED_LINE | typeof UNDER_FLOOR
+// FIX ROUND 3 (I-1, controller RULING, phase-1-fix-round-3-findings.md): widened to include every
+// `IhHoldReason` (not just 'under-floor') — `classifyIhEntry` below can now refuse an entry for ANY
+// hold reason, and its own reason must travel through to the card/push report VERBATIM, never a
+// second, parallel vocabulary invented for the seam. ('under-floor' is a member of both unions
+// already; TS collapses the duplicate literal, no runtime effect.)
+export type IhSkuSkipReason = typeof NO_LINE_FOR_DESIGN | typeof REPEAT_IN_STORED_LINE | IhHoldReason
+
+/**
+ * FIX ROUND 3 (I-1, controller RULING): "A HOLD IS RECORDED BUT NEVER ENFORCED" — before this, the
+ * push seam (`buildPerSkuItemHighlightMap`) and the card's row builder (`perDesignIhRows`) each
+ * decided shippability from `classifyStoredIhLine(e.item_highlight)` ALONE, never looking at
+ * `e.hold`. An entry can carry BOTH a recorded hold AND a stored line that, taken on its own,
+ * classifies `ok` (e.g. `listingPipeline.ts`'s per-child persist keeps the composed line and stamps
+ * a hold on refusal — BLOCKING 2's own fix). Reproduced live (fix round 3 probe): such an entry was
+ * mapped by `buildPerSkuItemHighlightMap`, survived `pushableDesignLines`, and `buildDetailPatchValue`
+ * produced a real, shippable patch — a HELD design shipped.
+ *
+ * THE ONE PREDICATE: a non-null `hold` is disqualifying, full stop — the line's own classification
+ * is consulted ONLY when there is no hold. The hold's OWN `IhHoldReason` travels through as the
+ * returned reason (never a new, parallel name for the same fact) — `IhSkuSkipReason` above already
+ * widened to accept it.
+ */
+export function classifyIhEntry(
+  entry: { item_highlight?: string | null; hold?: IhHoldReason | null } | null | undefined,
+): 'ok' | IhSkuSkipReason {
+  if (entry?.hold) return entry.hold
+  return classifyStoredIhLine(entry?.item_highlight)
+}
+
+/**
+ * FIX ROUND 3 (I-2, controller RULING): the ONE mapper from a skip reason to seller-facing text —
+ * every site that renders a skip reason to the seller (pushExecutor.ts's single-push details branch,
+ * its "Nothing to push" summary, its held-SKU surfacing pass, `executeBulkDetailsPush`'s per-SKU
+ * skip, and the card) calls THIS instead of hand-rolling its own ternary. A new reason can then never
+ * reach a seller mislabeled: every hold reason (including any added in the future) reuses its OWN
+ * `IH_HOLD_MESSAGES` text automatically (the `default` branch below never enumerates hold reasons by
+ * name), and the two non-hold seam classifications get their own accurate fragment. Returns a
+ * FRAGMENT (no "Skipped — " prefix, no trailing period) — callers compose their own surrounding
+ * sentence/prefix (some name the SKU, some the design, some just summarize a count) around it. */
+export function ihSkipReasonText(reason: IhSkuSkipReason): string {
+  switch (reason) {
+    case 'no-line-for-design':
+      return "this design has no composed Item Highlight (held); it is never given another design's line"
+    case 'repeat-in-stored-line':
+      return "this design's stored Item Highlight repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit to recompose it"
+    default:
+      return IH_HOLD_MESSAGES[reason]
+  }
+}
 
 /** A compact one-row-per-design view of the stored array (first SKU of each design is representative). */
 export interface PerDesignIhRow {
@@ -122,12 +170,14 @@ export interface PerDesignIhRow {
   skuCount: number
   /** TRUE when every SKU of the design has pushed_value === line (non-empty). */
   onAmazon: boolean
-  /** FIX WAVE 2 ROUND 2 (F2, controller RULING): the PRE-FLIGHT classification of `line` via the
-   *  SAME `classifyStoredIhLine` predicate the push seam (`buildPerSkuItemHighlightMap`) applies —
-   *  null when `line` is non-empty and pushable ('ok'); otherwise the exact reason the seam would
-   *  refuse it. The card derives this from HERE, never a second decision in the page: a stale line
-   *  that repeats a significant word shows `repeat-in-stored-line` before any push is attempted,
-   *  not only after a push report says so. */
+  /** FIX WAVE 2 ROUND 2 (F2, controller RULING): the PRE-FLIGHT classification of the WHOLE entry
+   *  via the SAME `classifyIhEntry` predicate the push seam (`buildPerSkuItemHighlightMap`) applies
+   *  (FIX ROUND 3, I-1: widened from the line-only `classifyStoredIhLine` to also consult `hold`,
+   *  hold-first) — null when the entry is non-empty, unheld, and pushable ('ok'); otherwise the
+   *  exact reason the seam would refuse it. The card derives this from HERE, never a second decision
+   *  in the page: a stale line that repeats a significant word shows `repeat-in-stored-line` before
+   *  any push is attempted, and a HELD entry shows its own hold reason even when its line alone would
+   *  read as compliant — not only after a push report says so. */
   skipReason: IhSkuSkipReason | null
 }
 
@@ -140,7 +190,9 @@ export function perDesignIhRows(entries: PerChildItemHighlight[] | null | undefi
     let row = byKey.get(key)
     if (!row) {
       const line = e.item_highlight || ''
-      const classification = classifyStoredIhLine(line)
+      // FIX ROUND 3 (I-1, controller RULING): classifyIhEntry (hold-first) — "the hold's own reason
+      // travels to the card", not a second decision that only ever looks at the line.
+      const classification = classifyIhEntry(e)
       row = {
         designKey: key,
         designName: e.designName || e.designKey || e.sku,
@@ -163,8 +215,8 @@ export function perDesignIhRows(entries: PerChildItemHighlight[] | null | undefi
  *  ruling (PO 2026-08-21) every multi-design family collapses to ONE row "shared across N designs";
  *  the per-design capability stays — rows that ever differ render separately. `skipReason` is
  *  carried through from the group's own rows (guaranteed identical within a group — the collapse
- *  key already includes `line`, and `skipReason` is a pure function of `line` alone via
- *  `classifyStoredIhLine`). */
+ *  key is `${hold}|${line}`, and `skipReason` (FIX ROUND 3: via `classifyIhEntry`) is a pure
+ *  function of exactly that pair, so it can never disagree within one collapsed group). */
 export interface SharedIhRow {
   line: string
   hold: IhHoldReason | null
@@ -208,33 +260,53 @@ export function isPerDesignIhRow(row: { per_design?: unknown } | null | undefine
  * not just what the current composer would produce today. Amazon's own ≤2-per-word cap
  * (`capItemHighlightRepeats`) still runs downstream as defence in depth for the legacy/broadcast
  * path — this refusal is STRICTER (any repeat, not just a 3rd+ mention) and runs first.
+ *
+ * FIX ROUND 3 (I-1, controller RULING): an entry's own `hold` is now consulted TOO, via
+ * `classifyIhEntry` — a non-null hold is disqualifying regardless of what the line alone would
+ * classify as (the gap the ruling closes: a design can carry a recorded hold AND a stored line that,
+ * read in isolation, is perfectly in-band — that entry must still be SKIPPED, with the hold's own
+ * reason, never mapped into `values`).
  */
 export function buildPerSkuItemHighlightMap(
   entries: PerChildItemHighlight[] | null | undefined,
   targets: { sku: string; asin: string }[],
   parentAsin?: string | null,
 ): { values: Map<string, string>; skipped: { sku: string; asin: string; reason: IhSkuSkipReason }[] } {
-  const bySku = new Map<string, string>()
-  const byAsin = new Map<string, string>()
+  const bySku = new Map<string, PerChildItemHighlight>()
+  const byAsin = new Map<string, PerChildItemHighlight>()
+  // FIX ROUND 3 (I-1, controller RULING — F2 PARITY regression caught by itemHighlightPushSeam.test.ts's
+  // own parity suite): this loop used to `continue` past any entry whose line was empty, so a
+  // HELD-EMPTY entry (item_highlight:'', hold:'designs-unrated', say) was never registered here at
+  // all — the main loop below then resolved `entry` to `undefined` and `classifyIhEntry(undefined)`
+  // fell through to `classifyStoredIhLine(undefined)`, always reporting the GENERIC
+  // 'no-line-for-design' regardless of the entry's own, more specific hold. `perDesignIhRows` (the
+  // card) calls `classifyIhEntry` on the RAW entry directly and so already reported the specific
+  // reason — the two disagreed on WHICH reason a held-empty SKU gets (never on whether it ships;
+  // both always refuse it). Registering every entry here, empty line or not, lets `classifyIhEntry`
+  // decide uniformly for BOTH functions from the exact same data — it already treats an empty,
+  // unheld line as 'no-line-for-design' via `classifyStoredIhLine`, so this changes nothing for an
+  // entry with no hold.
   for (const e of Array.isArray(entries) ? entries : []) {
-    const line = (e.item_highlight || '').trim()
-    if (!line) continue                          // a HELD design contributes nothing — not even ''
-    if (e.sku) bySku.set(e.sku, line)
-    if (e.asin && !byAsin.has(e.asin)) byAsin.set(e.asin, line)
+    if (e.sku) bySku.set(e.sku, e)
+    if (e.asin && !byAsin.has(e.asin)) byAsin.set(e.asin, e)
   }
   const values = new Map<string, string>()
   const skipped: { sku: string; asin: string; reason: IhSkuSkipReason }[] = []
   for (const t of targets) {
     const isHub = !!parentAsin && t.asin === parentAsin && !bySku.has(t.sku)
-    const line = isHub ? undefined : (bySku.get(t.sku) ?? (t.asin ? byAsin.get(t.asin) : undefined))
-    const classification = classifyStoredIhLine(line)
-    if (classification === 'no-line-for-design') { skipped.push({ sku: t.sku, asin: t.asin, reason: NO_LINE_FOR_DESIGN }); continue }
-    if (classification === 'repeat-in-stored-line') { skipped.push({ sku: t.sku, asin: t.asin, reason: REPEAT_IN_STORED_LINE }); continue }
+    const entry = isHub ? undefined : (bySku.get(t.sku) ?? (t.asin ? byAsin.get(t.asin) : undefined))
+    // FIX ROUND 3 (I-1, controller RULING): classifyIhEntry consults the WHOLE entry — a non-null
+    // `hold` disqualifies it here, full stop, BEFORE the line's own classification is ever
+    // consulted. Previously this called `classifyStoredIhLine(line)` directly, which is exactly why
+    // an entry carrying a recorded hold alongside an in-band ('ok') line was mapped into `values`
+    // and shipped (reproduced: fix round 3 probe, buildPerSkuItemHighlightMap on a
+    // `{item_highlight: <123-char compliant line>, hold: 'under-floor'}` entry mapped the SKU).
+    const classification = classifyIhEntry(entry)
     // IH TERMINAL NET PHASE 1 (H13): an under-floor stored line used to fall through to this
     // `values.set` below (classifyStoredIhLine only ever returned 'ok' for a non-empty,
     // non-repeating line, regardless of length) — the exact gap the spec's H13 reproduction names.
-    if (classification === 'under-floor') { skipped.push({ sku: t.sku, asin: t.asin, reason: UNDER_FLOOR }); continue }
-    values.set(t.sku, line!)
+    if (classification !== 'ok') { skipped.push({ sku: t.sku, asin: t.asin, reason: classification }); continue }
+    values.set(t.sku, (entry!.item_highlight || '').trim())
   }
   return { values, skipped }
 }
@@ -246,7 +318,10 @@ export function buildPerSkuItemHighlightMap(
  *  exactly as unpushable as a family that composed nothing — `perDesignLines.length > 0` alone can
  *  no longer make a stale family look pushable one layer up from the seam that actually refuses it. */
 export function pushableDesignLines(entries: PerChildItemHighlight[] | null | undefined): PerChildItemHighlight[] {
-  return (Array.isArray(entries) ? entries : []).filter((e) => classifyStoredIhLine(e.item_highlight) === 'ok')
+  // FIX ROUND 3 (I-1, controller RULING): classifyIhEntry (hold-first), not classifyStoredIhLine
+  // alone — a held-but-in-band entry must not survive this filter (see buildPerSkuItemHighlightMap's
+  // matching fix above; both are the SAME predicate now, by construction).
+  return (Array.isArray(entries) ? entries : []).filter((e) => classifyIhEntry(e) === 'ok')
 }
 
 /** Stamp the write-through mirror on the entries whose SKU (or ASIN twin) just had `line` ACCEPTED. */

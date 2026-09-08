@@ -10098,16 +10098,23 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // output — this defense-in-depth net refusing is an EDGE case, not the normal path).
     // BLOCKING 2 (controller RULING, fix round 1): a refusal must NEVER overwrite this design's
     // already-composed, floor-checked line with '' — that is the exact silent HELD-conversion the
-    // reviewer reproduced (`applyBlankBrandNetPerDesign`, same class). Keep the pre-scrub composed
-    // value and record the hold (reusing the existing IhHoldReason vocabulary; no new hold
-    // semantics) instead.
+    // reviewer reproduced (`applyBlankBrandNetPerDesign`, same class). Keep the composed value and
+    // record the hold (reusing the existing IhHoldReason vocabulary; no new hold semantics) instead.
+    // FIX ROUND 3 (I-1, controller RULING, phase-1-final-review.md Important 1): the KEPT value on
+    // refusal must be the one that PASSED `scrubPub` — never the pre-scrub `c.item_highlight`. Before
+    // this fix the verdict was taken on `scrubPub(c.item_highlight)` but the value persisted was the
+    // UNSCRUBBED `c.item_highlight`, so `scrubPublished`'s ONE publish-boundary choke point could be
+    // routed around: `scrubCelebrityNames` runs ONLY here for this field (no celebrity door in
+    // `itemHighlightComposer.ts`), so a refusal silently skipped it. Compute the scrubbed string ONCE
+    // and keep THAT on refusal (never the raw pre-scrub value).
     per_child_item_highlights: r.per_child_item_highlights?.map((c) => {
       if (!c.item_highlight) return { ...c, item_highlight: '' }
-      const capResult = capItemHighlightRepeats(scrubPub(c.item_highlight, 'per-child-item-highlight'))
+      const scrubbed = scrubPub(c.item_highlight, 'per-child-item-highlight')
+      const capResult = capItemHighlightRepeats(scrubbed)
       if (!capResult.ok) {
         console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'per-child-item-highlight', sku: c.sku, reason: capResult.reason }))
         const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
-        return { ...c, item_highlight: c.item_highlight, hold }
+        return { ...c, item_highlight: scrubbed, hold }
       }
       return { ...c, item_highlight: capResult.value }
     }),

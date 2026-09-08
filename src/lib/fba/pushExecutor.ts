@@ -47,7 +47,7 @@ import {
   type DetailAttribute, type ItemHighlightsApiState,
 } from '@/lib/fba/productDetailAttrs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
-import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerCurrent, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, UNDER_FLOOR, IH_HOLD_MESSAGES, type PerChildItemHighlight, type IhSkuSkipReason } from '@/lib/fba/perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerCurrent, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, UNDER_FLOOR, ihSkipReasonText, type PerChildItemHighlight, type IhSkuSkipReason } from '@/lib/fba/perDesignItemHighlights'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
@@ -3769,12 +3769,17 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           const rawDetailDiff = await loadDetailDiff(parent_asin, ctx)
           const diff = rawDetailDiff.filter((d) => d.changed && d.raw != null)
           if (diff.length === 0) {
+            // FIX ROUND 3 (I-2, controller RULING): every DISTINCT reason present, via the ONE
+            // `ihSkipReasonText` mapper — never a binary "repeats a word, else no composed line"
+            // ternary (the exact class this was: an `under-floor`/held family read as "no composed
+            // line" even though a line existed). Lists every reason actually present, not just one.
+            const skippedReasons = Array.from(new Set(rawDetailDiff.filter((d) => d.skipReason).map((d) => d.skipReason as IhSkuSkipReason)))
             emit({
               type: 'result',
               parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
               pushed: 0, failed: 0, total: 0,
               message: ctx.perDesignEntries
-                ? `Nothing to push — every SKU already carries its own design's ${ctx.detailField}${rawDetailDiff.some((d) => d.skipReason) ? ` (${rawDetailDiff.filter((d) => d.skipReason).length} SKU(s) skipped: ${rawDetailDiff.some((d) => d.skipReason === REPEAT_IN_STORED_LINE) ? 'their stored line has no composed value, or repeats a significant word' : 'their design has no composed line'})` : ''}.`
+                ? `Nothing to push — every SKU already carries its own design's ${ctx.detailField}${skippedReasons.length ? ` (${rawDetailDiff.filter((d) => d.skipReason).length} SKU(s) skipped: ${skippedReasons.map((r) => ihSkipReasonText(r)).join('; ')})` : ''}.`
                 : `Nothing to push — every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".`,
               results: [],
             })
@@ -3955,12 +3960,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             // the seam's `skipped` list and the card, but this gate never recognized it — the SKU
             // produced no result row and no progress event at all (neither pushed nor reported). Added
             // as a THIRD branch (appended, not inserted, so the pinned prefix above stays matchable).
+            // FIX ROUND 3 (I-2, controller RULING): the reason TEXT now comes from the ONE
+            // `ihSkipReasonText` mapper — never a hand-rolled ternary that only knows 2-3 named
+            // reasons and mislabels every other one (the "fourth divergence" this round closes).
             if (ctx.perDesignEntries && (item.skipReason === NO_LINE_FOR_DESIGN || item.skipReason === REPEAT_IN_STORED_LINE || !item.raw || item.skipReason === UNDER_FLOOR)) {
-              const reason = item.skipReason === REPEAT_IN_STORED_LINE
-                ? 'Skipped — this SKU\'s stored Item Highlight repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit to recompose it.'
-                : item.skipReason === UNDER_FLOOR
-                  ? `Skipped — this SKU's stored Item Highlight is under the floor (${IH_HOLD_MESSAGES[UNDER_FLOOR]}); re-run ↻ Regen or a full audit to recompose it.`
-                  : 'Skipped — this SKU\'s design has no composed Item Highlight (held); it is never given another design\'s line.'
+              const reason = `Skipped — ${ihSkipReasonText(item.skipReason ?? NO_LINE_FOR_DESIGN)}.`
               results.push({ sku: item.sku, status: 'skipped', submissionId: null, error: reason, isParent })
               emit({ type: 'progress', sku: item.sku, status: 'skipped', error: reason })
               continue
@@ -4036,15 +4040,17 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // entered `diff` (proposed '' ⇒ changed:false) so the seller sees WHICH were skipped and why.
           // FIX WAVE 2 (I-2b): also surfaces 'repeat-in-stored-line' refusals with their OWN accurate
           // reason (a line existed; the seam refused it — not "held, nothing composed").
-          // IMPORTANT 3 (controller RULING, fix round 1): also surfaces 'under-floor' — appended after
-          // the pinned prefix above so the existing REPEAT_IN_STORED_LINE regex pin stays matchable.
+          // IMPORTANT 3 (controller RULING, fix round 1): also surfaces 'under-floor'.
+          // FIX ROUND 3 (I-1/I-2, controller RULING): the filter widened from three enumerated
+          // literals to "any skipReason at all" — `classifyIhEntry` (I-1's hold-first predicate) can
+          // now surface ANY `IhHoldReason` here (reproduced: a held-but-in-band-line entry whose hold
+          // is 'under-floor-no-repeat' — the OTHER real hold `listingPipeline.ts` can stamp alongside
+          // a kept line — was silently DROPPED by the old 3-literal filter, never surfaced at all,
+          // worse than a mislabel). The reason TEXT comes from the ONE `ihSkipReasonText` mapper, so a
+          // brand-new reason is reported accurately by construction, never omitted or generic.
           if (ctx.perDesignEntries) {
-            for (const d of rawDetailDiff.filter((r) => (r.skipReason === NO_LINE_FOR_DESIGN || r.skipReason === REPEAT_IN_STORED_LINE || r.skipReason === UNDER_FLOOR) && r.asin !== parent_asin)) {
-              const reason = d.skipReason === REPEAT_IN_STORED_LINE
-                ? `Skipped (${REPEAT_IN_STORED_LINE}) — ${d.designName || d.designKey || 'this design'}'s stored Item Highlight repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit.`
-                : d.skipReason === UNDER_FLOOR
-                  ? `Skipped (${UNDER_FLOOR}) — ${d.designName || d.designKey || 'this design'}'s stored Item Highlight is under the floor (${IH_HOLD_MESSAGES[UNDER_FLOOR]}).`
-                  : `Skipped (${NO_LINE_FOR_DESIGN}) — ${d.designName || d.designKey || 'this design'} has no composed Item Highlight; never given another design's line.`
+            for (const d of rawDetailDiff.filter((r) => !!r.skipReason && r.asin !== parent_asin)) {
+              const reason = `Skipped (${d.skipReason}) — ${d.designName || d.designKey || 'this design'}: ${ihSkipReasonText(d.skipReason as IhSkuSkipReason)}.`
               results.push({ sku: d.sku, status: 'skipped', submissionId: null, error: reason, isParent: false })
               emit({ type: 'progress', sku: d.sku, status: 'skipped', error: reason })
             }
@@ -4791,9 +4797,13 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
       const { desiredSku, skuKeys, skips } = resolveBulkSkuFields(s.sku, livePlans, perDesignMaps, desired)
       for (const sk of skips) {
         ihSkips.push({ sku: s.sku, field: sk.field, reason: sk.reason })
-        const reasonText = sk.reason === REPEAT_IN_STORED_LINE
-          ? `Skipped — this SKU's stored ${sk.field} repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit to recompose it.`
-          : `Skipped — this SKU's design has no composed ${sk.field} (held); it is never given another design's line.`
+        // FIX ROUND 3 (I-2, controller RULING, phase-1-final-review.md Important 2 — the FOURTH
+        // single-vs-bulk divergence on this branch): this was a two-branch ternary that mislabeled
+        // every reason other than 'repeat-in-stored-line' as "has no composed ... (held)" — including
+        // an actual 'under-floor' skip (reproduced: fix round 3 probe-r3-i3-bulkreason.mts). The ONE
+        // `ihSkipReasonText` mapper closes the class: a new reason is reported accurately here by
+        // construction, never mislabeled and never silently defaulted to the generic held text.
+        const reasonText = `Skipped — ${ihSkipReasonText(sk.reason)}.`
         // Surface it to the PO the same way the single-push path does (emit a progress event with the
         // reason) — never a bare console.log a regression could leave un-surfaced forever.
         emit({ type: 'progress', sku: s.sku, status: 'skipped', field: sk.field, error: reasonText })

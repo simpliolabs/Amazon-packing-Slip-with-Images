@@ -47,14 +47,27 @@ describe('pushExecutor.ts consumes the repeat-in-stored-line refusal (FIX WAVE 2
     expect(SRC).toMatch(/skipReason\?:\s*IhSkuSkipReason/)
   })
 
-  it('the executePush details-branch per-SKU skip check recognizes REPEAT_IN_STORED_LINE (not only NO_LINE_FOR_DESIGN/!item.raw) and reports its OWN accurate message', () => {
+  // FIX ROUND 3 (I-2, controller RULING): the reason TEXT is no longer a hand-rolled ternary naming
+  // REPEAT_IN_STORED_LINE specifically — it is the ONE `ihSkipReasonText` mapper (which itself is
+  // directly unit-tested in `perDesignItemHighlights.test.ts` to return the accurate
+  // "repeats a significant word" text for THIS reason, among every other reason). The routing
+  // condition (the `if` gate itself) is UNCHANGED — only the text-construction ternary this pin used
+  // to assert is gone, per this round's ruling ("do not add a third branch in two places").
+  it('the executePush details-branch per-SKU skip check recognizes REPEAT_IN_STORED_LINE (not only NO_LINE_FOR_DESIGN/!item.raw) and reports its message via the ONE ihSkipReasonText mapper (fix round 3)', () => {
     expect(SRC).toMatch(/item\.skipReason === NO_LINE_FOR_DESIGN \|\| item\.skipReason === REPEAT_IN_STORED_LINE \|\| !item\.raw/)
-    expect(SRC).toMatch(/item\.skipReason === REPEAT_IN_STORED_LINE\s*\n\s*\?\s*'Skipped — this SKU\\'s stored Item Highlight repeats a significant word/)
+    expect(SRC).toMatch(/const reason = `Skipped — \$\{ihSkipReasonText\(item\.skipReason \?\? NO_LINE_FOR_DESIGN\)\}\.`/)
   })
 
-  it('the held-SKU surfacing pass (rawDetailDiff) also recognizes REPEAT_IN_STORED_LINE with its own message, not the generic "has no composed Item Highlight" text', () => {
-    expect(SRC).toMatch(/r\.skipReason === NO_LINE_FOR_DESIGN \|\| r\.skipReason === REPEAT_IN_STORED_LINE/)
-    expect(SRC).toMatch(/d\.skipReason === REPEAT_IN_STORED_LINE/)
+  // FIX ROUND 3 (I-1/I-2, controller RULING): the filter widened from the enumerated
+  // NO_LINE_FOR_DESIGN/REPEAT_IN_STORED_LINE/UNDER_FLOOR literals to "any skipReason at all"
+  // (`classifyIhEntry` can now surface ANY IhHoldReason here — a held-but-in-band-line entry whose
+  // hold is, say, 'under-floor-no-repeat' was silently DROPPED by the old 3-literal filter, never
+  // surfaced at all; reproduced live, fix round 3 probe). The message comes from the ONE
+  // `ihSkipReasonText` mapper, so REPEAT_IN_STORED_LINE (and every other reason) is reported
+  // accurately without a per-reason hand-rolled branch.
+  it('the held-SKU surfacing pass (rawDetailDiff) surfaces EVERY skipReason (widened from 3 enumerated literals) and reports each via ihSkipReasonText — REPEAT_IN_STORED_LINE included, never the generic "has no composed Item Highlight" text', () => {
+    expect(SRC).toMatch(/rawDetailDiff\.filter\(\(r\) => !!r\.skipReason && r\.asin !== parent_asin\)/)
+    expect(SRC).toMatch(/const reason = `Skipped \(\$\{d\.skipReason\}\) — \$\{d\.designName \|\| d\.designKey \|\| 'this design'\}: \$\{ihSkipReasonText\(d\.skipReason as IhSkuSkipReason\)\}\.`/)
   })
 })
 
@@ -72,18 +85,28 @@ describe('pushExecutor.ts consumes the under-floor refusal at the push REPORT (I
     expect(importLine).toMatch(/\bUNDER_FLOOR\b/)
   })
 
-  it('the executePush details-branch per-SKU skip check ALSO recognizes UNDER_FLOOR (a third branch, appended after the pinned prefix above) and reports its own accurate message', () => {
+  it('the executePush details-branch per-SKU skip check ALSO recognizes UNDER_FLOOR (a third branch, appended after the pinned prefix above) and reports it via the ONE ihSkipReasonText mapper (fix round 3)', () => {
     expect(SRC).toMatch(/item\.skipReason === NO_LINE_FOR_DESIGN \|\| item\.skipReason === REPEAT_IN_STORED_LINE \|\| !item\.raw \|\| item\.skipReason === UNDER_FLOOR/)
-    expect(SRC).toMatch(/item\.skipReason === UNDER_FLOOR/)
+    expect(SRC).toMatch(/const reason = `Skipped — \$\{ihSkipReasonText\(item\.skipReason \?\? NO_LINE_FOR_DESIGN\)\}\.`/)
   })
 
-  it('the held-SKU surfacing pass (rawDetailDiff) ALSO recognizes UNDER_FLOOR (appended after the pinned prefix above), never falling through to the generic "has no composed Item Highlight" text', () => {
-    expect(SRC).toMatch(/r\.skipReason === NO_LINE_FOR_DESIGN \|\| r\.skipReason === REPEAT_IN_STORED_LINE \|\| r\.skipReason === UNDER_FLOOR/)
-    expect(SRC).toMatch(/d\.skipReason === UNDER_FLOOR/)
+  // FIX ROUND 3 (I-1/I-2, controller RULING): see the widened-filter comment above — the same
+  // "!!r.skipReason" filter (not a 3-literal enumeration) now surfaces UNDER_FLOOR (and every other
+  // reason) here too, via the same ihSkipReasonText call.
+  it('the held-SKU surfacing pass (rawDetailDiff) surfaces UNDER_FLOOR via the widened filter + ihSkipReasonText, never falling through to the generic "has no composed Item Highlight" text', () => {
+    expect(SRC).toMatch(/rawDetailDiff\.filter\(\(r\) => !!r\.skipReason && r\.asin !== parent_asin\)/)
+    expect(SRC).toMatch(/ihSkipReasonText\(d\.skipReason as IhSkuSkipReason\)/)
   })
 
-  it('the under-floor message reuses the ONE existing IH_HOLD_MESSAGES[\'under-floor\'] text (no second hand-written floor sentence)', () => {
-    expect(SRC).toMatch(/IH_HOLD_MESSAGES\[UNDER_FLOOR\]/)
+  // FIX ROUND 3 (I-2, controller RULING): pushExecutor.ts no longer references IH_HOLD_MESSAGES
+  // directly (the literal `IH_HOLD_MESSAGES[UNDER_FLOOR]` this pin used to assert lived ONLY inside
+  // the hand-rolled ternaries this round removed) -- the under-floor text is now sourced from the
+  // ONE `ihSkipReasonText` mapper, which itself reuses `IH_HOLD_MESSAGES[UNDER_FLOOR]` internally
+  // (proven directly in perDesignItemHighlights.test.ts's "ihSkipReasonText" describe block: 'under-floor reads as the REAL under-floor message'). This pin now proves pushExecutor.ts calls
+  // THAT mapper at every site instead of re-deriving the text itself.
+  it('the under-floor message is sourced from the ONE ihSkipReasonText mapper (which itself reuses IH_HOLD_MESSAGES) -- pushExecutor.ts no longer hand-writes a floor sentence or references IH_HOLD_MESSAGES directly', () => {
+    expect(SRC).toMatch(/ihSkipReasonText/)
+    expect(SRC).not.toMatch(/IH_HOLD_MESSAGES/)
   })
 })
 

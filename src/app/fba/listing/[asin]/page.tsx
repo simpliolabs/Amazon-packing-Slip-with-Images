@@ -12,8 +12,7 @@ import {
   SOURCE_LABEL, resolveDesignGarment, buildDesignAssignmentRequests, buildDesignClearRequests,
   type GarmentResolution, type ChildGarmentResolution,
 } from '@/lib/fba/garmentPerDesign'
-import { perDesignIhRows, collapseSharedIhRows, IH_HOLD_MESSAGES, type PerChildItemHighlight, type PerDesignIhRow, type IhHoldReason } from '@/lib/fba/perDesignItemHighlights'
-import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'   // IH TERMINAL NET PHASE 1 (2026-09-07): the under-floor skip reason's own message names the real floor, never a hardcoded 107
+import { perDesignIhRows, collapseSharedIhRows, IH_HOLD_MESSAGES, ihSkipReasonText, type PerChildItemHighlight, type PerDesignIhRow, type IhHoldReason } from '@/lib/fba/perDesignItemHighlights'
 import { runThemeRerate, type ThemeRerateOutcome } from '@/lib/fba/themeRerateControl'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
@@ -4558,14 +4557,19 @@ export default function ListingDetailPage() {
                                       {/* FIX WAVE 2 ROUND 2 (F2, controller RULING): a stored line that the push seam would
                                           REFUSE (repeats a significant word — a pre-ruling stored value, a manual DB edit,
                                           or a future producer bug) is flagged PRE-FLIGHT, derived from `perDesignIhRows`'
-                                          own `skipReason` (the SAME `classifyStoredIhLine` the seam applies) — never a
-                                          second decision made here in the page.
-                                          IH TERMINAL NET PHASE 1 (2026-09-07, H13): 'under-floor' joins 'repeat-in-stored-line'
-                                          as a real skipReason — same PRE-FLIGHT surfacing, its OWN accurate reason text (never
-                                          the repeat wording for a line that is actually just too short). */}
-                                      {r.line && r.skipReason && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={r.skipReason === 'under-floor' ? `This stored line is only ${r.line.length} chars — below the ${CONTENT_CONTRACT.itemHighlights.min} floor. Amazon's push seam refuses to ship it. Click ↻ Regen to compose a compliant line.` : "This stored line repeats a significant word — Amazon's push seam refuses to ship it. Click ↻ Regen to compose a compliant line."}>Skip at push</span>}
+                                          own `skipReason` (the SAME `classifyIhEntry` the seam applies, FIX ROUND 3:
+                                          hold-first) — never a second decision made here in the page.
+                                          FIX ROUND 3 (I-1/I-2, controller RULING): `skipReason` can now be ANY hold
+                                          reason too (a HELD entry whose line alone reads compliant) — the tooltip comes
+                                          from the ONE `ihSkipReasonText` mapper so a new reason is never mislabeled as
+                                          "repeats a word" or silently ignored. */}
+                                      {r.line && r.skipReason && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={ihSkipReasonText(r.skipReason)}>Skip at push</span>}
                                     </div>
-                                    {r.line ? <p className="text-xs text-slate-700 break-words">{r.line}</p> : <p className="text-[11px] text-amber-800 italic">Skipped at push (no-line-for-design)</p>}
+                                    {/* FIX ROUND 3 (I-2, controller RULING): the empty-line case's reason is `r.skipReason`
+                                        itself (guaranteed set by `classifyIhEntry` whenever the line is empty) — never the
+                                        hardcoded 'no-line-for-design' literal, which was wrong for a held-empty entry
+                                        whose OWN hold reason (e.g. 'unrated-pool') is now what actually gets recorded. */}
+                                    {r.line ? <p className="text-xs text-slate-700 break-words">{r.line}</p> : <p className="text-[11px] text-amber-800 italic">Skipped at push ({r.skipReason ?? 'no-line-for-design'})</p>}
                                     {r.line && r.skipReason && <p className="text-[11px] text-amber-800 italic">Skipped at push ({r.skipReason})</p>}
                                   </div>
                                 ))}
