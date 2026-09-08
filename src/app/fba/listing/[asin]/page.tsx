@@ -527,8 +527,10 @@ export default function ListingDetailPage() {
      *  normalized FROM (e.g. "Unisex Adult") when the audit's value wasn't accepted. */
     acceptedValues?: string[] | null; normalizedFrom?: string | null
     /** PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): one row per design; diff[] carries each SKU's own
-     *  line; skipped_no_line = SKUs whose design holds (never given another design's line). */
-    per_design?: PerDesignIhRow[] | null; skipped_no_line?: number
+     *  line; skipped_count = SKUs whose design skips at push, for ANY reason (R3, finish-line-
+     *  rulings.md, controller RULING, 2026-09-08 — renamed from `skipped_no_line`, which the route
+     *  used to compute by counting ONLY the 'no-line-for-design' reason). */
+    per_design?: PerDesignIhRow[] | null; skipped_count?: number
     /** Part 2b — true = uncoercible dropdown; the modal shows a seller-picker over acceptedValues. */
     enum_invalid?: boolean
   }
@@ -4564,6 +4566,10 @@ export default function ListingDetailPage() {
                                           from the ONE `ihSkipReasonText` mapper so a new reason is never mislabeled as
                                           "repeats a word" or silently ignored. */}
                                       {r.line && r.skipReason && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={ihSkipReasonText(r.skipReason)}>Skip at push</span>}
+                                      {/* R1 (finish-line-rulings.md, controller RULING, 2026-09-08): non-blocking — this
+                                          line SHIPS; it only lost its blank-brand insertion (reuses IH_HOLD_MESSAGES,
+                                          never a parallel vocabulary, never `hold`/`skipReason`). */}
+                                      {r.blankBrandAbandoned && <span className="text-[10px] px-1 py-0.5 rounded bg-sky-100 text-sky-800 font-medium" title={`Blank brand omitted: ${IH_HOLD_MESSAGES[r.blankBrandAbandoned]}`}>Blank brand omitted</span>}
                                     </div>
                                     {/* FIX ROUND 3 (I-2, controller RULING): the empty-line case's reason is `r.skipReason`
                                         itself (guaranteed set by `classifyIhEntry` whenever the line is empty) — never the
@@ -5983,7 +5989,7 @@ export default function ListingDetailPage() {
                       <p className="text-xs text-amber-900 leading-relaxed">
                         <span className="px-1.5 py-0.5 rounded bg-amber-600 text-white font-semibold mr-1.5 whitespace-nowrap">Per-child</span>
                         {pushPreview.field === 'details' && pushPreview.per_design
-                          ? <>Multi-design family — each SKU gets <b>its own design&apos;s</b> {pushPreview.detail_field}. <b>{pushPreview.changed}</b> of {pushPreview.count} will change{(pushPreview.skipped_no_line ?? 0) > 0 ? <>; <b>{pushPreview.skipped_no_line}</b> skipped (their design has no composed line — never given another design&apos;s)</> : null}.</>
+                          ? <>Multi-design family — each SKU gets <b>its own design&apos;s</b> {pushPreview.detail_field}. <b>{pushPreview.changed}</b> of {pushPreview.count} will change{(pushPreview.skipped_count ?? 0) > 0 ? <>; <b>{pushPreview.skipped_count}</b> skipped (held at push — see the per-design detail above for why)</> : null}.</>
                           : pushPreview.field === 'keywords'
                           ? <>Each of <b>{pushPreview.count}</b> SKUs (incl. matching FBA + FBM) gets its <b>own</b> backend search terms. <b>{pushPreview.changed}</b> will change — not customer-visible.</>
                           : pushPreview.field === 'title'
@@ -6184,20 +6190,37 @@ export default function ListingDetailPage() {
                   ) : (
                     <>
                     {/* PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): one row per design ABOVE the per-SKU diff —
-                        design · line · length · hold; a held design ships nothing (skipped at push). */}
+                        design · line · length · hold; a held design ships nothing (skipped at push).
+                        R3 (finish-line-rulings.md, controller RULING, 2026-09-08, IMPORTANT 3): three
+                        defects fixed on this exact surface — (1) a row with a non-empty LINE but a
+                        `skipReason` (e.g. a HELD design whose stored line alone still reads compliant,
+                        FIX ROUND 3's own class) rendered in emerald with NO badge, presenting a push
+                        that will ship nothing as if it were shipping; (2) the badge hardcoded the
+                        literal "no-line-for-design" for EVERY hold reason, wrong for every reason but
+                        one; (3) the route's `skipped_no_line` counter only counted that one reason
+                        (see push-content/route.ts). The badge now fires on `r.skipReason` alone (line
+                        present or not) and is routed through the ONE `ihSkipReasonText` mapper, never
+                        a hardcoded string — the same discipline the section card (collapseSharedIhRows,
+                        above in this file) already applies. */}
                     {pushPreview.field === 'details' && pushPreview.per_design && (
                       <div className="bg-white rounded-md border-2 border-emerald-300 p-3 mb-3">
                         <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5">New {pushPreview.detail_field} → one line per design</p>
                         <div className="divide-y divide-slate-100">
                           {pushPreview.per_design.map((r) => (
-                            <div key={r.designKey} className={`py-1.5 ${r.line ? '' : 'opacity-80'}`}>
+                            <div key={r.designKey} className={`py-1.5 ${r.skipReason ? 'opacity-80' : ''}`}>
                               <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
                                 <span className="font-semibold text-slate-800" title={r.designKey}>{r.designName}</span>
                                 <span className="text-slate-400">· {r.skuCount} SKU{r.skuCount === 1 ? '' : 's'}</span>
                                 {r.line && <span className={r.line.length < 107 ? 'text-amber-600' : 'text-slate-400'}>· {r.line.length}/125 chars</span>}
-                                {!r.line && <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium">Held{r.hold ? ` · ${r.hold}` : ''} — skipped (no-line-for-design)</span>}
+                                {r.skipReason && <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={ihSkipReasonText(r.skipReason)}>Skipped at push — {r.skipReason}</span>}
+                                {/* R1 (finish-line-rulings.md, controller RULING, 2026-09-08): the
+                                    blank-brand insertion net tried and ABANDONED inserting the brand —
+                                    this design still SHIPS (correct, ruled), so this is NOT a skip
+                                    badge; it reuses the SAME IhHoldReason/IH_HOLD_MESSAGES vocabulary
+                                    the skip badge above uses, never a parallel one. */}
+                                {r.blankBrandAbandoned && <span className="px-1 py-0.5 rounded bg-sky-100 text-sky-800 font-medium" title={`Blank brand omitted: ${IH_HOLD_MESSAGES[r.blankBrandAbandoned]}`}>Blank brand omitted</span>}
                               </div>
-                              {r.line && <p className="text-xs text-emerald-800 break-words">{r.line}</p>}
+                              {r.line && <p className={`text-xs break-words ${r.skipReason ? 'text-slate-400 line-through' : 'text-emerald-800'}`}>{r.line}</p>}
                             </div>
                           ))}
                         </div>

@@ -668,7 +668,22 @@ export function classifyStoredIhLine(value: string | null | undefined): IhLineCl
 export type IhRefusalReason = 'repeat-over-budget' | 'over-max' | 'under-floor'
 export type IhNetResult = { ok: true; value: string } | { ok: false; reason: IhRefusalReason }
 
-export function capItemHighlightRepeats(value: string): IhNetResult {
+export interface CapItemHighlightRepeatsOpts {
+  /** R2 (finish-line-rulings.md, controller RULING, 2026-09-08) refuses any ACTUAL length-driven
+   *  drop outright — see the `lengthDropped` block below. The ONE named, deliberate exception:
+   *  `ensureBlankBrandInHighlights` (blankSpecs.ts) calls this net on its OWN
+   *  `"authentic <brand> blank, " + hl` candidate, where trimming trailing phrases to fit is the
+   *  DOCUMENTED insertion mechanic (PO ruling, SELLER_PROFILE.md §5 — "insertion order is the
+   *  survival mechanism") that displaces LOW-priority phrases to make room for a MUST-carry brand
+   *  fact, never the seller's own composed meaning being silently halved (H12's class). The floor
+   *  check (`under-floor`, unconditional, checked first) still refuses an eviction that guts the
+   *  line either way — this flag only widens what may clear it. No other caller may pass it; every
+   *  other call site is exactly the terminal-net validation of a FINAL, already-composed/stored
+   *  line R2 is about. */
+  allowLengthAmputation?: boolean
+}
+
+export function capItemHighlightRepeats(value: string, opts?: CapItemHighlightRepeatsOpts): IhNetResult {
   // Empty/whitespace-only input is NOT a refusal — it is "nothing to net", the pre-existing meaning
   // of `''` every caller already treats as "no value" before or after calling this net.
   // `buildDetailPatchValue` guards it BEFORE calling in; `regenerate-item-highlight/route.ts` does
@@ -741,9 +756,27 @@ export function capItemHighlightRepeats(value: string): IhNetResult {
   // so a naturally-short-but-untouched value — not this net's job to floor-check, see
   // `classifyStoredIhLine` for the pre-flight floor gate on STORED lines — still passes through
   // unchanged as before).
-  const dropped = capped.length < kept.length || kept.length < phrases.length
+  const lengthDropped = capped.length < kept.length
+  const dropped = lengthDropped || kept.length < phrases.length
   if (dropped && joined.length < CONTENT_CONTRACT.itemHighlights.min) {
     return { ok: false, reason: 'under-floor' }
+  }
+  // R2 (finish-line-rulings.md, controller RULING, 2026-09-08): implement the spec's rule
+  // LITERALLY — docs/superpowers/specs/2026-09-07-item-highlight-terminal-net.md says "the length
+  // rule refuses rather than truncates", with no floor qualification. REPRODUCED (phase-1-final-
+  // review-2.md IMPORTANT 2, scratchpad/finish-a/r2-truncate.ts): the check above scoped the
+  // refusal to a survivor landing UNDER the floor — a length-driven amputation whose survivor
+  // clears the floor (e.g. `itemHighlightBudget.test.ts`'s 142c fixture -> 118c survivor) still
+  // shipped truncated as `{ok:true}` with no refusal, no signal. Any ACTUAL length-driven drop
+  // (the length loop dropped at least one phrase the repeat net had already kept) is now refused
+  // outright, whether or not the survivor clears the floor — "a truncated line is a line whose
+  // meaning nobody chose" (the spec's own adversary section). Scoped to the LENGTH axis only, not a
+  // repeat-only drop that never needed length trimming (`kept.length === capped.length`): today's
+  // producer never emits >125 chars, so this is byte-identical on every real composed line — the
+  // repeat cap's own defence-in-depth truncation (a distinct, pre-existing behaviour, unchanged
+  // here) is not what this ruling named.
+  if (lengthDropped && !opts?.allowLengthAmputation) {
+    return { ok: false, reason: 'over-max' }
   }
   return { ok: true, value: joined }
 }

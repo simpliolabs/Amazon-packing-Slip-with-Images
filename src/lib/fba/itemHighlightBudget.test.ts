@@ -39,12 +39,19 @@ describe('the one Item Highlights budget', () => {
     expect(okValue(capItemHighlightRepeats(VAL_118))).toBe(VAL_118)
   })
 
-  it('an over-budget value IS flagged and IS capped at a comma boundary — the cap exists, once', () => {
+  // R2 (finish-line-rulings.md, controller RULING, 2026-09-08): implement the spec's rule
+  // LITERALLY — "the length rule refuses rather than truncates" (docs/superpowers/specs/2026-09-07-
+  // item-highlight-terminal-net.md) — with NO qualification. REPRODUCED live
+  // (phase-1-final-review-2.md IMPORTANT 2, scratchpad/finish-a/r2-truncate.ts): before this fix,
+  // `capItemHighlightRepeats` refused an over-max amputation ONLY when the survivor landed under
+  // the 107 floor; above the floor (this exact fixture: 142c -> silently capped to 116c, which
+  // clears the floor) it still shipped the truncated line as `{ok:true}` with NO refusal and NO
+  // signal — the class IMPORTANT 2 measured. This value's own survivor (VAL_118, 118c) clears the
+  // floor, so it is exactly that case: it MUST now refuse, not cap.
+  it('an over-budget value is REFUSED, never silently capped at a comma boundary, even when the amputated survivor would have cleared the floor (R2, finish-line-rulings.md, 2026-09-08)', () => {
     const long = VAL_118 + ', Everyday Layering Staple'   // pushes past 125
     expect(long.length).toBeGreaterThan(CONTENT_CONTRACT.itemHighlights.max)
     expect(validateItemHighlights(long, 'THE CEO', false, []).some((p) => /characters/.test(p))).toBe(true)
-    const capped = okValue(capItemHighlightRepeats(long))
-    expect(capped.length).toBeLessThanOrEqual(CONTENT_CONTRACT.itemHighlights.max)
-    expect(capped.endsWith(',')).toBe(false)
+    expect(capItemHighlightRepeats(long)).toEqual({ ok: false, reason: 'over-max' })
   })
 })

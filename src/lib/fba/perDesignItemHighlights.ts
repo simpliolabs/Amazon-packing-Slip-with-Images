@@ -96,6 +96,15 @@ export interface PerChildItemHighlight {
   /** Write-through mirror of the last ACCEPTED push of this design's line (the per-design
    *  "✓ On Amazon" signal — the broadcast row's current_value cannot carry N lines). */
   pushed_value?: string | null
+  /** R1 (finish-line-rulings.md, controller RULING, 2026-09-08): non-blocking. Set by
+   *  `applyBlankBrandNetPerDesign`/`applyBlankBrandNetToDetails` (blankSpecs.ts) when the
+   *  blank-brand waterfall net TRIED to insert the brand and abandoned the insertion because doing
+   *  so would push the line under the floor/repeat cap — `item_highlight` still SHIPS (correct,
+   *  ruled), unbranded. Reuses `IhHoldReason` + `IH_HOLD_MESSAGES` — never a parallel vocabulary —
+   *  and is DISTINCT from `hold` (which means "no line at all" and disqualifies the design from
+   *  shipping via `classifyIhEntry`; this field never does). null/undefined = the brand is either
+   *  already carried, not owed, or was inserted successfully. */
+  blankBrandAbandoned?: IhHoldReason | null
 }
 
 export const NO_LINE_FOR_DESIGN = 'no-line-for-design' as const
@@ -179,6 +188,11 @@ export interface PerDesignIhRow {
    *  any push is attempted, and a HELD entry shows its own hold reason even when its line alone would
    *  read as compliant — not only after a push report says so. */
   skipReason: IhSkuSkipReason | null
+  /** R1 (finish-line-rulings.md, controller RULING, 2026-09-08): non-blocking — carried straight
+   *  through from the entry's own `blankBrandAbandoned` (set by `applyBlankBrandNetPerDesign`).
+   *  Independent of `skipReason`/`hold`: a design can be perfectly pushable (`skipReason: null`)
+   *  and STILL carry this note (its line ships, just without the blank brand it is owed). */
+  blankBrandAbandoned: IhHoldReason | null
 }
 
 export function perDesignIhRows(entries: PerChildItemHighlight[] | null | undefined): PerDesignIhRow[] {
@@ -201,6 +215,7 @@ export function perDesignIhRows(entries: PerChildItemHighlight[] | null | undefi
         skuCount: 0,
         onAmazon: false,
         skipReason: classification === 'ok' ? null : classification,
+        blankBrandAbandoned: e.blankBrandAbandoned ?? null,
         allPushed: true,
       }
       byKey.set(key, row); order.push(key)
@@ -211,12 +226,15 @@ export function perDesignIhRows(entries: PerChildItemHighlight[] | null | undefi
   return order.map((k) => { const r = byKey.get(k)!; const { allPushed, ...rest } = r; return { ...rest, onAmazon: allPushed && !!rest.line } })
 }
 
-/** A collapsed view: designs whose (line, hold) are IDENTICAL share one row. Under the shared-line
- *  ruling (PO 2026-08-21) every multi-design family collapses to ONE row "shared across N designs";
- *  the per-design capability stays — rows that ever differ render separately. `skipReason` is
- *  carried through from the group's own rows (guaranteed identical within a group — the collapse
- *  key is `${hold}|${line}`, and `skipReason` (FIX ROUND 3: via `classifyIhEntry`) is a pure
- *  function of exactly that pair, so it can never disagree within one collapsed group). */
+/** A collapsed view: designs whose (line, hold, blankBrandAbandoned) are IDENTICAL share one row.
+ *  Under the shared-line ruling (PO 2026-08-21) every multi-design family collapses to ONE row
+ *  "shared across N designs"; the per-design capability stays — rows that ever differ render
+ *  separately. `skipReason` is carried through from the group's own rows (guaranteed identical
+ *  within a group — the collapse key includes it via `hold`/`line`, and `skipReason` (FIX ROUND 3:
+ *  via `classifyIhEntry`) is a pure function of exactly that pair, so it can never disagree within
+ *  one collapsed group). `blankBrandAbandoned` is now PART OF the collapse key (R1) so two designs
+ *  whose line/hold happen to match but whose blank-brand outcome differs never merge into one row
+ *  reporting only one of their reasons. */
 export interface SharedIhRow {
   line: string
   hold: IhHoldReason | null
@@ -225,15 +243,16 @@ export interface SharedIhRow {
   /** TRUE when every SKU of every design in the row has the line on Amazon. */
   onAmazon: boolean
   skipReason: IhSkuSkipReason | null
+  blankBrandAbandoned: IhHoldReason | null
 }
 
 export function collapseSharedIhRows(rows: PerDesignIhRow[]): SharedIhRow[] {
   const order: string[] = []
   const byKey = new Map<string, SharedIhRow>()
   for (const r of rows) {
-    const k = `${r.hold ?? ''}|${r.line}`
+    const k = `${r.hold ?? ''}|${r.line}|${r.blankBrandAbandoned ?? ''}`
     let row = byKey.get(k)
-    if (!row) { row = { line: r.line, hold: r.hold, designs: [], skuCount: 0, onAmazon: true, skipReason: r.skipReason }; byKey.set(k, row); order.push(k) }
+    if (!row) { row = { line: r.line, hold: r.hold, designs: [], skuCount: 0, onAmazon: true, skipReason: r.skipReason, blankBrandAbandoned: r.blankBrandAbandoned }; byKey.set(k, row); order.push(k) }
     row.designs.push(r)
     row.skuCount += r.skuCount
     if (!(r.line && r.onAmazon)) row.onAmazon = false
