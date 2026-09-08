@@ -70,6 +70,7 @@ import { composeItemHighlightDetailed, ihAudienceOf } from '@/lib/fba/itemHighli
  * itself, which is precisely how "Funny Work Shirts" shipped on a SWEATSHIRT family (B0DSCDZC6K). */
 import {
   phraseTruthVerdict,
+  ihLineTruthVerdict,
   applyTitleTruthNet,
   audienceOfGarmentFamily,
   normalizeAudienceLean,
@@ -2273,25 +2274,31 @@ export interface ItemHighlightsInput {
 export function buildItemHighlights(input: ItemHighlightsInput): { value: string; hold: IhHoldReason | null } {
   const { finalTitle, pool, apparelProduct, blankBrand } = input
   const titles = (input.netTitles ?? [finalTitle]).filter((t): t is string => !!t)
+  // Truth stage inputs: the blank's facts + the family's garment class (UNFOLDED — kids_tee
+  // drives the audience rule; long_sleeve_tee names its own brand spec phrase). NON-APPAREL
+  // families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocabulary. The
+  // title regex remains the fallback for an unresolved blank only.
+  // NAMED ONCE (Phase 3, 2026-09-0X) so the composer's per-candidate truth stage below and the
+  // terminal net's own line-level truth check further down (`truthCtx`) read the IDENTICAL blank
+  // facts — a second, independently-resolved copy is exactly the drift class this spec exists to
+  // close (the composer already vets each candidate; the terminal net now vets the FINAL line the
+  // same way, including the material-lie rule the composer's candidates never had before Phase 3).
+  const ihTruthInputs = {
+    spec: blankBrand?.spec ?? null,
+    garmentFamily: (!apparelProduct ? 'none' : (blankBrand?.garmentFamily ?? (/sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee'))) as TruthGarmentFamily,
+    // Audience comes from the BLANK's family only (PO: never inferred from a title) — an
+    // unresolved blank has no audience rule rather than a title-guessed one.
+    audience: ihAudienceOf(blankBrand?.garmentFamily ?? null),
+    // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
+    allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
+    // Task 5: threaded straight through — undefined on every caller that doesn't set it.
+    audienceLean: input.audienceLean,
+    designTokens: input.designTokens,
+  }
   const res = composeItemHighlightDetailed(
     pool.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: k.themeFit ?? null })),
     titles,
-    {
-      // Truth stage inputs: the blank's facts + the family's garment class (UNFOLDED — kids_tee
-      // drives the audience rule; long_sleeve_tee names its own brand spec phrase). NON-APPAREL
-      // families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocabulary. The
-      // title regex remains the fallback for an unresolved blank only.
-      spec: blankBrand?.spec ?? null,
-      garmentFamily: !apparelProduct ? 'none' : (blankBrand?.garmentFamily ?? (/sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee')),
-      // Audience comes from the BLANK's family only (PO: never inferred from a title) — an
-      // unresolved blank has no audience rule rather than a title-guessed one.
-      audience: ihAudienceOf(blankBrand?.garmentFamily ?? null),
-      // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
-      allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
-      // Task 5: threaded straight through — undefined on every caller that doesn't set it.
-      audienceLean: input.audienceLean,
-      designTokens: input.designTokens,
-    },
+    ihTruthInputs,
   )
   if (res.line) {
     console.log(JSON.stringify({ tag: 'IH_COMPOSED', len: res.line.length, ih: res.line.slice(0, 140) }))
@@ -2315,7 +2322,16 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
     // real too — non-apparel + a capacity token in the title, the same non-apparel/electronics
     // signal `garmentFamily: !apparelProduct ? 'none' : ...` above already reads.
     const contentCtx = { designSeasons: seasonsIn(finalTitle), capacityFamily: !apparelProduct && CAPACITY_RE.test(finalTitle) }
-    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand), { contentCtx })
+    // PHASE 3 (IH terminal net): the line-level TRUTH check on the FINAL netted bytes — garment-noun,
+    // capability, audience, competitor-brand, weight-class, fit-claim, audience-lean, and (new)
+    // material-lie — via the SAME `ihTruthInputs` the composer's per-candidate check above already
+    // used, never a second resolution. Injected as a closure (productDetailAttrs.ts stays free of a
+    // contentTruth.ts/blankSpecs.ts import cycle — see that module's `IhTruthCheckFn` doc).
+    const truthCtx: PhraseTruthCtx = { ...ihTruthInputs, field: 'highlights' }
+    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand), {
+      contentCtx,
+      truthCheck: (line) => ihLineTruthVerdict(line, truthCtx),
+    })
     if (!capResult.ok) {
       console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'buildItemHighlights', reason: capResult.reason, len: res.line.length }))
       const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'

@@ -38,6 +38,15 @@ import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
 // SEASONAL_TERMS/isOffSeasonKeyword MOVED IN (IH terminal net Phase 2): `seasonalTerms.ts` is a
 // documented ZERO-import leaf (see its own header), so importing it here is safe by the same rule.
 import { SEASONAL_TERMS, isOffSeasonKeyword } from '@/lib/keyword-engine/seasonalTerms'
+// PHASE 3 (IH terminal net, 2026-09-08+, spec docs/superpowers/specs/2026-09-07-item-highlight-
+// terminal-net.md §2 Phase 3): TYPE-ONLY — erased at compile, zero runtime import, so this does NOT
+// create the cycle a VALUE import would (contentTruth.ts imports blankSpecs.ts, which imports THIS
+// module for `capItemHighlightRepeats` — a value import back would be circular, and would also drag
+// blankSpecs.ts's supabase client into the client bundle `page.tsx` pulls this leaf into directly).
+// The caller (listingPipeline.ts, which already imports contentTruth.ts) supplies the actual
+// verdict function as a closure via `CapItemHighlightRepeatsOpts.truthCheck` — this module never
+// calls `phraseTruthVerdict`/`ihLineTruthVerdict` itself, only types the shape of what comes back.
+import type { PhraseTruthReason } from '@/lib/fba/contentTruth'
 
 /**
  * LLM/schema-sourced detail values are NOT guaranteed to be strings: the audit model can
@@ -847,8 +856,13 @@ export function ihFirstContentRuleViolation(s: string, ctx?: IhContentRuleCtx): 
   return ihContentRuleViolations(s, ctx)[0]?.reason ?? null
 }
 
-export type IhRefusalReason = 'repeat-over-budget' | 'over-max' | 'under-floor' | IhContentRuleReason
+export type IhRefusalReason = 'repeat-over-budget' | 'over-max' | 'under-floor' | IhContentRuleReason | PhraseTruthReason
 export type IhNetResult = { ok: true; value: string } | { ok: false; reason: IhRefusalReason }
+
+/** PHASE 3: the shape of a line-level truth check, injected by the caller (see the `truthCheck`
+ *  doc below) — the SAME shape `ihLineTruthVerdict`/`phraseTruthVerdict` (contentTruth.ts) already
+ *  return, typed here without importing them. */
+export type IhTruthCheckFn = (line: string) => { ok: true } | { ok: false; reason: PhraseTruthReason }
 
 export interface CapItemHighlightRepeatsOpts {
   /** IH terminal net Phase 2: real context for the moved content-rule checks (see the block comment
@@ -868,6 +882,17 @@ export interface CapItemHighlightRepeatsOpts {
    *  other call site is exactly the terminal-net validation of a FINAL, already-composed/stored
    *  line R2 is about. */
   allowLengthAmputation?: boolean
+  /** PHASE 3 (IH terminal net): the line-level content-TRUTH check — garment-noun, capability,
+   *  audience, competitor-brand, weight-class, fit-claim, audience-lean, and (new) material-lie —
+   *  run on the FINAL netted bytes, after every other stage, exactly where Phase 2 wired the moved
+   *  content rules. Injected (never imported — see the block comment on the `PhraseTruthReason`
+   *  import above) as a closure over `ihLineTruthVerdict(line, ctx)` and the caller's already-
+   *  resolved `PhraseTruthCtx` (the SAME ctx the composer already built for this design, where one
+   *  is available). Omitted ⇒ skip — every existing call site today does not pass this and stays
+   *  byte-identical; the composer's own per-candidate `ihTruthVerdict` check already covers a
+   *  FRESH compose, so this is the backstop for a stale stored value, a hand-edit, or a candidate
+   *  the compose-time check never saw assembled together with the brand/wear-fact phrase. */
+  truthCheck?: IhTruthCheckFn
 }
 
 export function capItemHighlightRepeats(value: string, opts?: CapItemHighlightRepeatsOpts): IhNetResult {
@@ -979,6 +1004,16 @@ export function capItemHighlightRepeats(value: string, opts?: CapItemHighlightRe
   // never emits these five violations to begin with).
   const contentViolation = ihFirstContentRuleViolation(joined, opts?.contentCtx)
   if (contentViolation) return { ok: false, reason: contentViolation }
+  // IH TERMINAL NET, PHASE 3 (2026-09-0X): the line-level TRUTH check runs LAST of all, on `joined`
+  // — the same "final shipped bytes, after every other stage" discipline Phase 2's content-rule
+  // check above already follows, so a comma-less line the repeat/length cap alone already emptied
+  // is never masked by a truth diagnosis either. Skipped when the caller has no ctx to check with
+  // (every existing call site, byte-identical); see the `truthCheck` doc above for why this is
+  // injected rather than imported.
+  if (opts?.truthCheck) {
+    const truthVerdict = opts.truthCheck(joined)
+    if (!truthVerdict.ok) return { ok: false, reason: truthVerdict.reason }
+  }
   return { ok: true, value: joined }
 }
 
