@@ -47,7 +47,7 @@ import {
   type DetailAttribute, type ItemHighlightsApiState,
 } from '@/lib/fba/productDetailAttrs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
-import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerCurrent, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, type PerChildItemHighlight, type IhSkuSkipReason } from '@/lib/fba/perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerCurrent, pushableDesignLines, NO_LINE_FOR_DESIGN, REPEAT_IN_STORED_LINE, UNDER_FLOOR, ihSkipReasonText, type PerChildItemHighlight, type IhSkuSkipReason } from '@/lib/fba/perDesignItemHighlights'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
@@ -1371,15 +1371,26 @@ async function patchSkuDetail(
   /** Calibrated patch value (a specific write-form variant) — overrides the builders. */
   patchValue?: Record<string, unknown>[],
 ): Promise<PatchResult> {
+  // Composite attributes (SHIRT neck/closure/sleeve) need the value on their schema
+  // sub-field — the flat shape is accepted then silently dropped (0/89 applied live).
+  const resolvedValue = patchValue ?? (valueShape
+    ? buildShapedDetailValue(valueShape, value, MARKETPLACE_ID)
+    : buildDetailPatchValue(attribute, value, MARKETPLACE_ID))
+  // BLOCKING 1 (controller RULING, fix round 1, phase-1-review.md): a terminal net refusing (Item
+  // Highlights) — or, pre-existing, a genuinely empty rawValue — resolves to `[]`
+  // (`buildDetailPatchValue`'s fix). `[]` must NEVER be forwarded as `patches:[{op:'replace',
+  // value:[]}]`: that array is the LITERAL body of the SP-API PATCH, and an unexamined empty value
+  // reaching Amazon is exactly the class BLOCKING 1 named. This is the ONE choke point every
+  // single-attribute PATCH funnels through (the single/per-design push details branch AND
+  // `pushPerFieldFallback`'s per-attribute retries both call this function) — refuse here, before
+  // any network call, with a reason the caller's existing `!result.ok` handling already surfaces.
+  if (resolvedValue.length === 0) {
+    return { ok: false, submissionId: null, error: `Nothing to patch for "${attribute.spApiKey}" — the value resolved to empty (a terminal net refused it, or it was genuinely blank); never sent as an empty PATCH.` }
+  }
   await spApiWriteBucket.acquire()   // global 5-rps ceiling (task #23)
   const body = {
     productType,
-    patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`,
-      // Composite attributes (SHIRT neck/closure/sleeve) need the value on their schema
-      // sub-field — the flat shape is accepted then silently dropped (0/89 applied live).
-      value: patchValue ?? (valueShape
-        ? buildShapedDetailValue(valueShape, value, MARKETPLACE_ID)
-        : buildDetailPatchValue(attribute, value, MARKETPLACE_ID)) }],
+    patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`, value: resolvedValue }],
   }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
   const url =
@@ -3325,19 +3336,59 @@ async function negotiateParentRecordFix(
   return out
 }
 
+/** One raw PATCH op as `patchSkuMulti` (and `firstEmptyReplaceOp`) accept it: a fully-built
+ *  {op,path,value} — or a value-less {op:'delete',path} that removes the whole attribute. */
+export type PatchOp = { op: 'replace'; path: string; value: unknown } | { op: 'delete'; path: string; value?: unknown }
+
+/** THE REJOIN GUARD (BLOCKING 1, fix round 2, controller RULING on
+ *  phase-1-fix-round-2-findings.md): a refused terminal net (Item Highlights) — or any genuinely
+ *  empty resolved value — must never become an unexamined `replace` against a live, shopper-visible
+ *  Amazon field. Fix round 1 closed this at `patchSkuDetail` (the single-attribute PATCH sender)
+ *  but the BULK/raw path (`opFor`, `specializePlanValue`, the Phase-2 calibration loop — all inside
+ *  `executeBulkDetailsPush`) builds its own ops and hands them straight to `patchSkuMulti`,
+ *  unguarded — the same class of defect reached by a different branch (round 2's finding).
+ *  `patchSkuMulti` is the LAST function before the network for every raw/bulk op (~20 call sites —
+ *  see phase-1-report.md "Fix round 2" for the full trace), so the guard lives HERE — one choke
+ *  point instead of three call-site checks that could each be forgotten.
+ *  `op:'delete'` is EXEMPT: a delete's `value` is a SELECTOR naming what Amazon should remove
+ *  (the twin-heal `delOnly` path, the parent composite delete-partial-container strategy) —
+ *  stored/absent values there are load-bearing production behaviour, not an accident.
+ *  Pure + exported for unit tests. */
+export function firstEmptyReplaceOp(ops: PatchOp[]): { op: 'replace'; path: string; value: unknown } | null {
+  for (const op of ops) {
+    if (op.op !== 'replace') continue
+    const v = op.value
+    const isEmpty = Array.isArray(v)
+      ? v.length === 0
+      : typeof v === 'object' && v !== null && Object.keys(v).length === 0
+    if (isEmpty) return op
+  }
+  return null
+}
+
 /** PATCH MULTIPLE attributes on one SKU in a SINGLE submission (the bulk Auto Push efficiency
  *  core — Amazon's patchListingsItem accepts many ops per call). Each op is a fully-built
  *  {op,path,value} — or a value-less {op:'delete',path} that removes the whole attribute (heal v2
  *  delete-partial-container; the ONLY delete caller is the guardrailed healParentComposite strategy 2).
  *  Amazon validates the submission ATOMICALLY: any ERROR-severity issue →
  *  status INVALID and NOTHING applies — so the caller previews first and falls back to
- *  per-attribute pushes when a batch preview fails, preserving failure isolation. */
+ *  per-attribute pushes when a batch preview fails, preserving failure isolation.
+ *  `allowEmptyReplace` (fix round 2, ruling item 2) is an explicit opt-in for a genuinely intended
+ *  clear-via-replace — traced against every current call site (phase-1-report.md "Fix round 2"):
+ *  NONE need it today. Default is refuse. */
 async function patchSkuMulti(
   sellerId: string, token: string, productType: string, sku: string,
-  ops: ({ op: 'replace'; path: string; value: unknown } | { op: 'delete'; path: string; value?: unknown })[],
+  ops: PatchOp[],
   mode: 'VALIDATION_PREVIEW' | 'LIVE',
+  allowEmptyReplace = false,
 ): Promise<PatchResult> {
   if (ops.length === 0) return { ok: true, submissionId: null }
+  if (!allowEmptyReplace) {
+    const bad = firstEmptyReplaceOp(ops)
+    if (bad) {
+      return { ok: false, submissionId: null, error: `Nothing to patch for "${bad.path}" — the value resolved to empty (a terminal net refused it, or it was genuinely blank); never sent as an empty PATCH.` }
+    }
+  }
   await spApiWriteBucket.acquire()   // global 5-rps ceiling (task #23) — after the no-op guard
   const body = { productType, patches: ops }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
@@ -3718,12 +3769,17 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           const rawDetailDiff = await loadDetailDiff(parent_asin, ctx)
           const diff = rawDetailDiff.filter((d) => d.changed && d.raw != null)
           if (diff.length === 0) {
+            // FIX ROUND 3 (I-2, controller RULING): every DISTINCT reason present, via the ONE
+            // `ihSkipReasonText` mapper — never a binary "repeats a word, else no composed line"
+            // ternary (the exact class this was: an `under-floor`/held family read as "no composed
+            // line" even though a line existed). Lists every reason actually present, not just one.
+            const skippedReasons = Array.from(new Set(rawDetailDiff.filter((d) => d.skipReason).map((d) => d.skipReason as IhSkuSkipReason)))
             emit({
               type: 'result',
               parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
               pushed: 0, failed: 0, total: 0,
               message: ctx.perDesignEntries
-                ? `Nothing to push — every SKU already carries its own design's ${ctx.detailField}${rawDetailDiff.some((d) => d.skipReason) ? ` (${rawDetailDiff.filter((d) => d.skipReason).length} SKU(s) skipped: ${rawDetailDiff.some((d) => d.skipReason === REPEAT_IN_STORED_LINE) ? 'their stored line has no composed value, or repeats a significant word' : 'their design has no composed line'})` : ''}.`
+                ? `Nothing to push — every SKU already carries its own design's ${ctx.detailField}${skippedReasons.length ? ` (${rawDetailDiff.filter((d) => d.skipReason).length} SKU(s) skipped: ${skippedReasons.map((r) => ihSkipReasonText(r)).join('; ')})` : ''}.`
                 : `Nothing to push — every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".`,
               results: [],
             })
@@ -3900,10 +3956,15 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             // FIX WAVE 2 (I-2b): 'repeat-in-stored-line' gets its OWN accurate message — a line DID
             // exist, the terminal net at the seam refused it for repeating a significant word, which
             // is a different fact than "held, nothing composed" and must not be reported as that.
-            if (ctx.perDesignEntries && (item.skipReason === NO_LINE_FOR_DESIGN || item.skipReason === REPEAT_IN_STORED_LINE || !item.raw)) {
-              const reason = item.skipReason === REPEAT_IN_STORED_LINE
-                ? 'Skipped — this SKU\'s stored Item Highlight repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit to recompose it.'
-                : 'Skipped — this SKU\'s design has no composed Item Highlight (held); it is never given another design\'s line.'
+            // IMPORTANT 3 (controller RULING, fix round 1): 'under-floor' (Phase 1's H13 fix) reached
+            // the seam's `skipped` list and the card, but this gate never recognized it — the SKU
+            // produced no result row and no progress event at all (neither pushed nor reported). Added
+            // as a THIRD branch (appended, not inserted, so the pinned prefix above stays matchable).
+            // FIX ROUND 3 (I-2, controller RULING): the reason TEXT now comes from the ONE
+            // `ihSkipReasonText` mapper — never a hand-rolled ternary that only knows 2-3 named
+            // reasons and mislabels every other one (the "fourth divergence" this round closes).
+            if (ctx.perDesignEntries && (item.skipReason === NO_LINE_FOR_DESIGN || item.skipReason === REPEAT_IN_STORED_LINE || !item.raw || item.skipReason === UNDER_FLOOR)) {
+              const reason = `Skipped — ${ihSkipReasonText(item.skipReason ?? NO_LINE_FOR_DESIGN)}.`
               results.push({ sku: item.sku, status: 'skipped', submissionId: null, error: reason, isParent })
               emit({ type: 'progress', sku: item.sku, status: 'skipped', error: reason })
               continue
@@ -3979,11 +4040,17 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // entered `diff` (proposed '' ⇒ changed:false) so the seller sees WHICH were skipped and why.
           // FIX WAVE 2 (I-2b): also surfaces 'repeat-in-stored-line' refusals with their OWN accurate
           // reason (a line existed; the seam refused it — not "held, nothing composed").
+          // IMPORTANT 3 (controller RULING, fix round 1): also surfaces 'under-floor'.
+          // FIX ROUND 3 (I-1/I-2, controller RULING): the filter widened from three enumerated
+          // literals to "any skipReason at all" — `classifyIhEntry` (I-1's hold-first predicate) can
+          // now surface ANY `IhHoldReason` here (reproduced: a held-but-in-band-line entry whose hold
+          // is 'under-floor-no-repeat' — the OTHER real hold `listingPipeline.ts` can stamp alongside
+          // a kept line — was silently DROPPED by the old 3-literal filter, never surfaced at all,
+          // worse than a mislabel). The reason TEXT comes from the ONE `ihSkipReasonText` mapper, so a
+          // brand-new reason is reported accurately by construction, never omitted or generic.
           if (ctx.perDesignEntries) {
-            for (const d of rawDetailDiff.filter((r) => (r.skipReason === NO_LINE_FOR_DESIGN || r.skipReason === REPEAT_IN_STORED_LINE) && r.asin !== parent_asin)) {
-              const reason = d.skipReason === REPEAT_IN_STORED_LINE
-                ? `Skipped (${REPEAT_IN_STORED_LINE}) — ${d.designName || d.designKey || 'this design'}'s stored Item Highlight repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit.`
-                : `Skipped (${NO_LINE_FOR_DESIGN}) — ${d.designName || d.designKey || 'this design'} has no composed Item Highlight; never given another design's line.`
+            for (const d of rawDetailDiff.filter((r) => !!r.skipReason && r.asin !== parent_asin)) {
+              const reason = `Skipped (${d.skipReason}) — ${d.designName || d.designKey || 'this design'}: ${ihSkipReasonText(d.skipReason as IhSkuSkipReason)}.`
               results.push({ sku: d.sku, status: 'skipped', submissionId: null, error: reason, isParent: false })
               emit({ type: 'progress', sku: d.sku, status: 'skipped', error: reason })
             }
@@ -4730,9 +4797,13 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
       const { desiredSku, skuKeys, skips } = resolveBulkSkuFields(s.sku, livePlans, perDesignMaps, desired)
       for (const sk of skips) {
         ihSkips.push({ sku: s.sku, field: sk.field, reason: sk.reason })
-        const reasonText = sk.reason === REPEAT_IN_STORED_LINE
-          ? `Skipped — this SKU's stored ${sk.field} repeats a significant word (never allowed, PO ruling 2026-09-06); re-run ↻ Regen or a full audit to recompose it.`
-          : `Skipped — this SKU's design has no composed ${sk.field} (held); it is never given another design's line.`
+        // FIX ROUND 3 (I-2, controller RULING, phase-1-final-review.md Important 2 — the FOURTH
+        // single-vs-bulk divergence on this branch): this was a two-branch ternary that mislabeled
+        // every reason other than 'repeat-in-stored-line' as "has no composed ... (held)" — including
+        // an actual 'under-floor' skip (reproduced: fix round 3 probe-r3-i3-bulkreason.mts). The ONE
+        // `ihSkipReasonText` mapper closes the class: a new reason is reported accurately here by
+        // construction, never mislabeled and never silently defaulted to the generic held text.
+        const reasonText = `Skipped — ${ihSkipReasonText(sk.reason)}.`
         // Surface it to the PO the same way the single-push path does (emit a progress event with the
         // reason) — never a bare console.log a regression could leave un-surfaced forever.
         emit({ type: 'progress', sku: s.sku, status: 'skipped', field: sk.field, error: reasonText })

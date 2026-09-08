@@ -89,7 +89,7 @@ describe('resolveBulkSkuFields (bulk-push per-design skip parity, 2026-09-06)', 
 
   it('a SKU WITH its own composed line is never reported as skipped — the happy path is untouched', () => {
     const entries: PerChildItemHighlight[] = [
-      { sku: 'OK-SKU', asin: 'B0OK000001', item_highlight: 'Bold Graphic Print, Soft Ring-Spun Cotton, Everyday Comfort Fit', designKey: 'OK', designName: 'OK Design', hold: null },
+      { sku: 'OK-SKU', asin: 'B0OK000001', item_highlight: 'Bold Graphic Print, Soft Ring-Spun Cotton, Everyday Comfort Fit, Durable Machine Washable, Long Lasting Quality', designKey: 'OK', designName: 'OK Design', hold: null },
     ]
     const seam = buildPerSkuItemHighlightMap(entries, [{ sku: 'OK-SKU', asin: 'B0OK000001' }], null)
     expect(seam.skipped).toHaveLength(0)
@@ -98,7 +98,7 @@ describe('resolveBulkSkuFields (bulk-push per-design skip parity, 2026-09-06)', 
     const result = resolveBulkSkuFields('OK-SKU', livePlans, perDesignMaps, desired)
 
     expect(result.skips).toHaveLength(0)
-    expect(result.desiredSku.item_highlight).toBe('Bold Graphic Print, Soft Ring-Spun Cotton, Everyday Comfort Fit')
+    expect(result.desiredSku.item_highlight).toBe('Bold Graphic Print, Soft Ring-Spun Cotton, Everyday Comfort Fit, Durable Machine Washable, Long Lasting Quality')
     expect(result.skuKeys).toContain('item_highlight')
   })
 

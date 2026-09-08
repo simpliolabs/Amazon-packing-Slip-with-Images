@@ -105,7 +105,14 @@ export async function GET(req: NextRequest) {
       // per-SKU diff), never a single broadcast value — proposedValue is null and broadcast:false so
       // the existing per-child modal branch renders each SKU's own line.
       const perDesign = ctx.perDesignEntries ? perDesignIhRows(ctx.perDesignEntries) : null
-      const skippedNoLine = diff.filter((d) => d.skipReason === 'no-line-for-design').length
+      // R3 (finish-line-rulings.md, controller RULING, 2026-09-08, IMPORTANT 3): this used to count
+      // ONLY the literal 'no-line-for-design' reason, so a family skipped for ANY other hold reason
+      // (under-floor, designs-unrated, thin-candidates, unrated-pool, no-spec, under-floor-no-repeat,
+      // repeat-in-stored-line — FIX ROUND 3's own I-1 widened `skipReason` to carry every one of
+      // them) reported ZERO skips while every one of those SKUs actually skips at push. REPRODUCED
+      // (scratchpad/finish-a/r3-skipcount.ts): 3 real skips, counter read 0. Count every non-null
+      // reason — the modal's own per-design badges (page.tsx) already name each one individually.
+      const skippedNoLine = diff.filter((d) => !!d.skipReason).length
       return NextResponse.json({
         parent_asin: parentAsin,
         field: 'details' as const,
@@ -120,7 +127,8 @@ export async function GET(req: NextRequest) {
         changed: diff.filter((d) => d.changed).length,
         proposedValue: perDesign ? null : ctx.recommendedValue,
         per_design: perDesign,
-        skipped_no_line: perDesign ? skippedNoLine : undefined,
+        // R3: renamed from `skipped_no_line` — it now counts EVERY skip reason, not only one.
+        skipped_count: perDesign ? skippedNoLine : undefined,
         // Enum (Feature B): the accepted vocabulary for this attribute + what we
         // normalized the audit's value FROM, so the modal can show "Unisex Adult → Unisex".
         acceptedValues: ctx.acceptedValues ?? null,

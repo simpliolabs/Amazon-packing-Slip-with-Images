@@ -23,6 +23,12 @@ import type { PatchValueEntry } from '@/lib/fba/pushFields'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { GARMENT_HEAD_WORDS } from '@/lib/fba/garmentNoun'
+// FIX ROUND 3 (I-1, controller RULING, phase-1-fix-round-3-findings.md): `healItemHighlightOnServe`
+// below is the ONE "scrub-then-cap-keep-scrubbed" shape both `ai-recommendations/route.ts` serve
+// sites need — trademarkGuard.ts has zero imports of its own (verified: a pure pattern-matching
+// leaf), so pulling it in here does not compromise this module's client-safety (the client `page.tsx`
+// imports `classifyStoredIhLine` from here directly).
+import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 
 /**
  * LLM/schema-sourced detail values are NOT guaranteed to be strings: the audit model can
@@ -599,17 +605,91 @@ export const lineHasSignificantRepeat = (line: string): boolean => {
  *  refusal PRE-FLIGHT (before any push is attempted) instead of learning it only from a push
  *  report. `'no-line-for-design'` — an empty/missing line (a HELD design, the pre-existing case).
  *  `'repeat-in-stored-line'` — a non-empty line that repeats a folded significant word (a
- *  pre-ruling stored value, a manual DB edit, or a future producer bug). `'ok'` — a non-empty,
- *  compliant line; the only classification that is ever pushable. */
-export type IhLineClassification = 'ok' | 'no-line-for-design' | 'repeat-in-stored-line'
+ *  pre-ruling stored value, a manual DB edit, or a future producer bug). `'under-floor'` — TASK 8
+ *  ROUND 2 / IH TERMINAL NET PHASE 1 (2026-09-07, spec docs/superpowers/specs/2026-09-07-item-
+ *  highlight-terminal-net.md, H13): a non-empty, non-repeating line shorter than
+ *  `CONTENT_CONTRACT.itemHighlights.min` (107) — reproduced live: a stale/hand-edited/legacy stored
+ *  line can sit under the floor forever because nothing at the push seam ever checked length, only
+ *  repeats. `'ok'` — a non-empty, compliant line; the only classification that is ever pushable. */
+export type IhLineClassification = 'ok' | 'no-line-for-design' | 'repeat-in-stored-line' | 'under-floor'
 export function classifyStoredIhLine(value: string | null | undefined): IhLineClassification {
   const line = (value || '').trim()
   if (!line) return 'no-line-for-design'
   if (lineHasSignificantRepeat(line)) return 'repeat-in-stored-line'
+  if (line.length < CONTENT_CONTRACT.itemHighlights.min) return 'under-floor'
   return 'ok'
 }
 
-export function capItemHighlightRepeats(value: string): string {
+/**
+ * IH TERMINAL NET, PHASE 1 (2026-09-07, spec docs/superpowers/specs/2026-09-07-item-highlight-
+ * terminal-net.md, PO 2026-09-07 verbatim "B: yesm go" — fix the terminal nets BEFORE the writer).
+ *
+ * REPRODUCED against this function unmodified (`scratchpad/ih-research/probe-h10-h13.mts`, HEAD
+ * c1eabe9) — three fail-open bugs, all in the OLD trailing fallback
+ * (`finalPhrases = capped.length ? capped : kept.slice(0, 1)`, then
+ * `finalPhrases.join(', ') || value.split(',')[0]?.trim() || value`):
+ *
+ *  H10 a comma-less line repeating a significant word 4x: the per-word cap correctly computes the
+ *      violation (the running `counts` map IS a whole-line count, not a per-segment one — a single
+ *      comma-less "phrase" is checked against it exactly like any other) and correctly drops the
+ *      sole phrase (`kept = []`) — but the OLD fallback then read `kept.slice(0,1)` (still `[]`)
+ *      and fell through to `value.split(',')[0]?.trim() || value`, which — with no comma to split
+ *      on — is just `value` again. The cap fires; the fallback UNDOES it. Measured: returned
+ *      byte-identical to the input.
+ *  H11 a comma-less 218-char line, no repeats: the length loop's own guard
+ *      (`next > max && capped.length >= 1`) requires ONE phrase already kept before it will ever
+ *      refuse — the first phrase is unconditionally pushed regardless of its own length. Measured:
+ *      a 218-char line survived whole, past `buildDetailPatchValue`, toward the SP-API PATCH.
+ *  H12 a 186-char two-clause line, one comma: the length loop correctly drops the trailing clause
+ *      (86 > "next" over budget) — the drop is real and reduces the SP-API payload to 88 chars —
+ *      but nothing checks whether the 88-char SURVIVOR still clears
+ *      `CONTENT_CONTRACT.itemHighlights.min` (107). Silent amputation: half the seller's sentence
+ *      ships, under the floor, and the seam does not notice.
+ *
+ * THE FIX. Both nets are unchanged in what they accept (repeat cap: `IH_MAX_WORD_REPEATS`/
+ * `ihFoldWord`, exactly as before — Amazon's own flat cap, deliberately looser than the composer's
+ * garment-exempt `ihRepeatBudget`, per the TASK 8 note this function already carried: this is the
+ * push-boundary's defence-in-depth net, not a second copy of the composer's stricter rule, and nine
+ * pre-existing tests (`blankBrandHighlightNet.test.ts` T4.x, `itemHighlightOneRule.test.ts`) already
+ * pin bytes that would break under the stricter budget). What changes is what happens when neither
+ * net can produce a compliant, non-empty result: REFUSE, never fall back to the raw un-netted input
+ * and never ship a length-driven amputation that lands under the floor.
+ *
+ * FIX ROUND 1 (2026-09-07, controller RULING on phase-1-fix-round-findings.md — opus review
+ * phase-1-review.md BLOCKING 1 + BLOCKING 2): Phase 1 encoded the refusal as `''`, and `''` already
+ * meant "no value" to eight existing callers — one token, two facts. BLOCKING 1 reproduced
+ * `buildDetailPatchValue` shipping `[{value:"", ...}]`, the literal body of a live SP-API `replace`
+ * patch that CLEARS a shopper-visible field; BLOCKING 2 reproduced `applyBlankBrandNetPerDesign`
+ * overwriting a compliant-looking 129-char stored line with `''`, `changed:true` — a design that WAS
+ * pushable silently becomes HELD, and the overwrite is destructive (the truncation it replaced was
+ * at least recoverable). The refusal is now a TYPED, OUT-OF-BAND result (`IhNetResult`), never a
+ * string — a caller that does not destructure `.ok` before reading a value will not typecheck.
+ */
+export type IhRefusalReason = 'repeat-over-budget' | 'over-max' | 'under-floor'
+export type IhNetResult = { ok: true; value: string } | { ok: false; reason: IhRefusalReason }
+
+export interface CapItemHighlightRepeatsOpts {
+  /** R2 (finish-line-rulings.md, controller RULING, 2026-09-08) refuses any ACTUAL length-driven
+   *  drop outright — see the `lengthDropped` block below. The ONE named, deliberate exception:
+   *  `ensureBlankBrandInHighlights` (blankSpecs.ts) calls this net on its OWN
+   *  `"authentic <brand> blank, " + hl` candidate, where trimming trailing phrases to fit is the
+   *  DOCUMENTED insertion mechanic (PO ruling, SELLER_PROFILE.md §5 — "insertion order is the
+   *  survival mechanism") that displaces LOW-priority phrases to make room for a MUST-carry brand
+   *  fact, never the seller's own composed meaning being silently halved (H12's class). The floor
+   *  check (`under-floor`, unconditional, checked first) still refuses an eviction that guts the
+   *  line either way — this flag only widens what may clear it. No other caller may pass it; every
+   *  other call site is exactly the terminal-net validation of a FINAL, already-composed/stored
+   *  line R2 is about. */
+  allowLengthAmputation?: boolean
+}
+
+export function capItemHighlightRepeats(value: string, opts?: CapItemHighlightRepeatsOpts): IhNetResult {
+  // Empty/whitespace-only input is NOT a refusal — it is "nothing to net", the pre-existing meaning
+  // of `''` every caller already treats as "no value" before or after calling this net.
+  // `buildDetailPatchValue` guards it BEFORE calling in; `regenerate-item-highlight/route.ts` does
+  // not, so this keeps that caller's legacy behaviour byte-identical instead of mislabeling an
+  // absent line as a "repeat"/"over-max" refusal.
+  if (!value.trim()) return { ok: true, value: '' }
   // TASK 8 (2026-09-07): the local hand-copy of the fold is gone — this is the SAME hand-copy class
   // this function's own docstring history already names; `ihFoldWord` is byte-identical (proven on
   // this function's own pre-existing tests). The cap below is Amazon's own cap
@@ -617,9 +697,15 @@ export function capItemHighlightRepeats(value: string): string {
   // push-boundary net, not the composer's stricter budget.
   // TASK 8 ROUND 2 (R1, reviewer Minor M1): the literal `2` is gone — `IH_MAX_WORD_REPEATS` above is
   // the one constant, never written as a bare number anywhere else in this file.
+  // The running `counts` map is the WHOLE-LINE tally (Phase 1, H10) — it persists across every
+  // comma-phrase in order, so a solitary comma-less "phrase" (the entire line) is checked against
+  // it exactly like any later segment of a multi-phrase line would be; there is no separate
+  // per-segment notion of "repeat" here to begin with, only a fallback that used to discard the
+  // correct verdict (see the refusal below).
   const counts = new Map<string, number>()
   const kept: string[] = []
-  for (const phrase of value.split(',').map((p) => p.trim()).filter(Boolean)) {
+  const phrases = value.split(',').map((p) => p.trim()).filter(Boolean)
+  for (const phrase of phrases) {
     const local = new Map<string, number>()
     for (const w of phrase.split(/[\s/-]+/).map(ihFoldWord)) {
       if (w.length <= 1 || IH_TRIVIAL.has(w)) continue
@@ -637,16 +723,86 @@ export function capItemHighlightRepeats(value: string): string {
   // short feature/benefit phrases,
   // not a full sentence). This runs at the PUSH boundary (buildDetailPatchValue) + every generator return +
   // the regen route, so an over-budget stale/LLM/stored value is truncated to the contract max at a
-  // COMMA boundary (never mid-word) even if it skipped the generator gate. Always keeps >=1 phrase (never blanks).
+  // COMMA boundary (never mid-word) even if it skipped the generator gate.
+  // PHASE 1 (H11): the old guard (`&& capped.length >= 1`) forced the FIRST phrase to survive no
+  // matter how long it was on its own — removed. A phrase (first or not) that alone would push past
+  // the max is now dropped like any other; if that is every phrase, `capped` ends up empty and the
+  // refusal below fires instead of a truncated lie.
   const capped: string[] = []
   let len = 0
   for (const p of kept) {
     const next = capped.length ? len + 2 + p.length : p.length
-    if (next > CONTENT_CONTRACT.itemHighlights.max && capped.length >= 1) break
+    if (next > CONTENT_CONTRACT.itemHighlights.max) break
     capped.push(p); len = next
   }
-  const finalPhrases = capped.length ? capped : kept.slice(0, 1)
-  return finalPhrases.join(', ') || value.split(',')[0]?.trim() || value
+  // REFUSE, never truncate into a lie (Phase 1, H10/H11): nothing survived either net — the raw
+  // `value` (H10, H11's old fallback) is never returned; a design that cannot net to a compliant
+  // line is exactly as unshippable as one the composer never composed in the first place.
+  // FIX ROUND 1: the reason distinguishes WHICH net emptied it — the repeat cap already dropped every
+  // phrase (`kept.length === 0`, H10's class) vs. the repeat cap kept phrases but the length cap could
+  // not fit even one of them (`kept.length > 0`, H11's class: a single phrase over budget on its own).
+  if (capped.length === 0) {
+    return { ok: false, reason: kept.length === 0 ? 'repeat-over-budget' : 'over-max' }
+  }
+  const joined = capped.join(', ')
+  // REFUSE rather than amputate (Phase 1, H12; IMPORTANT 4, fix round 1): a drop that EITHER net
+  // actually performed — the LENGTH net (`capped` shorter than `kept`) OR the REPEAT net (`kept`
+  // shorter than the original phrase count) — must not silently land the survivor under
+  // `CONTENT_CONTRACT.itemHighlights.min` (107). Phase 1 scoped this floor check to the length-driven
+  // drop only; the reviewer reproduced the same silent amputation reached via a REPEAT-only drop (a
+  // 112-char, 5-phrase line whose repeat cap alone drops one "cotton" phrase, landing a 90-char
+  // 4-phrase survivor — no length-driven drop ever occurred, so the old guard never fired). Scoped to
+  // an ACTUAL drop on EITHER axis (never fires when every original phrase already survived both nets,
+  // so a naturally-short-but-untouched value — not this net's job to floor-check, see
+  // `classifyStoredIhLine` for the pre-flight floor gate on STORED lines — still passes through
+  // unchanged as before).
+  const lengthDropped = capped.length < kept.length
+  const dropped = lengthDropped || kept.length < phrases.length
+  if (dropped && joined.length < CONTENT_CONTRACT.itemHighlights.min) {
+    return { ok: false, reason: 'under-floor' }
+  }
+  // R2 (finish-line-rulings.md, controller RULING, 2026-09-08): implement the spec's rule
+  // LITERALLY — docs/superpowers/specs/2026-09-07-item-highlight-terminal-net.md says "the length
+  // rule refuses rather than truncates", with no floor qualification. REPRODUCED (phase-1-final-
+  // review-2.md IMPORTANT 2, scratchpad/finish-a/r2-truncate.ts): the check above scoped the
+  // refusal to a survivor landing UNDER the floor — a length-driven amputation whose survivor
+  // clears the floor (e.g. `itemHighlightBudget.test.ts`'s 142c fixture -> 118c survivor) still
+  // shipped truncated as `{ok:true}` with no refusal, no signal. Any ACTUAL length-driven drop
+  // (the length loop dropped at least one phrase the repeat net had already kept) is now refused
+  // outright, whether or not the survivor clears the floor — "a truncated line is a line whose
+  // meaning nobody chose" (the spec's own adversary section). Scoped to the LENGTH axis only, not a
+  // repeat-only drop that never needed length trimming (`kept.length === capped.length`): today's
+  // producer never emits >125 chars, so this is byte-identical on every real composed line — the
+  // repeat cap's own defence-in-depth truncation (a distinct, pre-existing behaviour, unchanged
+  // here) is not what this ruling named.
+  if (lengthDropped && !opts?.allowLengthAmputation) {
+    return { ok: false, reason: 'over-max' }
+  }
+  return { ok: true, value: joined }
+}
+
+/**
+ * FIX ROUND 3 (I-1, controller RULING, phase-1-fix-round-3-findings.md): the ONE "heal an Item
+ * Highlight value on serve" shape. The reviewer's Important 1 proved a scrub-bypass at
+ * `listingPipeline.ts:10104-10113` (the verdict was taken on `scrubPub(line)`, but the PRE-scrub
+ * value is what persisted on refusal — `scrubCelebrityNames` runs ONLY at that one choke point for
+ * this field, so a refusal silently skipped it). `ai-recommendations/route.ts`'s two serve-path
+ * heal-on-read sites (`:2208` broadcast, `:2262` per-child) carried the SAME shape — `r.ok ? r.value
+ * : <pre-scrub>` — a THIRD copy of the exact bug class this repo keeps re-discovering per-site
+ * instead of fixing once. This function is the single source: scrub ONCE, cap the SCRUBBED string,
+ * and on refusal keep the SCRUBBED value — never the raw pre-scrub one, and never `''` for a
+ * refusal (BLOCKING 2's own discipline). Empty/whitespace input is not a refusal; it stays ''.
+ *
+ * The broadcast site (`:2208`) never called `scrubTrademarks` at all before this fix (unlike title/
+ * bullets/description/per-child, which all get a serve-time trademark heal elsewhere in the same
+ * route) — adding it here closes that parity gap too, not just the bypass. Scrubbing is idempotent
+ * and pure removal/substitution, so this is safe on every already-clean historical value.
+ */
+export function healItemHighlightOnServe(rawValue: string | null | undefined): string {
+  if (!rawValue) return ''
+  const scrubbed = scrubTrademarks(rawValue)
+  const r = capItemHighlightRepeats(scrubbed)
+  return r.ok ? r.value : scrubbed
 }
 
 export function buildDetailPatchValue(
@@ -659,7 +815,18 @@ export function buildDetailPatchValue(
   if (!trimmed) return []
   // Item Highlight: cap repeated words so a non-compliant value (LLM/stored/stale) can never be the reason
   // Amazon rejects this OR any other attribute's patch for the SKU (Amazon re-validates the whole item).
-  if (isItemHighlightsField(null, attr.spApiKey)) trimmed = capItemHighlightRepeats(trimmed)
+  if (isItemHighlightsField(null, attr.spApiKey)) {
+    const netResult = capItemHighlightRepeats(trimmed)
+    // BLOCKING 1 (controller RULING, fix round 1): a refusal must NEVER become `[{value:''}]` — that
+    // array is the literal body of an SP-API `replace` patch, so it would CLEAR a live,
+    // shopper-visible field. `[]` (no patch entries at all — the same "nothing to patch" shape this
+    // function already returns for empty input two lines up) is the correct signal for "this net
+    // refused"; the caller is responsible for skipping the SKU/attribute and reporting why (the
+    // per-SKU push loop — see pushExecutor.ts's `patchSkuDetail` guard and Important 3's UNDER_FLOOR
+    // surfacing at the pre-flight skip checks).
+    if (!netResult.ok) return []
+    trimmed = netResult.value
+  }
   const normalized = attr.enumMap ? (attr.enumMap[trimmed.toLowerCase()] ?? trimmed) : trimmed
   return [{ value: normalized, marketplace_id: marketplaceId, language_tag: languageTag }]
 }

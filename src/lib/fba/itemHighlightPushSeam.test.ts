@@ -100,7 +100,7 @@ const create = vi.fn(async () => { throw new Error('OpenAI must never be called 
 vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { create } } } }))
 
 import { buildItemHighlightsPerDesign } from './listingPipeline'
-import { buildPerSkuItemHighlightMap, perDesignIhRows, NO_LINE_FOR_DESIGN, type PerChildItemHighlight } from './perDesignItemHighlights'
+import { buildPerSkuItemHighlightMap, perDesignIhRows, type PerChildItemHighlight } from './perDesignItemHighlights'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { ihFoldWord, IH_INSIGNIFICANT, classifyStoredIhLine } from './productDetailAttrs'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
@@ -258,13 +258,20 @@ describe('push seam wire: a held design is skipped at the map, never given a sib
   const r = build(partial)
   const { values, skipped } = buildPerSkuItemHighlightMap(r.perChild, ALL_TARGETS, null)
 
-  it('RK (designs-unrated) composes no line; its SKU maps to NO_LINE_FOR_DESIGN and is absent from the pushable set', () => {
+  // FIX ROUND 3 (I-1, controller RULING — F2 PARITY): the seam used to discard an empty-line entry
+  // BEFORE classification, so a held-empty design's skip reason always collapsed to the generic
+  // NO_LINE_FOR_DESIGN regardless of its own, more specific hold — disagreeing with the card
+  // (`perDesignIhRows`), which already reported the real reason for the same entry. The seam now
+  // registers every entry (empty line or not) so `classifyIhEntry` decides uniformly for both; RK's
+  // real hold ('designs-unrated') now surfaces here too — it was never a question of WHETHER RK
+  // ships (it never did, either way), only of which reason gets reported.
+  it("RK (designs-unrated) composes no line; its SKU maps to its OWN hold reason (designs-unrated, not the generic no-line-for-design) and is absent from the pushable set", () => {
     const rkEntry = r.perChild.find((e) => e.designKey === 'RK')!
     expect(rkEntry.hold).toBe('designs-unrated')
     expect(rkEntry.item_highlight).toBe('')
     const rkSku = RK.skus[0].sku
     expect(values.has(rkSku)).toBe(false)                                            // absent from the pushable set
-    expect(skipped).toContainEqual({ sku: rkSku, asin: RK.skus[0].asin, reason: NO_LINE_FOR_DESIGN })
+    expect(skipped).toContainEqual({ sku: rkSku, asin: RK.skus[0].asin, reason: 'designs-unrated' })
   })
 
   it('the other five designs are NEVER held `designs-unrated` because of RK — isolation still holds (TASK 8: they now separately COMPOSE too, same as every other scenario in this file — see file header — restoring the ORIGINAL proof "still resolve their OWN lines" the Task 6 hold had narrowed)', () => {

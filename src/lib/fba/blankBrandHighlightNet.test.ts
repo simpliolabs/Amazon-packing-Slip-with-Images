@@ -1,11 +1,18 @@
 import { describe, it, expect, vi } from 'vitest'
 import { DEFAULT_BLANK_SPECS, matchBlankSpec, matchBlankSpecRow, ensureBlankBrandInHighlights, applyBlankBrandNetToDetails } from './blankSpecs'
-import { buildDetailPatchValue, capItemHighlightRepeats } from './productDetailAttrs'
+import { buildDetailPatchValue, capItemHighlightRepeats, type IhNetResult } from './productDetailAttrs'
 import { CONTENT_CONTRACT } from './contentContract'
 
 /** The ONE budget under test — never a literal, so a contract change cannot leave these tests
  *  passing against a scenario that no longer exists (exactly what froze T4.5 at 75). */
 const IH_MAX = CONTENT_CONTRACT.itemHighlights.max
+
+/** IH TERMINAL NET FIX ROUND 1: `capItemHighlightRepeats` returns a typed union — unwrap it for a
+ *  fixpoint check that expects the net to ACCEPT the line unchanged (a refusal throws loudly). */
+function okValue(r: IhNetResult): string {
+  if (!r.ok) throw new Error(`expected the net to accept the line, but it refused: ${r.reason}`)
+  return r.value
+}
 
 // Same guard as blankSpecs.test.ts: never let a unit test touch a real supabase client.
 vi.mock('@supabase/supabase-js', () => ({
@@ -68,7 +75,7 @@ describe('ensureBlankBrandInHighlights — the PO 2026-08-08 blank-brand waterfa
     const once = ensureBlankBrandInHighlights(hl, [LOCKED_TITLE_NO_BRAND], CC)
     expect(ensureBlankBrandInHighlights(once, [LOCKED_TITLE_NO_BRAND], CC)).toBe(once)
     // and the outer generation-path cap is a fixpoint over the netted string
-    expect(capItemHighlightRepeats(once)).toBe(once)
+    expect(okValue(capItemHighlightRepeats(once))).toBe(once)
   })
 
   it('T4.5 a FULL-budget input is re-capped at a comma boundary; the brand survives because it is FIRST', () => {
@@ -84,7 +91,15 @@ describe('ensureBlankBrandInHighlights — the PO 2026-08-08 blank-brand waterfa
   })
 
   it('T4.6 word-fold collision: a later "comfort" phrase is evicted, the brand phrase is kept, no word >2x', () => {
-    const hl = 'all-day comfort, crew neck comfort' // "comfort" x2 already at the cap
+    // IH TERMINAL NET FIX ROUND 1 (2026-09-07, IMPORTANT 4): the original 2-phrase, 34-char fixture
+    // predates the repeat-driven floor refusal — with only 2 non-brand phrases, evicting one for the
+    // word-fold collision left a 49-char candidate under CONTENT_CONTRACT.itemHighlights.min (107),
+    // so the net now (correctly) REFUSES the candidate and the brand insertion aborts entirely,
+    // which is not what this test exists to prove (same precedent as Phase 1's own fixture
+    // lengthenings, phase-1-report.md §5). Widened with two more true, non-colliding phrases so the
+    // post-eviction candidate clears the floor — same collision, same eviction, same "nothing >2x"
+    // shape, now clear of a floor concern this test was never about.
+    const hl = 'all-day comfort, crew neck comfort, soft breathable fabric feel, relaxed fit everyday wear, gift ready packaging'
     const out = ensureBlankBrandInHighlights(hl, [LOCKED_TITLE_NO_BRAND], CC)
     expect(out.startsWith('authentic Comfort Colors blank')).toBe(true)
     // deterministic word census over the folded tokens: nothing >2
@@ -94,7 +109,7 @@ describe('ensureBlankBrandInHighlights — the PO 2026-08-08 blank-brand waterfa
     }
     for (const [, c] of counts) expect(c).toBeLessThanOrEqual(2)
     // the capped result is a fixpoint (the push boundary re-cap cannot change it)
-    expect(capItemHighlightRepeats(out)).toBe(out)
+    expect(okValue(capItemHighlightRepeats(out))).toBe(out)
   })
 
   it('T4.7 compliance floor: returns the ORIGINAL when insertion would leave <2 phrases', () => {

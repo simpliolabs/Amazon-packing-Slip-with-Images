@@ -31,8 +31,16 @@ import {
   ihSpecFactFillers,
   IH_PAD_FILLER_DESCRIPTORS,
   deriveIhBoilerplateBudget,
+  type IhNetResult,
 } from './productDetailAttrs'
 import { GARMENT_HEAD_WORDS } from './garmentNoun'
+
+/** IH TERMINAL NET FIX ROUND 1: `capItemHighlightRepeats` returns a typed union — unwrap it for a
+ *  test that expects the net to ACCEPT the line (a refusal throws loudly, naming the reason). */
+function okValue(r: IhNetResult): string {
+  if (!r.ok) throw new Error(`expected the net to accept the line, but it refused: ${r.reason}`)
+  return r.value
+}
 
 describe('the canonical rule matches Amazon, not a stricter invention', () => {
   it('Amazon allows a word TWICE — that is the shipped threshold', () => {
@@ -52,7 +60,7 @@ describe('the canonical rule matches Amazon, not a stricter invention', () => {
     const value = '100% cotton shirt, graphic tee for women'
     expect(ihRepeatViolations(value)).toEqual([])
     // And the door agrees — it does not drop the phrase.
-    expect(capItemHighlightRepeats(value)).toBe(value)
+    expect(okValue(capItemHighlightRepeats(value))).toBe(value)
   })
 })
 
@@ -98,14 +106,20 @@ describe('the validator and the door cannot disagree', () => {
     ]
     for (const v of compliant) {
       expect(ihRepeatViolations(v), v).toEqual([])
-      expect(capItemHighlightRepeats(v), v).toBe(v)
+      expect(okValue(capItemHighlightRepeats(v)), v).toBe(v)
     }
   })
 
-  it('and anything the door TRIMS was flagged by the rule first', () => {
+  it('and anything the door TRIMS — or REFUSES, per fix round 1 IMPORTANT 4 — was flagged by the rule first', () => {
+    // FIX ROUND 1 (2026-09-07, controller RULING, IMPORTANT 4): this fixture's repeat cap alone
+    // drops the third "comfort colors" phrase, landing a 2-phrase, 45-char survivor — under
+    // CONTENT_CONTRACT.itemHighlights.min (107). Before IMPORTANT 4 the floor guard was scoped to a
+    // LENGTH-driven drop only, so this repeat-driven drop shipped the 45-char line unrefused (the
+    // exact class the reviewer's Cotton-Rich-Tee reproduction also caught). It must now REFUSE, not
+    // ship a compliant-looking but under-floor fragment.
     const offending = 'comfort colors shirt, comfort colors tshirt, comfort colors tee shirt'
     expect(ihRepeatViolations(offending).length).toBeGreaterThan(0)
-    expect(capItemHighlightRepeats(offending)).not.toBe(offending)
+    expect(capItemHighlightRepeats(offending)).toEqual({ ok: false, reason: 'under-floor' })
   })
 
   it('is total — empty and whitespace input never throw', () => {
@@ -156,7 +170,11 @@ describe('TASK 8: ihRepeatBudget — the ONE exemption, derived from GARMENT_HEA
  * disagree with the composer about what a "repeat" is. */
 describe('TASK 8: classifyStoredIhLine honors the garment exemption', () => {
   it('tee x2 -> ok (was repeat-in-stored-line before this ruling)', () => {
-    expect(classifyStoredIhLine('Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit')).toBe('ok')
+    // IH TERMINAL NET PHASE 1 (2026-09-07, H13): lengthened past the 107-char floor — the original
+    // 85-char fixture predates `classifyStoredIhLine`'s new under-floor classification and would now
+    // (correctly) be refused for a DIFFERENT reason than the one this test exists to pin (the garment
+    // exemption). Same words, same zero-non-garment-repeat shape, one extra true phrase appended.
+    expect(classifyStoredIhLine('Graphic Novelty Tee for Men, Funny Tee Gift Idea Today, Ring-Spun Cotton, Classic Fit, Everyday Comfort Wear')).toBe('ok')
   })
 
   it('tee x3 -> repeat-in-stored-line — Amazon\'s own cap (2) still refuses a THIRD mention', () => {

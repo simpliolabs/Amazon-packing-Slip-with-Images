@@ -78,7 +78,14 @@ export async function POST(req: NextRequest) {
 
     const trimmed = value.trim()
     const problems = validateItemHighlights(trimmed, brandName, capacityFamily, designSeasons)
-    const wouldShip = capItemHighlightRepeats(trimmed)
+    // FIX ROUND 1 (2026-09-07, controller RULING): `capItemHighlightRepeats` now returns a typed
+    // union — this preview route is the ONE place that is allowed to show `wouldShip: null` (it
+    // never persists or pushes anything), so a refusal is reported honestly as `null` +
+    // `refusalReason`, never as `''` (which used to read as "will ship empty", the same sentinel
+    // collision BLOCKING 1/2 closed at the real push/persistence sites).
+    const netResult = capItemHighlightRepeats(trimmed)
+    const wouldShip = netResult.ok ? netResult.value : null
+    const refusalReason = netResult.ok ? null : netResult.reason
 
     return NextResponse.json({
       ok: problems.length === 0,
@@ -88,8 +95,11 @@ export async function POST(req: NextRequest) {
       overCap: trimmed.length > IH_MAX_CHARS,
       repeatedWords: ihRepeatViolations(trimmed),
       maxWordRepeats: IH_MAX_WORD_REPEATS,
-      /** The bytes the push boundary would actually PATCH — shown so a trim is never a surprise. */
+      /** The bytes the push boundary would actually PATCH — shown so a trim is never a surprise.
+       *  `null` when the terminal net refuses (see `refusalReason`) — never `''`, which would read
+       *  as "ships empty" instead of "does not ship at all". */
       wouldShip,
+      refusalReason,
       willShipUnchanged: wouldShip === trimmed,
     })
   } catch (e) {

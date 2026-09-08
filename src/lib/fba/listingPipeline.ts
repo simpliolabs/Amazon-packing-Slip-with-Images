@@ -2366,7 +2366,19 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
     // Defense in depth on the shipped bytes: the brand net is a no-op on a composer line (the
     // waterfall is satisfied inside it — T4.10), the repeat cap is idempotent on it, and the floor
     // door holds anything that somehow came out short.
-    const value = ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand)))
+    // FIX ROUND 1 (2026-09-07, controller RULING): `capItemHighlightRepeats` returns a typed union —
+    // a refusal maps onto the SAME `IhHoldReason` vocabulary this function already returns below
+    // (no new hold semantics, per the spec's own non-goals): the repeat net emptying everything is
+    // the same fact `under-floor-no-repeat` already names (a repeat-permitting selection was the
+    // only way to reach the floor and the PO's absolute no-repeat ruling forbids it); every other
+    // refusal (over-max, or a length/repeat-driven drop landing under the floor) is `under-floor`.
+    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand))
+    if (!capResult.ok) {
+      console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'buildItemHighlights', reason: capResult.reason, len: res.line.length }))
+      const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
+      return { value: '', hold }
+    }
+    const value = ihFloorDoor(capResult.value)
     return value ? { value, hold: null } : { value: '', hold: 'under-floor' }
   }
   // HOLD (PO 2026-08-21): no LLM draft, no spec-mash — a named reason the PO can act on. An
@@ -10082,8 +10094,30 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     per_child_bullets: r.per_child_bullets?.map((c) => ({ ...c, bullets: c.bullets.map((b) => scrubPub(b, 'per-child-bullets')) })),
     per_child_descriptions: r.per_child_descriptions?.map((c) => ({ ...c, description: scrubPub(c.description, 'per-child-description') })),
     // Per-design Item Highlights ship per SKU (PO 2026-08-21) — same publish-boundary scrub + the
-    // repeat cap the single-design row gets (capItemHighlightRepeats is idempotent on composer output).
-    per_child_item_highlights: r.per_child_item_highlights?.map((c) => ({ ...c, item_highlight: c.item_highlight ? capItemHighlightRepeats(scrubPub(c.item_highlight, 'per-child-item-highlight')) : '' })),
+    // repeat cap the single-design row gets (capItemHighlightRepeats is idempotent on composer
+    // output — this defense-in-depth net refusing is an EDGE case, not the normal path).
+    // BLOCKING 2 (controller RULING, fix round 1): a refusal must NEVER overwrite this design's
+    // already-composed, floor-checked line with '' — that is the exact silent HELD-conversion the
+    // reviewer reproduced (`applyBlankBrandNetPerDesign`, same class). Keep the composed value and
+    // record the hold (reusing the existing IhHoldReason vocabulary; no new hold semantics) instead.
+    // FIX ROUND 3 (I-1, controller RULING, phase-1-final-review.md Important 1): the KEPT value on
+    // refusal must be the one that PASSED `scrubPub` — never the pre-scrub `c.item_highlight`. Before
+    // this fix the verdict was taken on `scrubPub(c.item_highlight)` but the value persisted was the
+    // UNSCRUBBED `c.item_highlight`, so `scrubPublished`'s ONE publish-boundary choke point could be
+    // routed around: `scrubCelebrityNames` runs ONLY here for this field (no celebrity door in
+    // `itemHighlightComposer.ts`), so a refusal silently skipped it. Compute the scrubbed string ONCE
+    // and keep THAT on refusal (never the raw pre-scrub value).
+    per_child_item_highlights: r.per_child_item_highlights?.map((c) => {
+      if (!c.item_highlight) return { ...c, item_highlight: '' }
+      const scrubbed = scrubPub(c.item_highlight, 'per-child-item-highlight')
+      const capResult = capItemHighlightRepeats(scrubbed)
+      if (!capResult.ok) {
+        console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'per-child-item-highlight', sku: c.sku, reason: capResult.reason }))
+        const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
+        return { ...c, item_highlight: scrubbed, hold }
+      }
+      return { ...c, item_highlight: capResult.value }
+    }),
     // Audit blobs are seller-facing copy too (PO-caught 2026-07-02: raw mark in an action_plan copy
     // block). Deep-scrub every string value; identifier keys (sku/asin/element/...) are skipped
     // inside scrubTrademarksDeep so SKU codes are never rewritten.

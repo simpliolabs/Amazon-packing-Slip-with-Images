@@ -35,6 +35,10 @@ import { createClient } from '@supabase/supabase-js'
 // reused, never re-implemented (Invariant 5). No cycle: productDetailAttrs imports only a TYPE from
 // pushFields and the supabase client type; it never imports this module.
 import { capItemHighlightRepeats, isItemHighlightsField, detailValueToString } from '@/lib/fba/productDetailAttrs'
+// Type-only (erased at compile, zero runtime import): R1's abandonment signal reuses the EXISTING
+// IhHoldReason vocabulary — never a parallel one. No cycle: perDesignItemHighlights.ts does not
+// import blankSpecs.ts.
+import type { IhHoldReason } from '@/lib/fba/perDesignItemHighlights'
 
 export interface BlankSpec {
   brand?: string
@@ -708,10 +712,31 @@ export function matchBlankSpec(rows: readonly BlankSpecRow[], ...sources: (strin
  *
  * Idempotent: once inserted, the IH itself matches the brand test and every later pass no-ops.
  */
+/**
+ * R1 (finish-line-rulings.md, controller RULING, 2026-09-08 — "GET it done"). REPRODUCED live
+ * (phase-1-final-review-2.md IMPORTANT 1, Corpus B): on ~1 in 5 real, in-band composer lines the
+ * brand-prefixed candidate cannot fit under the 125-char max without evicting a phrase entirely,
+ * landing the survivor under the 107 floor — the insertion is ABANDONED and the ORIGINAL `hl` ships
+ * unbranded. That outcome is CORRECT and stands (ruled). What was missing: nothing on the returned
+ * value said WHY — a `console.log` JSON line was the only trace, invisible to the PO.
+ *
+ * FIX: an optional out-param, `diag`. Every existing call site (this function's own
+ * `blankBrandHighlightNet.test.ts` suite, ~20 assertions comparing the return to a bare string with
+ * `.toBe`) omits it and is byte-identical — the return type is UNCHANGED. A caller that needs the
+ * reason (the two re-net functions below) passes `diag` and reads `diag.abandoned` afterwards. The
+ * reason reuses the EXISTING `IhHoldReason` vocabulary — never a parallel one — with the SAME
+ * mapping `buildItemHighlights` (listingPipeline.ts) and the per-child persist net already apply to
+ * this exact `capItemHighlightRepeats` result shape: `'repeat-over-budget' -> 'under-floor-no-repeat'`,
+ * everything else (`'over-max'`, `'under-floor'`) -> `'under-floor'`. The `phrases.length < 2`
+ * compliance-floor exit has no `capResult` reason to key off (the net itself accepted a candidate
+ * too thin to keep >=2 phrases) — `'under-floor'` is the closest existing member and the only one
+ * that fits: the candidate could not stay a compliant, multi-phrase line WITH the brand.
+ */
 export function ensureBlankBrandInHighlights(
   hl: string,
   titles: (string | null | undefined)[],
   blank: BlankSpecRow | null,
+  diag?: { abandoned?: IhHoldReason | null },
 ): string {
   // One JSON line per invocation (adversarial LOW, 2026-08-08 — SHIP_BAND_DECISION doctrine: "the
   // net fired", "never fired" and "fired and did nothing" must be distinguishable in prod logs).
@@ -735,9 +760,27 @@ export function ensureBlankBrandInHighlights(
   const named = titles.filter((t): t is string => !!t && !!t.trim())
   if (named.length > 0 && named.every((t) => carries(t))) { log('title-carries'); return hl }
   if (carries(hl)) { log('ih-carries'); return hl } // IH already carries it — idempotence
-  const candidate = capItemHighlightRepeats(`authentic ${brand} blank, ${hl}`)
+  // FIX ROUND 1 (2026-09-07, controller RULING): `capItemHighlightRepeats` now returns a typed
+  // union — a refusal here is treated exactly like the pre-existing `phrases.length < 2` floor-abort
+  // below (the candidate cannot be netted into a compliant line, so the insertion is abandoned and
+  // the ORIGINAL `hl` ships unchanged; the brand is never bought at the price of IH compliance).
+  // R2 (finish-line-rulings.md, controller RULING, 2026-09-08): `allowLengthAmputation` — this net's
+  // OWN documented mechanic is trimming trailing (non-brand) phrases to fit the brand-first
+  // candidate under the max (SELLER_PROFILE.md §5, "insertion order is the survival mechanism";
+  // proven by T4.5/T4.6 in blankBrandHighlightNet.test.ts). R2's new blanket over-max refusal is
+  // about a FINAL line silently losing its own meaning to amputation (H12's class) — not about this
+  // net's deliberate, floor-guarded phrase eviction. The floor check still refuses unconditionally.
+  const capResult = capItemHighlightRepeats(`authentic ${brand} blank, ${hl}`, { allowLengthAmputation: true })
+  if (!capResult.ok) {
+    if (diag) diag.abandoned = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
+    log('floor-abort', { from: hl.length, refused: capResult.reason }); return hl
+  }
+  const candidate = capResult.value
   const phrases = candidate.split(',').map((p) => p.trim()).filter(Boolean)
-  if (phrases.length < 2) { log('floor-abort', { from: hl.length }); return hl } // compliance floor: an IH must keep >=2 phrases
+  if (phrases.length < 2) {
+    if (diag) diag.abandoned = 'under-floor'
+    log('floor-abort', { from: hl.length }); return hl // compliance floor: an IH must keep >=2 phrases
+  }
   const evicted = hl.split(',').map((p) => p.trim()).filter(Boolean).length + 1 - phrases.length
   log('inserted', { evictedPhrases: evicted, from: hl.length, to: candidate.length })
   return candidate
@@ -823,8 +866,32 @@ export function applyBlankBrandNetToDetails(
   if (idx < 0) return { details: arr, changed: false }
   const current = detailValueToString(arr[idx].recommended_value)
   if (!current.trim()) return { details: arr, changed: false }
-  const netted = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, titles, blank))
-  if (netted === current) return { details: arr, changed: false }
+  // BLOCKING 2 (controller RULING, fix round 1): a refusal must NEVER overwrite this stored value —
+  // keep `current` (changed:false) and log the hold, the same discipline the per-design twin below
+  // now uses. `capItemHighlightRepeats` returning `''` used to be read as "no brand change" and
+  // written straight over an already-compliant, PO-accepted line.
+  const diag: { abandoned?: IhHoldReason | null } = {}
+  const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, titles, blank, diag))
+  if (!capResult.ok) {
+    console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'refused-kept-current', field: detailValueToString(arr[idx].field_name), current, reason: capResult.reason }))
+    return { details: arr, changed: false }
+  }
+  const netted = capResult.value
+  if (netted === current) {
+    // R1 (finish-line-rulings.md, controller RULING, 2026-09-08): the abandonment is CORRECT — this
+    // line still ships — but must become a CARD-VISIBLE signal, reusing the EXISTING IhHoldReason
+    // vocabulary (never a parallel one) rather than only the console.log line above.
+    const nextNote: IhHoldReason | null = diag.abandoned ?? null
+    const prevNote = ((arr[idx] as { blankBrandAbandoned?: IhHoldReason | null }).blankBrandAbandoned) ?? null
+    if (nextNote === prevNote) return { details: arr, changed: false }
+    console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: nextNote ? 'abandoned-signal' : 'abandoned-signal-cleared', field: detailValueToString(arr[idx].field_name), current, reason: nextNote }))
+    const outNote = arr.map((p, i) => {
+      if (i !== idx) return p
+      if (!nextNote) { const { blankBrandAbandoned: _drop, ...rest } = p as { blankBrandAbandoned?: unknown }; return rest }
+      return { ...p, blankBrandAbandoned: nextNote }
+    })
+    return { details: outNote, changed: true }
+  }
   // WATERFALL WINS (PO ruling, SELLER_PROFILE §5 — adversarial precedence question 2026-08-08):
   // this net MAY rewrite even a sticky-kept PO-ACCEPTED Item Highlight when the shipping titles
   // lack the blank brand — §5's MUST ("the Item Highlights MUST carry it") is the PO's standing
@@ -845,7 +912,7 @@ export function applyBlankBrandNetToDetails(
  * same caps, same floor-abort. Pure: returns the SAME array reference with changed:false on no-op.
  * A held design ('' line) is untouched — the net never invents a line.
  */
-export function applyBlankBrandNetPerDesign<T extends { sku: string; asin?: string | null; item_highlight: string }>(
+export function applyBlankBrandNetPerDesign<T extends { sku: string; asin?: string | null; item_highlight: string; blankBrandAbandoned?: IhHoldReason | null }>(
   entries: T[] | null | undefined,
   perChildTitles: { sku: string; asin?: string | null; title: string }[] | null | undefined,
   blank: BlankSpecRow | null,
@@ -864,11 +931,37 @@ export function applyBlankBrandNetPerDesign<T extends { sku: string; asin?: stri
     if (!current) return e
     const title = titlesBySku.get(e.sku) ?? (e.asin ? titlesByAsin.get(e.asin) : undefined)
     if (!title) return e   // no shipped title known for this SKU → nothing to net against
-    const netted = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, [title], blank))
-    if (netted === current) return e
+    // BLOCKING 2 REPRODUCTION (controller RULING, fix round 1, phase-1-review.md): a refusal used to
+    // become `''`, and `netted === current` was false (an empty string is never equal to a non-empty
+    // stored line), so the design's already-compliant line was OVERWRITTEN with `''` and marked
+    // `changed:true` — silently converting a pushable design to HELD. Keep `e` (the prior value)
+    // unchanged on refusal, same as the `!title` guard immediately above.
+    const diag: { abandoned?: IhHoldReason | null } = {}
+    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, [title], blank, diag))
+    if (!capResult.ok) {
+      console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'per-design-refused-kept', sku: e.sku, current, reason: capResult.reason }))
+      return e
+    }
+    const netted = capResult.value
+    if (netted === current) {
+      // R1 (finish-line-rulings.md, controller RULING, 2026-09-08): the design still SHIPS this
+      // unbranded line (correct, ruled) — surface WHY on the entry itself, reusing the EXISTING
+      // IhHoldReason vocabulary (never a parallel one, never `hold` — that field means "no line at
+      // all" and would wrongly disqualify a design that DOES ship, per classifyIhEntry's hold-first
+      // predicate). Clears a stale note the moment a title edit lets the insertion succeed.
+      const nextNote: IhHoldReason | null = diag.abandoned ?? null
+      const prevNote = e.blankBrandAbandoned ?? null
+      if (nextNote === prevNote) return e
+      changed = true
+      console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: nextNote ? 'per-design-abandoned-signal' : 'per-design-abandoned-signal-cleared', sku: e.sku, current, reason: nextNote }))
+      if (!nextNote) { const { blankBrandAbandoned: _drop, ...rest } = e; return rest as T }
+      return { ...e, blankBrandAbandoned: nextNote } as T
+    }
     changed = true
     console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'per-design-rewrite', sku: e.sku, from: current, to: netted }))
-    return { ...e, item_highlight: netted }
+    // A successful insertion also clears any stale abandonment note from a prior run.
+    const { blankBrandAbandoned: _drop, ...rest } = e
+    return { ...rest, item_highlight: netted } as T
   })
   return { entries: changed ? out : arr, changed }
 }
