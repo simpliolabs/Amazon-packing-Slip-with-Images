@@ -603,19 +603,20 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     const spec = TASK8_REPRO_SPEC
     const res = composeItemHighlightDetailed(pool, [], { spec: spec as any })
     // Verified via an `npx tsx` probe against the real composer (task-8-report.md).
-    // FLOOR 97 (PO RULING "2+3", 2026-09-07/08, contentContract.ts): this fixture's expected bytes
-    // are DELIBERATELY updated, not re-fixtured blindly — the pool-phase Tier-A picks alone
-    // ("Crewneck Sweatshirts Women, Novelty Retro Graphic, Long Sleeve Crewneck, 100% Cotton Blend,
-    // Relaxed Fit") already total 103 chars, which cleared the NEW 97 floor without needing the pad
-    // loop's "Unisex Fit" filler — under the OLD 107 floor that filler WAS needed and composed. This
-    // is the acceptance criterion's own predicted case: a line whose length was floor-DEPENDENT (it
-    // only reached 107 via padding to the floor, not via the pool phase's own AIM=110 target) changes
-    // when the floor moves; the exemption this pin used to also cover — `fit` may legitimately appear
-    // twice ("Relaxed Fit" + "Unisex Fit") — is still independently unit-tested by
-    // `deriveIhBoilerplateBudget` in `itemHighlightOneRule.test.ts`, so no coverage is lost.
-    expect(res.line).toBe('Crewneck Sweatshirts Women, Novelty Retro Graphic, Long Sleeve Crewneck, 100% Cotton Blend, Relaxed Fit')
+    // CONTROLLER CORRECTION to #677 (2026-09-08): #677 had updated this fixture's expected bytes
+    // (103c, dropping "Unisex Fit") on the premise that the NEW 97 floor legitimately let the pool
+    // phase's own 103-char Tier-A reach ship without ever needing the pad loop. That premise was
+    // itself a symptom of #677's own defect: the pad loop's stop condition read the accept floor
+    // (`MIN`) instead of the fill target (`AIM`), so it never WALKED past 103 to check whether more
+    // filler was available — it merely happened to already be legal. With the pad loop corrected to
+    // aim at `Math.max(AIM, MIN)` (fillTarget 110, RESERVE 0 here), it continues past 103 and adds
+    // "Unisex Fit" (fold-new: `unisex`; `fit` still budget-2, exempt), reaching 118 chars — BYTE-
+    // IDENTICAL to the pre-#677 bytes this fixture originally pinned (`fit` count 2, per the FIX
+    // ROUND 1 exemption comment restored below). Confirms the acceptance criterion: lowering the
+    // floor is byte-identical for a line the pool phase alone already cleared 97 on, once the pad
+    // loop itself is no longer the thing silently capping it.
+    expect(res.line).toBe('Crewneck Sweatshirts Women, Novelty Retro Graphic, Long Sleeve Crewneck, 100% Cotton Blend, Relaxed Fit, Unisex Fit')
     expect(res.stage).toBeNull()
-    expect(res.line!.length).toBe(103)
     const line = res.line!
     expect((line.match(/crewneck/gi) ?? []).length).toBe(2)          // garment noun, budget 2
     expect((line.match(/\bsweatshirts?\b/gi) ?? []).length).toBe(1)  // only ONE phrase carries it here
@@ -623,11 +624,15 @@ describe('TASK 2/6: a phrase repeating a used token is REJECTED, never a fallbac
     expect((line.match(/\bsleeve\b/gi) ?? []).length).toBe(1)        // not a garment noun — budget 1
     expect(line.toLowerCase()).not.toContain('fall sweatshirts for women')
     expect(line.toLowerCase()).not.toContain('sleeve detail graphic')
-    // `fit` appears ONCE here (only "Relaxed Fit" — the pad loop stopped before "Unisex Fit" was
-    // needed, see the FLOOR 97 note above). The budget-2 exemption that let "Relaxed Fit" +
-    // "Unisex Fit" co-exist (FIX ROUND 1, task-8-review-findings.md) is unchanged in the composer —
-    // this fixture simply no longer exercises it end-to-end; see itemHighlightOneRule.test.ts.
-    expect((line.match(/\bfit\b/gi) ?? []).length).toBe(1)
+    // FIX ROUND 1 (Blocking finding, reviewer task-8-review-findings.md): this exact line carries
+    // `fit` TWICE ("Relaxed Fit" + "Unisex Fit") — the pad loop's `usedBeforePad` snapshot (PO
+    // 2026-08-06, "pad exemption still holds" per the task-8 brief) legitimately lets these two
+    // INDEPENDENT spec facts co-exist even though they share the composer's own appended "Fit"
+    // boilerplate word. The composer is not the bug — `classifyStoredIhLine` disagreeing with it
+    // is: before this fix it classified this composer-produced line `repeat-in-stored-line` and the
+    // push seam refused a value the composer just legitimately shipped. `fit` now carries the SAME
+    // bounded budget-2 exemption as the garment head noun (`ihRepeatBudget`), so the seam agrees.
+    expect((line.match(/\bfit\b/gi) ?? []).length).toBe(2)
     expect(classifyStoredIhLine(line)).toBe('ok')
   })
 
