@@ -252,6 +252,32 @@ the SUBJECT it hangs that fact on. "Cozy Nights Tee with a Classic Fit, Brushed 
 Ring-Spun Cotton" ships because the picker itself admits "brushed fleece lining" on that blank. That
 is the admission oracle's gap, and it is FILED, not the writer's.
 
+## 2f. AMENDMENT 2026-09-10 (B5 panel) — a relation owns its CLAUSE, and a unit that can never be used is never offered
+
+*Where this stands.* At `058a109` the compliance lens found ZERO Blocking, and the taught-rules work
+paid off: a literal-following model now produces a valid arrangement on the FIRST call for 88-100% of
+designs, against 22-44% before, with expected calls per accepted line down from 1.86-2.40 to
+1.00-1.14.
+
+*Refinements:*
+1. **A relation owns its clause, not just the next unit.** A list join after a legal spec fact
+   extended the relation over a pool unit: "Retro Sunset Shirt with a Classic Fit and Deep Pockets"
+   invented a feature again. Once `with` or `in` opens, every unit until the next comma must be
+   spec-class, and never the brand.
+2. **`number` is removed from the arrangement.** A plural manufactures a quantity or multi-pack
+   claim on any unit, not only the brand: "Retro Sunset Tees", "Farm Life Sweatshirts". No line needs
+   it.
+3. **Readability, refined:** a line needs at least one relation clause, and at most one RUN of two or
+   more consecutive list clauses. A single list clause between two relation clauses is ordinary
+   prose; a run of them is the keyword list the PO complained about.
+4. **A unit that can never appear is never offered.** The design name is effectively mandatory, so a
+   pool unit that collides with it under the owner's repeat predicate can never be used. Drop it at
+   admission and log it, exactly as a self-repeating unit is dropped.
+5. **A rule whose check is unconditional is taught unconditionally.** The feminine+masculine rule
+   was taught only inside the Unisex sentence, which is withheld on gendered leans, so it fired
+   untaught on exactly the families it governs. Every registry entry declares its condition, and a
+   fidelity test fails when a check is broader than its sentence.
+
 ## 3. ADVERSARY
 
 - **"The writer will hallucinate a spec."** Provenance makes that a rejection, not a hope: a token
