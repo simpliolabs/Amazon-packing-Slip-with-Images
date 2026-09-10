@@ -121,6 +121,34 @@ exactly what a picker cannot do. That is B0DSCDZC6K, where 5 of 6 designs hold.
 *Rollout.* `IH_WRITER` = off | shadow | on, default off. Shadow writes and logs but ships the
 composer's result, so the PO reads real lines before anything changes.
 
+## 2b. AMENDMENT 2026-09-10 (writer review) — the writer returns an ARRANGEMENT, not text
+
+*Why.* The writer review (`.superpowers/sdd/2026-09-10-ih-writer/phase-b-review.md`) built 16 new
+fluent lies, and 12 passed. Every one came from the PARSER that reads the writer's free text back
+into admitted units:
+- reordering and glue inside an atomic unit: "Girl Dad Shirt" → "Dad Shirt for Girls";
+- partial use dropping a negation, a hedge or a relation: "No Polyester Feel" → "Polyester Feel",
+  "Soft Cotton-Like Feel" → "Soft Cotton Feel", "Gift For Dad Of Little Ones" → "for Little Ones";
+- numbers swapping inside a unit: 52/48 → 48/52.
+
+Tightening that parser rule by rule is the treadmill again.
+
+*The rule, superseding §2a rules 2-4.* The writer returns a JSON ARRANGEMENT: an ordered list of
+admitted unit IDs and glue tokens from the closed list. Code renders the line. Every unit is rendered
+verbatim, with its own words, order and numbers. The only permitted change is the number (singular or
+plural) of a garment head noun. A unit is used at most once. There is no model text for provenance
+to parse, so provenance holds by construction. The rendered line then passes the ONE tail and the
+readability check, as before.
+
+*Bound.* A lie can reach the line only if it is itself an admitted unit, which is the identical
+phrase the picker would ship with the flag off. The writer's safety therefore equals the picker's.
+Closing the picker's own admission gaps is the FILED admission-oracle programme, not the writer's
+job.
+
+*Readability ceiling.* The writer can choose, order and join approved phrases and name the design.
+It cannot re-word inside a phrase. Shadow mode shows the PO whether that is readable enough before
+anything ships.
+
 ## 3. ADVERSARY
 
 - **"The writer will hallucinate a spec."** Provenance makes that a rejection, not a hope: a token
