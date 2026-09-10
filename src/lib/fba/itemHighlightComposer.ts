@@ -258,9 +258,34 @@ export interface ComposerOpts {
  *  `under-floor-no-repeat` (Task 6, 2026-09-06): the absolute no-repeat rule (not a thin pool) is
  *  why the floor was missed — see `repeatBlocked` at both call sites below. */
 export type ComposerNullStage = 'unrated-pool' | 'too-few-candidates' | 'too-few-picked' | 'under-floor-after-pad' | 'under-floor-no-repeat'
+
+/**
+ * WRITER SPEC PART 2, B1 (2026-09-10) — additive only, no existing field's meaning changes and no
+ * existing test's expected `.line`/`.stage` value changes. Exposes the ADMITTED SET this module
+ * already computed, so the writer (itemHighlightWriter.ts) never re-implements this module's own
+ * filtering/selection — it reuses these fields verbatim. All four are absent when the pool never got
+ * far enough to compute them (`stage === 'unrated-pool'`, the one PO-ruled skip); `candidates` is
+ * `[]` (never absent) once the pool DID reach candidate filtering, even when composition then failed
+ * for want of a floor — a design HELD on `too-few-candidates`/`too-few-picked`/`under-floor-*` can
+ * still be writer-eligible (spec §2a "Cost, refined") as long as at least one candidate qualified.
+ */
 export interface ComposerResult {
   line: string | null
   stage: ComposerNullStage | null
+  /** The pool units this family's candidates reduced to — already truth-checked (`ihTruthVerdict`),
+   *  coverage-excluded and 2-5-word-shaped, title-cased exactly as the composer would ship them.
+   *  `[]` once filtering ran and nothing qualified; `undefined` only when filtering never ran at all
+   *  (`stage === 'unrated-pool'`). */
+  candidates?: string[]
+  /** The spec-fact pad bank this family's blank backs (`ihSpecFactFillers(opts.spec)`), title-cased
+   *  the same way the pad loop casts them. `[]` when `opts.spec` is absent or filtering never ran. */
+  specFacts?: string[]
+  /** The reserved brand phrase this family needed composed (pool-sourced or the deterministic spec
+   *  phrase) — `null` when no brand was due, or filtering never reached the point of resolving one. */
+  brandPick?: string | null
+  /** The PO-sanctioned "Can be worn as Oversized" fact when this family is eligible for it — `null`
+   *  otherwise, or when filtering never reached the point of resolving eligibility. */
+  wearFact?: string | null
 }
 
 /** FIX ROUND 1 (#1, PO-controller ruling 2026-09-06): `repeatBlocked` used to fire the instant ANY
@@ -343,6 +368,10 @@ export function composeItemHighlightDetailed(
     audienceLean: opts?.audienceLean ?? null,
     designTokens: opts?.designTokens,
   }
+  // B1 (writer spec Part 2): the spec-fact bank, exposed additively — computed unconditionally
+  // (pure, cheap) so it rides on EVERY return below, not only the padding-loop path that consumes a
+  // second, independently-built copy of it further down. Never read by any pre-existing branch.
+  const specFactsForWriter = opts?.spec ? ihSpecFactFillers(opts.spec).map(titleCasePhrase) : []
   const flatten = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
   const brandRe = opts?.allowedBrand
     ? new RegExp('\\b' + opts.allowedBrand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*') + '\\b', 'i')
@@ -383,9 +412,12 @@ export function composeItemHighlightDetailed(
   // spec available and nobody could say which filter starved them. A silent null is a guess factory.
   const truthDrops: Partial<Record<IhTruthReason, number>> = {}
   const why = { pool: pool.length, ratedShare: Math.round(ratedShare * 100), requireFit, needBrand, afterFit: 0, candidates: 0, picked: 0, lineLen: 0, truthDrops, repeatBlocked: false }
-  const nullOut = (stage: ComposerNullStage): ComposerResult => {
+  // B1 (writer spec Part 2): `extra` carries whatever admitted-set fields are already in scope at
+  // the call site — `undefined` (the 'unrated-pool' call, before `candidates` exists) leaves
+  // `candidates` absent, which is exactly the ONE stage B8's eligibility rule reads as "never call".
+  const nullOut = (stage: ComposerNullStage, extra?: Pick<ComposerResult, 'candidates' | 'brandPick' | 'wearFact'>): ComposerResult => {
     console.log(JSON.stringify({ tag: 'IH_COMPOSER_NULL', stage, ...why }))
-    return { line: null, stage }
+    return { line: null, stage, specFacts: specFactsForWriter, ...extra }
   }
   if (!requireFit) return nullOut('unrated-pool')
   const candidates = pool
@@ -411,7 +443,11 @@ export function composeItemHighlightDetailed(
       return (b.searchVolume ?? 0) - (a.searchVolume ?? 0)
     })
   why.candidates = candidates.length
-  if (candidates.length < MIN_CANDIDATES) return nullOut('too-few-candidates')
+  // B1 (writer spec Part 2): the pool units, title-cased exactly as the composer would ship them —
+  // computed once here so every return from this point on exposes the SAME array, never a re-derived
+  // copy.
+  const candidatePhrasesForWriter = candidates.map((c) => titleCasePhrase(c.keyword))
+  if (candidates.length < MIN_CANDIDATES) return nullOut('too-few-candidates', { candidates: candidatePhrasesForWriter })
 
   // THE brand phrase (waterfall): prefer the best pool candidate carrying the brand (themeFit >= 2,
   // already truth-clean and not title-covered — candidates are sorted fit DESC / volume DESC), else
@@ -492,7 +528,9 @@ export function composeItemHighlightDetailed(
     const repeatBlocked = tierBFitBudgetSeen &&
       shadowRepeatReachesFloor(candidates, withBrand(picked), usedFolded, opts?.spec, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max, brandRe, brandPick)
     why.repeatBlocked = repeatBlocked
-    return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'too-few-picked')
+    return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'too-few-picked', {
+      candidates: candidatePhrasesForWriter, brandPick, wearFact: factEligible ? OVERSIZED_FACT : null,
+    })
   }
   if (brandPick) picked.push(brandPick)
   why.picked = picked.length
@@ -582,10 +620,19 @@ export function composeItemHighlightDetailed(
     const repeatBlocked = tierBFitBudgetSeen &&
       shadowRepeatReachesFloor(candidates, picked, usedFolded, opts?.spec, MIN, CONTENT_CONTRACT.itemHighlights.max, brandRe, brandPick)
     why.repeatBlocked = repeatBlocked
-    return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'under-floor-after-pad')
+    return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'under-floor-after-pad', {
+      candidates: candidatePhrasesForWriter, brandPick, wearFact: factEligible ? OVERSIZED_FACT : null,
+    })
   }
 
   // Trademark door on the final bytes (defense in depth — candidates are already door-clean, but
   // the wear-fact / brand / filler joins and future edits must never reopen it).
-  return { line: scrubTrademarks(picked.join(', ')), stage: null }
+  return {
+    line: scrubTrademarks(picked.join(', ')), stage: null,
+    // B1 (writer spec Part 2): same admitted-set fields as every HELD exit above — a SHIPPED line
+    // still exposes them, because the per-design writer wrapper re-judges the composer's own
+    // accepted line through the identical `judgeWriterLine` (idempotence, B4 point 3) and needs the
+    // same admitted set to do it.
+    candidates: candidatePhrasesForWriter, specFacts: specFactsForWriter, brandPick, wearFact: factEligible ? OVERSIZED_FACT : null,
+  }
 }

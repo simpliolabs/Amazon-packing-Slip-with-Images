@@ -74,7 +74,10 @@ import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrity
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, loadBlankAssignments, resolveFamilyBlank, familyBlankRow, familyGarmentUnion, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
-import { composeItemHighlightDetailed, ihAudienceOf } from '@/lib/fba/itemHighlightComposer'
+import { composeItemHighlightDetailed, ihAudienceOf, type ComposerResult } from '@/lib/fba/itemHighlightComposer'
+// WRITER SPEC PART 2 (2026-09-10, B4) — the writer is a LEAF (see its own header for why); this file
+// is a CONSUMER, never the other way, so the dependency graph stays acyclic.
+import { ihWriterMode, runWriterForDesign, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
 /* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
  * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
  * highlights. Blank-grounded (resolveFamilyBlank), never title-derived: a title cannot vouch for
@@ -2320,12 +2323,51 @@ export interface ItemHighlightsInput {
 }
 
 /**
+ * WRITER SPEC PART 2, B3 (2026-09-10) — THE ONE post-compose tail: `ensureBlankBrandInHighlights` ->
+ * `capItemHighlightRepeats` (contentCtx + truthCheck) -> `ihFloorDoor`. Extracted verbatim from
+ * `buildItemHighlights`'s own inline block (unchanged behavior — same calls, same order, same hold
+ * mapping) so the composer's OWN line and the writer's candidate line run through the IDENTICAL
+ * deterministic gates (repeat budget, the moved content rules, the line truth net, the floor door) —
+ * never a second, hand-copied tail. `site` names the caller in the refusal log only; it changes no
+ * shipped byte and no hold reason.
+ */
+export function runIhTail(
+  line: string,
+  opts: {
+    titles: string[]
+    blankBrand: BlankSpecRow | null
+    designSeasons?: readonly string[]
+    capacityFamily?: boolean
+    brandName?: string
+    truthCtx: PhraseTruthCtx
+    site?: string
+  },
+): { value: string; hold: IhHoldReason | null } {
+  const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(line, opts.titles, opts.blankBrand), {
+    contentCtx: { designSeasons: opts.designSeasons, capacityFamily: opts.capacityFamily, brandName: opts.brandName },
+    truthCheck: (l) => ihLineTruthVerdict(l, opts.truthCtx),
+  })
+  if (!capResult.ok) {
+    console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: opts.site ?? 'buildItemHighlights', reason: capResult.reason, len: line.length }))
+    const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
+    return { value: '', hold }
+  }
+  const value = ihFloorDoor(capResult.value)
+  return value ? { value, hold: null } : { value: '', hold: 'under-floor' }
+}
+
+/**
  * THE Item Highlights producer — shared byte-for-byte by the pipeline and the
  * regenerate-item-highlight route (Invariant 1: one function ships the field on every path).
  * Deterministic; never touches an LLM. `value` = the shipped bytes, or '' (= HOLD the stored value)
  * with `hold` naming why.
+ *
+ * WRITER SPEC PART 2, B1/B4 (2026-09-10) — `composed`/`truthCtx`/`titles` are additive: the async
+ * `produceItemHighlights` wrapper (itemHighlightWriter.ts) reuses them to build the writer's admitted
+ * set and to re-run `runIhTail` on an accepted writer line, WITHOUT recomposing or re-deriving
+ * `truthCtx` a second time. No existing caller reads these fields, so nothing byte-identical changes.
  */
-export function buildItemHighlights(input: ItemHighlightsInput): { value: string; hold: IhHoldReason | null } {
+export function buildItemHighlights(input: ItemHighlightsInput): { value: string; hold: IhHoldReason | null; composed?: ComposerResult; truthCtx?: PhraseTruthCtx; titles?: string[] } {
   const { finalTitle, pool, apparelProduct, blankBrand } = input
   const titles = (input.netTitles ?? [finalTitle]).filter((t): t is string => !!t)
   // Named so the terminal net's line-level truth check (below) can reuse the IDENTICAL ctx the
@@ -2370,27 +2412,13 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
     // only way to reach the floor and the PO's absolute no-repeat ruling forbids it); every other
     // refusal (over-max, or a length/repeat-driven drop landing under the floor, or — IH TERMINAL
     // NET PHASE A — a moved content rule or the line-level truth net) is `under-floor`.
-    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand), {
-      // BLOCKING 3's fix: pass the REAL resolved occasions when the caller has them; `undefined`
-      // (every pre-Phase-A caller, and any caller that never resolved them) skips the off-season
-      // rule rather than asserting a blanket "no occasion". FIX ROUND 2 (RULING I-2/F2, I-2/F3):
-      // `capacityFamily`/`brandName` thread the same way — `undefined` here (a caller that never
-      // resolved them) reads as `ihContentRuleViolations`'s own safe defaults, byte-identical to
-      // omitting the object entirely (a present key whose value is `undefined` is indistinguishable
-      // from an absent key to `ctx?.field ?? default` / `ctx?.field !== undefined`).
-      contentCtx: { designSeasons: input.designSeasons, capacityFamily: input.capacityFamily, brandName: input.brandName },
-      // PHASE A: the line-level truth net (contentTruth.ts), bound to the SAME ctx the composer's
-      // per-candidate check already used above — defense-in-depth on the FINAL joined bytes (a
-      // brand-insertion or pad filler assembled after per-candidate selection, or a stale value).
-      truthCheck: (line) => ihLineTruthVerdict(line, truthCtx),
+    // B3: the tail moved to `runIhTail` (this call is byte-identical to the pre-move inline block).
+    const tail = runIhTail(res.line, {
+      titles, blankBrand,
+      designSeasons: input.designSeasons, capacityFamily: input.capacityFamily, brandName: input.brandName,
+      truthCtx,
     })
-    if (!capResult.ok) {
-      console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'buildItemHighlights', reason: capResult.reason, len: res.line.length }))
-      const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
-      return { value: '', hold }
-    }
-    const value = ihFloorDoor(capResult.value)
-    return value ? { value, hold: null } : { value: '', hold: 'under-floor' }
+    return { ...tail, composed: res, truthCtx, titles }
   }
   // HOLD (PO 2026-08-21): no LLM draft, no spec-mash — a named reason the PO can act on. An
   // unrated pool holds BEFORE selection (the composer never volume-orders without a judgment).
@@ -2403,7 +2431,7 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
       : res.stage === 'under-floor-after-pad' ? (blankBrand?.spec ? 'under-floor' : 'no-spec')
         : 'thin-candidates'
   console.warn(JSON.stringify({ tag: 'IH_HOLD', reason: hold, stage: res.stage }))
-  return { value: '', hold }
+  return { value: '', hold, composed: res, truthCtx, titles }
 }
 
 // ─── Item Highlights for MULTI-DESIGN families: ONE LINE PER DESIGN (PO 2026-09-06) ────────────
@@ -2462,6 +2490,12 @@ export interface PerDesignItemHighlight {
   /** hold === 'designs-unrated' only: the design keys whose rating the pool lacks family-wide
    *  (informational — this design may be the only one held; siblings compose independently). */
   missingDesigns?: string[]
+  /** WRITER SPEC PART 2, B1/B4 (2026-09-10) — additive: this design's own composer admitted set +
+   *  truthCtx, straight through from its own `buildItemHighlights` call. `undefined` on the
+   *  `designs-unrated` branch (that branch never calls `buildItemHighlights`). See
+   *  `buildItemHighlights`'s own doc for why this changes no existing byte. */
+  composed?: ComposerResult
+  truthCtx?: PhraseTruthCtx
 }
 
 export interface SharedItemHighlight {
@@ -2563,9 +2597,24 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
       brandName: input.brandName,
     })
     console.log(JSON.stringify({ tag: 'IH_PER_DESIGN', design: g.key, pool: pool.length, scoped: scoped.length, len: r.value.length, hold: r.hold }))
-    return { designKey: g.key, designName: g.designName, skus: g.skus, value: r.value, hold: r.hold, foreignDropped }
+    return { designKey: g.key, designName: g.designName, skus: g.skus, value: r.value, hold: r.hold, foreignDropped, composed: r.composed, truthCtx: r.truthCtx }
   })
 
+  return { perDesign, ...assemblePerDesignItemHighlights(perDesign, designKeys, missingDesigns) }
+}
+
+/**
+ * WRITER SPEC PART 2 (2026-09-10) — extracted verbatim from `buildItemHighlightsPerDesign`'s own
+ * trailing block (same computations, same order): the per-SKU `perChild` fan-out and the `shared`
+ * marker-row derivation from a finished `perDesign` array. Reused by the async
+ * `produceItemHighlightsPerDesign` wrapper (itemHighlightWriter.ts) to re-derive `perChild`/`shared`
+ * after swapping in accepted writer lines — never a second, hand-copied assembly.
+ */
+export function assemblePerDesignItemHighlights(
+  perDesign: PerDesignItemHighlight[],
+  designKeys: string[],
+  missingDesigns: string[],
+): { perChild: PerChildItemHighlight[]; shared: SharedItemHighlight } {
   const perChild: PerChildItemHighlight[] = []
   for (const d of perDesign) {
     for (const s of d.skus) perChild.push({ sku: s.sku, asin: s.asin, item_highlight: d.value, designName: d.designName, designKey: d.designKey, hold: d.hold })
@@ -2589,10 +2638,113 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
   const foreignDroppedTotal = perDesign.reduce((n, d) => n + d.foreignDropped, 0)
 
   return {
-    perDesign,
     perChild,
     shared: { value: sharedValue, hold: sharedHold, designKeys, missingDesigns, foreignDropped: foreignDroppedTotal },
   }
+}
+
+/** WRITER SPEC PART 2 (2026-09-10, B9) — one row per design, logged (`IH_WRITER_SHADOW`) and
+ *  returned so the regenerate-item-highlight route's JSON response can carry it (spec §2a
+ *  "Rollout"), and so the PO can read real lines from ONE POST before any flag flips ship-affecting.
+ */
+export interface IhWriterLogRow {
+  design: string | null
+  composer: string
+  writer: string | null
+  accepted: boolean
+  reasons: string[]
+  calls: number
+}
+
+/**
+ * WRITER SPEC PART 2 (2026-09-10, B4) — THE ONE async entry point for the single-design path.
+ * `off` (default): zero calls, delegates straight to the sync `buildItemHighlights` — byte-identical.
+ * `shadow`: makes the call(s), logs `IH_WRITER_SHADOW`, but SHIPS the composer's own result.
+ * `on`: ships the accepted writer line; falls back to the composer's own vetted result (its line or
+ * its named HOLD) the instant the writer is ineligible, errors, or exhausts its retry budget — flag-
+ * on is therefore never worse than flag-off, and an unvetted line never ships (spec §2a "Fail-
+ * closed").
+ */
+export async function produceItemHighlights(
+  input: ItemHighlightsInput,
+  deps?: WriterDeps,
+): Promise<{ value: string; hold: IhHoldReason | null; writerLog?: IhWriterLogRow }> {
+  const built = buildItemHighlights(input)
+  const mode = ihWriterMode()
+  if (mode === 'off' || !built.composed || !built.truthCtx) return { value: built.value, hold: built.hold }
+  const titles = built.titles ?? []
+  const truthCtx = built.truthCtx
+  const outcome = await runWriterForDesign({
+    composed: built.composed,
+    fallbackHold: built.hold,
+    designName: input.designTokens?.[0] ?? null,
+    truthCtx,
+    runTail: (line) => runIhTail(line, {
+      titles, blankBrand: input.blankBrand, designSeasons: input.designSeasons,
+      capacityFamily: input.capacityFamily, brandName: input.brandName, truthCtx,
+      site: 'produceItemHighlights',
+    }),
+    deps,
+  })
+  const writerLog: IhWriterLogRow = {
+    design: input.designTokens?.[0] ?? null, composer: built.value,
+    writer: outcome.accepted ? outcome.value : null, accepted: outcome.accepted,
+    reasons: outcome.reasons, calls: outcome.calls,
+  }
+  console.log(JSON.stringify({ tag: 'IH_WRITER_SHADOW', ...writerLog }))
+  if (mode === 'shadow' || !outcome.accepted) return { value: built.value, hold: built.hold, writerLog }
+  return { value: outcome.value, hold: null, writerLog }
+}
+
+/**
+ * WRITER SPEC PART 2 (2026-09-10, B4) — THE ONE async entry point for the multi-design (per-design)
+ * path. Same off/shadow/on contract as `produceItemHighlights`, applied per design; `perChild`/
+ * `shared` are re-derived via `assemblePerDesignItemHighlights` (B3's sibling — ONE assembly
+ * function) after any accepted writer lines are swapped in, so this returns the SAME shape
+ * `buildItemHighlightsPerDesign` does, plus `writerLog` per design.
+ */
+export async function produceItemHighlightsPerDesign(
+  input: PerDesignItemHighlightsInput,
+  deps?: WriterDeps,
+): Promise<{ perDesign: PerDesignItemHighlight[]; perChild: PerChildItemHighlight[]; shared: SharedItemHighlight; writerLog?: IhWriterLogRow[] }> {
+  const built = buildItemHighlightsPerDesign(input)
+  const mode = ihWriterMode()
+  if (mode === 'off') return built
+  const groupsByKey = new Map(input.groups.map((g) => [g.key, g]))
+  const writerLog: IhWriterLogRow[] = []
+  const nextPerDesign: PerDesignItemHighlight[] = []
+  for (const d of built.perDesign) {
+    if (!d.composed || !d.truthCtx) { nextPerDesign.push(d); continue }
+    const g = groupsByKey.get(d.designKey)
+    const titles = g?.titles ?? []
+    const truthCtx = d.truthCtx
+    const outcome = await runWriterForDesign({
+      composed: d.composed,
+      fallbackHold: d.hold,
+      designName: d.designName,
+      identityPhrases: g?.identityPhrases,
+      truthCtx,
+      runTail: (line) => runIhTail(line, {
+        titles, blankBrand: input.blankBrand, designSeasons: input.designSeasons,
+        capacityFamily: input.capacityFamily, brandName: input.brandName, truthCtx,
+        site: 'produceItemHighlightsPerDesign',
+      }),
+      deps,
+    })
+    const row: IhWriterLogRow = {
+      design: d.designKey, composer: d.value, writer: outcome.accepted ? outcome.value : null,
+      accepted: outcome.accepted, reasons: outcome.reasons, calls: outcome.calls,
+    }
+    console.log(JSON.stringify({ tag: 'IH_WRITER_SHADOW', ...row }))
+    writerLog.push(row)
+    if (mode === 'shadow' || !outcome.accepted) { nextPerDesign.push(d); continue }
+    nextPerDesign.push({ ...d, value: outcome.value, hold: null })
+  }
+  if (mode === 'shadow') return { ...built, writerLog }
+  const designKeys = input.groups.map((g) => g.key)
+  const missingDesigns = built.shared.missingDesigns
+  const { perChild, shared } = assemblePerDesignItemHighlights(nextPerDesign, designKeys, missingDesigns)
+  return { perDesign: nextPerDesign, perChild, shared, writerLog }
 }
 
 /** The Item Highlights field's editorial description — shown to the PO on every detail row for this
@@ -11985,7 +12137,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // broadcast detail row becomes a per-design MARKER with NO line — a broadcast Ship can never
       // push one design's line to every SKU (the push seam resolves per SKU from the array).
       onProgress(`Composing per-design Item Highlights across ${designGroupContexts.length} designs...`)
-      const built = buildItemHighlightsPerDesign({
+      // WRITER SPEC PART 2 (B4): through the ONE async entry point — IH_WRITER=off (default)
+      // delegates straight to the sync builder below, byte-identical.
+      const built = await produceItemHighlightsPerDesign({
         groups: designGroupContexts.map((c) => ({
           key: c.key, designName: c.designName, skus: c.skus,
           titles: [...new Set((perChildTitles ?? []).filter((t) => t.designKey === c.key).map((t) => t.title).concat(c.title ? [c.title] : []))],
@@ -12008,7 +12162,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // real signal, never `ihContentRuleViolations`'s coincidental-default fallback.
         capacityFamily: capacityFamilyTokens.length >= 2,
         brandName: input.brandName,
-      })
+      }, { openai: input.openai })
       perChildItemHighlights = built.perChild
       // SILENT-HOLD CLASS CLOSED (2026-09-04): the marker row ships EVERY TIME the attribute is in
       // the menu — composed>0 or not. Before this, `composed === 0` (every design held, e.g. a family
@@ -12029,7 +12183,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         ...buildPerDesignIhDetailPatch(built, IH_REASON),
       })
     } else {
-      const { value: hl, hold } = buildItemHighlights({
+      // WRITER SPEC PART 2 (B4): through the ONE async entry point — IH_WRITER=off (default)
+      // delegates straight to the sync builder below, byte-identical.
+      const { value: hl, hold } = await produceItemHighlights({
         finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles,
         // TASK 5 FIX ROUND 1 (2026-09-06, Important #2): this branch — the pipeline's OWN
         // single-design Item Highlights producer call — silently omitted the family's own audience
@@ -12051,7 +12207,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // threads — never `ihContentRuleViolations`'s coincidental-default fallback.
         capacityFamily: capacityFamilyTokens.length >= 2,
         brandName: input.brandName,
-      })
+      }, { openai: input.openai })
       // SILENT-HOLD CLASS CLOSED (2026-09-04): same fix as the multi-design branch above — a held
       // single-design family (hl === '') used to push NO row at all. Always push; carry `hold` so the
       // seller sees the field, the reason, and the Features scorer never docks it.

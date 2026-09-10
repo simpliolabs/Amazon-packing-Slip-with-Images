@@ -236,7 +236,10 @@ export function garmentNounConstraint(ctx: PhraseTruthCtx): { allowed: string[];
 // does not mutate the source regex's lastIndex, so these stay safe to share.
 // ADULT_AUDIENCE_RE moved below LEAN_FEM_CORE/LEAN_MASC_CORE (FIX WAVE 2, M-2, 2026-09-06) — its
 // gender half is now DERIVED from that same core rather than hand-copied; see the comment there.
-const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/gi
+// EXPORTED (writer spec Part 2, B2, additive-only — no behavior change): the writer's own glue-word
+// collision guard (itemHighlightWriter.ts) needs the real audience regexes to prove no glue word can
+// ever be added that silently carries a truth claim. Nothing else about this const changes.
+export const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/gi
 
 /** The family's design words, plural-folded so a "Girl Dad" design also owns "girls". */
 const designWordSet = (tokens: readonly string[] | undefined): ReadonlySet<string> => {
@@ -303,7 +306,8 @@ const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b`, 'i')
  *  after is not newly rejected — pinned in contentTruthSpine.test.ts. GLOBAL (`matchAll`, never
  *  `.test()`) for the same reason the pre-existing regex was: the design-token exemption needs
  *  every individual hit, not merely whether one exists. */
-const ADULT_AUDIENCE_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE}|${LEAN_MASC_CORE}|adults?|plus[\\s-]?size)\\b`, 'gi')
+// EXPORTED (writer spec Part 2, B2) — same reason as KIDS_AUDIENCE_RE above.
+export const ADULT_AUDIENCE_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE}|${LEAN_MASC_CORE}|adults?|plus[\\s-]?size)\\b`, 'gi')
 /** GLOBAL twins of the two regexes above, for Item Highlights only (Task 5) — `foreignAudienceHits`
  *  needs every match (`matchAll`), not merely whether one exists, so it can tell a phrase's OWN
  *  gendered hit (the design's own name — exempt) from a foreign one (a market audience claim —
@@ -653,7 +657,8 @@ const FIT_CLAIM_SUFFIX_WORDS = ['relaxed', 'classic', 'slim', 'regular'] as cons
  *  live are unchanged); without it `FIT_WORD_CANON` below has nothing to normalize, since a claim
  *  spelled "oversize" never reached rule (f) at all. */
 const FIT_CLAIM_BARE_WORDS = ['oversized', 'oversize', 'fitted', 'boxy'] as const
-const FIT_CLAIM_RE = new RegExp(
+// EXPORTED (writer spec Part 2, B2) — same reason as KIDS_AUDIENCE_RE above.
+export const FIT_CLAIM_RE = new RegExp(
   `\\b(${FIT_CLAIM_SUFFIX_WORDS.join('|')})\\b(?:(?!,)(?!\\b(?:${[...FIT_CLAIM_SUFFIX_WORDS, ...FIT_CLAIM_BARE_WORDS].join('|')})\\b).)*?\\bfit\\b|\\b(${FIT_CLAIM_BARE_WORDS.join('|')})\\b`, 'gi',
 )
 /** Spelling variants normalize to the canonical class word BEFORE the spec-containment check, so a
@@ -726,7 +731,8 @@ export function sanctionedWearFact(spec: PhraseTruthCtx['spec']): string | null 
  * future work, not this task.
  */
 const FIBER_WORDS = ['cotton', 'polyester', 'poly', 'rayon', 'spandex', 'elastane', 'linen', 'wool', 'viscose', 'modal', 'nylon', 'acrylic', 'lycra'] as const
-const FIBER_RE = new RegExp(`\\b(${FIBER_WORDS.join('|')})\\b`, 'gi')
+// EXPORTED (writer spec Part 2, B2) — same reason as KIDS_AUDIENCE_RE above.
+export const FIBER_RE = new RegExp(`\\b(${FIBER_WORDS.join('|')})\\b`, 'gi')
 /** "polycotton"/"poly-cotton"/"poly cotton" as ONE compound blend claim — `FIBER_RE`'s word
  *  boundaries alone cannot split the no-space spelling into its two fibres. */
 const POLYCOTTON_RE = /\bpoly[\s-]?cotton\b/i
@@ -739,7 +745,8 @@ const FIBER_CANON: Readonly<Record<string, string>> = { poly: 'polyester' }
  *  (RULING R2/B2) moved them to `PERCENT_MARKER_RE` below, which needs no adjacency at all (see its
  *  own doc): only the AMBIGUOUS ordinary-English purity words (pure/all/solid/genuine/real) need
  *  adjacency to avoid "All Season Cotton"/"Real Deal Cotton" false-binding. */
-const PURITY_ADJACENT_RE = new RegExp(
+// EXPORTED (writer spec Part 2, B2) — same reason as KIDS_AUDIENCE_RE above.
+export const PURITY_ADJACENT_RE = new RegExp(
   `\\b(?:pure|all|solid|genuine|real)[\\s-]+(?:${FIBER_WORDS.join('|')})\\b` +
   `|\\b(?:${FIBER_WORDS.join('|')})[\\s-]+pure\\b`,
   'i',

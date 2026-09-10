@@ -43,15 +43,15 @@ describe('regenerate-item-highlight route: audience-lean parity with the pipelin
     expect(ROUTE).toMatch(/if\s*\(scoreErr\)\s*console\.(warn|error)/)
   })
 
-  it('the PER-DESIGN call site (buildItemHighlightsPerDesign, ~:153) passes audienceLean (apparel-gated) AND audienceLeanByDesign', () => {
+  it('the PER-DESIGN call site (produceItemHighlightsPerDesign, ~:153 — WRITER SPEC PART 2 B4: this call site now goes through the async wrapper, not the sync builder directly, see itemHighlightWriterEnumeration.test.ts) passes audienceLean (apparel-gated) AND audienceLeanByDesign', () => {
     expect(ROUTE).toMatch(
-      /buildItemHighlightsPerDesign\(\{[\s\S]{0,700}?audienceLean:\s*apparel\s*\?[\s\S]{0,60}?:\s*null[\s\S]{0,200}?audienceLeanByDesign:/,
+      /produceItemHighlightsPerDesign\(\{[\s\S]{0,700}?audienceLean:\s*apparel\s*\?[\s\S]{0,60}?:\s*null[\s\S]{0,200}?audienceLeanByDesign:/,
     )
   })
 
-  it('the SINGLE-design call site (buildItemHighlights, ~:190) passes audienceLean, apparel-gated AND NORMALIZED (its field is TruthAudienceLean, not the raw DB enum)', () => {
+  it('the SINGLE-design call site (produceItemHighlights, ~:190 — same B4 rename) passes audienceLean, apparel-gated AND NORMALIZED (its field is TruthAudienceLean, not the raw DB enum)', () => {
     expect(ROUTE).toMatch(
-      /buildItemHighlights\(\{\s*finalTitle:\s*title,\s*pool:\s*hlAnalysis,\s*apparelProduct:\s*apparel,\s*blankBrand:\s*blankRow,\s*netTitles:\s*\[title\],[\s\S]{0,1200}?audienceLean:\s*apparel\s*\?\s*normalizeAudienceLean\(storedAudienceLean\)\s*:\s*null/,
+      /produceItemHighlights\(\{\s*finalTitle:\s*title,\s*pool:\s*hlAnalysis,\s*apparelProduct:\s*apparel,\s*blankBrand:\s*blankRow,\s*netTitles:\s*\[title\],[\s\S]{0,1200}?audienceLean:\s*apparel\s*\?\s*normalizeAudienceLean\(storedAudienceLean\)\s*:\s*null/,
     )
   })
 

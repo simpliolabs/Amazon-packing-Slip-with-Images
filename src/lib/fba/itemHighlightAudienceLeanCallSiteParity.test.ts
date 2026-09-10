@@ -34,8 +34,12 @@ const LISTING_PIPELINE = readFileSync(join(process.cwd(), 'src/lib/fba/listingPi
 
 describe('Item Highlights: pipeline single-design branch must pass audienceLean (Task 5 fix round 1, Important #2)', () => {
   it('the MULTI-design branch (the reference) passes audienceLean, apparel-gated — sanity that the pattern exists and this test would catch its removal too', () => {
+    // WRITER SPEC PART 2 (B4, 2026-09-10): this call site now goes through the async
+    // `produceItemHighlightsPerDesign` wrapper (itemHighlightWriter.ts), not the sync builder
+    // directly — see itemHighlightWriterEnumeration.test.ts for the call-site enumeration this
+    // rename is paired with. The audienceLean threading this test pins is unchanged.
     expect(LISTING_PIPELINE).toMatch(
-      /buildItemHighlightsPerDesign\(\{[\s\S]{0,1000}?audienceLean:\s*apparelProduct\s*\?\s*input\.audienceLean\s*:\s*null/,
+      /produceItemHighlightsPerDesign\(\{[\s\S]{0,1000}?audienceLean:\s*apparelProduct\s*\?\s*input\.audienceLean\s*:\s*null/,
     )
   })
 
@@ -49,8 +53,10 @@ describe('Item Highlights: pipeline single-design branch must pass audienceLean 
     // this type seam directly because `buildItemHighlightsPerDesign` normalizes per design
     // internally before its inner call to this same function; this branch calls it directly, so it
     // must normalize inline (a bare `input.audienceLean` here is a TS type error, not a lint nit).
+    // WRITER SPEC PART 2 (B4): `produceItemHighlights`, not `buildItemHighlights` directly — same
+    // rename as the multi-design test above.
     expect(LISTING_PIPELINE).toMatch(
-      /buildItemHighlights\(\{\s*finalTitle,\s*pool:\s*hlPool,\s*apparelProduct,\s*blankBrand:\s*blankBrandNetRow,\s*netTitles:\s*ihNetTitles,[\s\S]{0,1500}?audienceLean:\s*apparelProduct\s*\?\s*normalizeAudienceLean\(input\.audienceLean\)\s*:\s*null/,
+      /produceItemHighlights\(\{\s*finalTitle,\s*pool:\s*hlPool,\s*apparelProduct,\s*blankBrand:\s*blankBrandNetRow,\s*netTitles:\s*ihNetTitles,[\s\S]{0,1500}?audienceLean:\s*apparelProduct\s*\?\s*normalizeAudienceLean\(input\.audienceLean\)\s*:\s*null/,
     )
   })
 })

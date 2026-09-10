@@ -24,7 +24,12 @@ import { selectionMode, resolveRankingTargets } from '@/lib/keyword-engine/selec
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
-import { buildItemHighlights, buildItemHighlightsPerDesign, buildPerDesignIhDetailPatch, deriveCapacityFamily, IH_REASON, IH_HOLD_MESSAGES, type IhHoldReason } from '@/lib/fba/listingPipeline'
+// WRITER SPEC PART 2 (2026-09-10, B4): this route's two producer calls go through the ONE async
+// entry point (produceItemHighlights/produceItemHighlightsPerDesign) — IH_WRITER=off (default)
+// delegates straight to the sync builder, byte-identical. No client is threaded here: when the
+// writer needs one it resolves it itself via `getLlmClientForRequest` (llmGateway.ts, B10) — the
+// same resolution every other production caller uses.
+import { produceItemHighlights, produceItemHighlightsPerDesign, buildPerDesignIhDetailPatch, deriveCapacityFamily, IH_REASON, IH_HOLD_MESSAGES, type IhHoldReason, type buildItemHighlightsPerDesign } from '@/lib/fba/listingPipeline'
 import { normalizeAudienceLean } from '@/lib/fba/contentTruth'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
@@ -229,7 +234,7 @@ export async function POST(req: NextRequest) {
         const gi = await readDesignGroupIdentity(g).catch(() => null)
         return { ...g, identityPhrases: identityPhrases(gi?.identity ?? null) }
       }))
-      const built = buildItemHighlightsPerDesign({
+      const built = await produceItemHighlightsPerDesign({
         groups, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow,
         familyTitleText: title,
         // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family/per-design lean source the
@@ -273,12 +278,16 @@ export async function POST(req: NextRequest) {
         product_details_improvements: persisted.updated,
         shared: { item_highlight: built.shared.value, designs: built.shared.designKeys, foreignDropped: built.shared.foreignDropped },
         composed: composed.length, held: built.perDesign.length - composed.length,
+        // WRITER SPEC PART 2 (B9): the SAME per-design block IH_WRITER_SHADOW logs — the lead reads
+        // real writer lines from this one POST without touching a flag. Absent when IH_WRITER=off.
+        ...(built.writerLog ? { writer: built.writerLog } : {}),
       })
     }
 
     // Path parity (Invariant 1): the SAME inputs the pipeline hands the producer — pool, blank row,
-    // the title the IH will sit beside. Deterministic; no client, no LLM.
-    const built = buildItemHighlights({
+    // the title the IH will sit beside. Deterministic; no client, no LLM (unless IH_WRITER is not
+    // 'off' — see produceItemHighlights).
+    const built = await produceItemHighlights({
       finalTitle: title, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow, netTitles: [title],
       // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family lean the pipeline's own
       // single-design branch now reads (listingPipeline.ts:11901, fixed above in this same round).
@@ -330,7 +339,11 @@ export async function POST(req: NextRequest) {
     }
     if (updErr) return NextResponse.json({ error: `Could not save: ${updErr.message}` }, { status: 500 })
 
-    return NextResponse.json({ item_highlight: hl, product_details_improvements: updated })
+    return NextResponse.json({
+      item_highlight: hl, product_details_improvements: updated,
+      // WRITER SPEC PART 2 (B9): same shadow readout as the multi-design branch above.
+      ...(built.writerLog ? { writer: [built.writerLog] } : {}),
+    })
   } catch (e) {
     console.error('[regenerate-item-highlight]', e)
     return NextResponse.json({ error: 'Internal error', details: String(e) }, { status: 500 })
