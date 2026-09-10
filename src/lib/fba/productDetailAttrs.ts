@@ -892,9 +892,16 @@ export type IhTruthCheckFn = (line: string) => { ok: true } | { ok: false; reaso
 export interface CapItemHighlightRepeatsOpts {
   /** IH terminal net Phase A: real context for the moved content-rule checks (see the block
    *  comment above `IhContentRuleReason` for the safe defaults every caller gets when this is
-   *  omitted). Only a caller that resolves a real brand/capacity/season signal needs to pass this —
-   *  every pre-Phase-A call site did not, and stays byte-identical under the defaults (BLOCKING 3's
-   *  fix keeps `designSeasons` unconditionally skip-by-default, not blanket-refuse-by-default). */
+   *  omitted). CORRECTED (fix round 3, R4/I2 — the prior wording claimed EVERY pre-Phase-A call
+   *  site "stays byte-identical under the defaults", which the reviewer measured false): the moved
+   *  rules now reach FOUR of five seams with real, resolved `capacityFamily`/`brandName` context —
+   *  the compose path, the per-child persist net, and the Regen route all thread the real signal.
+   *  The FIFTH seam, `buildDetailPatchValue` below (the actual SP-API push), runs on the defaults —
+   *  see the comment at its `capItemHighlightRepeats` call for why it provably cannot resolve
+   *  either signal — and that is measured to produce 17 new refusals vs `150778c` (bytes3 probe)
+   *  that the other four seams do not: a genuinely multi-capacity family's stale/hand-edited stored
+   *  line can still ship a hardcoded capacity through THIS seam alone (a known, named gap — R4/I2
+   *  leaves it as a FILED follow-up, not a silent one). */
   contentCtx?: IhContentRuleCtx
   /** R2 (finish-line-rulings.md, controller RULING, 2026-09-08) refuses any ACTUAL length-driven
    *  drop outright — see the `lengthDropped` block below. The ONE named, deliberate exception:
@@ -1127,6 +1134,17 @@ export function buildDetailPatchValue(
     // signal, skip the off-season rule", never as "resolved to no occasion". Every caller that HAS
     // real context (the compose path via `deriveDesignSeasons`, the per-child persist net, the
     // Regen route via `seasonsIn`) passes it instead — this seam correctly omits rather than guesses.
+    // R4/I2 (fix round 3, controller RULING on the opus review of Phase A): the SAME inability
+    // extends to `capacityFamily`/`brandName` — this leaf has no DB, no sibling-children access, and
+    // no brand config, so it provably cannot tell whether THIS SKU belongs to a multi-capacity
+    // variation family or resolve a non-default seller brand either. Both stay on
+    // `CapItemHighlightRepeatsOpts`'s safe defaults (`capacityFamily: false`, `brandName: 'THE CEO'`)
+    // for the SAME reason `designSeasons` above is omitted rather than guessed: a caller that cannot
+    // resolve a signal must never assert one. This is the ONE seam left on the defaults (the compose
+    // path, the per-child persist net, and the Regen route all thread the real signal instead) — a
+    // named, MEASURED gap, not a silent one: a genuinely multi-capacity family's stale/hand-edited
+    // stored line can still ship a hardcoded capacity through here alone (17 new refusals vs
+    // `150778c` overall, bytes3 probe; FILED as a follow-up, not fixed in this round).
     const netResult = capItemHighlightRepeats(trimmed)
     // BLOCKING 1 (controller RULING, fix round 1): a refusal must NEVER become `[{value:''}]`.
     if (!netResult.ok) return []

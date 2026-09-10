@@ -5,9 +5,13 @@
  * (finish-final-review.md) that reverted the original attempt.
  */
 import { describe, it, expect } from 'vitest'
-import { phraseTruthVerdict, ihLineTruthVerdict, type PhraseTruthCtx } from './contentTruth'
+import { phraseTruthVerdict, ihLineTruthVerdict, buildPhraseTruthCtx, applyTitleTruthNet, sanctionedWearFact, type PhraseTruthCtx } from './contentTruth'
+import { verdictForAssembledTitle } from './titleBand'
 import { buildDetailPatchValue, capItemHighlightRepeats, ihContentRuleViolations } from './productDetailAttrs'
+import { buildItemHighlights } from './listingPipeline'
+import { DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { CONTENT_CONTRACT } from './contentContract'
+import type { AnalyzedKeyword } from '@/lib/keyword-engine'
 
 const blendCtx: PhraseTruthCtx = {
   garmentFamily: 'tee',
@@ -196,7 +200,16 @@ describe('I-3/R4 -- the design-token exemption no longer covers INFLECTED forms 
     field: 'highlights',
   }
 
-  it('"Girls Graphic Tee" and "Graphic Tee for Girls" on an adult family whose designTokens include "girl" -- now REFUSED, not ok:true', () => {
+  // FIX ROUND 3 (R1/B1, controller RULING, phase-a3-and-b-rulings.md): this whole R4 exemption
+  // change is REVERTED -- it moved TITLE-path bytes (a "Girl Dad" design's own title stripped from
+  // 50c to 22c, oracles disagreeing) that the spec names a non-goal, and 26 of 34 writer-plausible
+  // lies still escaped the lexicon-chasing approach regardless. The three tests below asserted the
+  // now-reverted strict behavior; they become `it.fails` rather than deleted, so the hole they
+  // pinned stays VISIBLE. FILED (phase-a3-and-b-rulings.md, "FILED" section, not in this branch):
+  // the real fix is syntactic -- telling an audience CLAIM ("Tee for Girls") apart from a RELATION
+  // ("Proud Father of Girls") -- touches the title path, and needs a title acceptance with a length
+  // floor. A future real fix flips these back to `it`.
+  it.fails('"Girls Graphic Tee" and "Graphic Tee for Girls" on an adult family whose designTokens include "girl" -- now REFUSED, not ok:true', () => {
     expect(phraseTruthVerdict('Girls Graphic Tee', adultTeeGirlDad)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
     expect(phraseTruthVerdict('Graphic Tee for Girls', adultTeeGirlDad)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
   })
@@ -211,12 +224,12 @@ describe('I-3/R4 -- the design-token exemption no longer covers INFLECTED forms 
     expect(phraseTruthVerdict('girls dad shirt', girlDadOneToken)).toEqual({ ok: true })
   })
 
-  it('the SAME two words as SEPARATE single-word tokens (no shared multi-word phrase) get the STRICTEST reading -- exact match only, no inflection at all, since single-word tokens never fold (RULING: "a design token exempts the token it IS, not its derived forms")', () => {
+  it.fails('the SAME two words as SEPARATE single-word tokens (no shared multi-word phrase) get the STRICTEST reading -- exact match only, no inflection at all, since single-word tokens never fold (RULING: "a design token exempts the token it IS, not its derived forms") -- REVERTED, see R1/B1 above', () => {
     expect(phraseTruthVerdict('girls dad shirt', adultTeeGirlDad)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
     expect(phraseTruthVerdict('girl dad shirt', adultTeeGirlDad)).toEqual({ ok: true }) // exact match, no inflection needed
   })
 
-  it('a SINGLE-WORD design token exempts ONLY its exact spelling -- "girl" alone (no sibling "dad" token) never exempts "girls"', () => {
+  it.fails('a SINGLE-WORD design token exempts ONLY its exact spelling -- "girl" alone (no sibling "dad" token) never exempts "girls" -- REVERTED, see R1/B1 above', () => {
     expect(phraseTruthVerdict('Girls Graphic Tee', { ...adultTeeGirlDad, designTokens: ['girl'] })).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
     expect(phraseTruthVerdict('Girl Graphic Tee', { ...adultTeeGirlDad, designTokens: ['girl'] })).toEqual({ ok: true })
   })
@@ -263,5 +276,135 @@ describe('I-2/F2, I-2/F3 -- capacityFamily/brandName threaded to the compose, pe
     const line = 'Graphic Crewneck Sweatshirt, Cozy Everyday Pullover Top, 128GB Storage Room, Soft Brushed Fleece Lining'
     expect(ihContentRuleViolations(line, { capacityFamily: true })[0]?.reason).toBe('hardcoded-capacity')
     expect(capItemHighlightRepeats(line, { contentCtx: { capacityFamily: true } })).toEqual({ ok: false, reason: 'hardcoded-capacity' })
+  })
+})
+
+/**
+ * FIX ROUND 3 (2026-09-10, controller RULING on review A2 -- phase-a3-and-b-rulings.md, Part 1).
+ * R1 reverts the R4 net; R2 closes the spelled-out-percent asymmetry; R3 gives the wear-style fact
+ * ONE truth owner; R4/R5 are comment-only (pinned above the net, not here). Reproductions: the
+ * reviewer's title2.mts / adversary.mts / compose.mts probes, reused verbatim per the rulings.
+ */
+describe('R1/B1 -- the title path is a non-goal: the four oracles AGREE on the design\'s OWN title (reviewer\'s exact repro, production token shape)', () => {
+  it('"THE CEO Girl Dad Shirt | Proud Father of Girls Tee" with designTokens: [\'Girl Dad\'] -- phraseTruthVerdict (whole + each segment), applyTitleTruthNet (unchanged) and verdictForAssembledTitle all agree it is TRUE', () => {
+    const title = 'THE CEO Girl Dad Shirt | Proud Father of Girls Tee'
+    const ctx = buildPhraseTruthCtx(
+      { garmentFamily: 'tee', spec: { material: '100% Ring-Spun Cotton', fit: 'Classic' }, allowedBrand: null, designTokens: ['Girl Dad'], audienceLean: null },
+      'title',
+    )!
+    expect(phraseTruthVerdict(title, ctx)).toEqual({ ok: true })
+    for (const seg of title.split(/\s*\|\s*/)) expect(phraseTruthVerdict(seg, ctx), seg).toEqual({ ok: true })
+    const netted = applyTitleTruthNet(title, ctx, 'Girl Dad')
+    expect(netted).toBe(title) // UNCHANGED -- 50c, never stripped to 22c
+    expect(verdictForAssembledTitle(title, { truth: ctx, protect: 'Girl Dad' })).toEqual({ ok: true })
+  })
+
+  it('title / bullets / backend bytes are BYTE-IDENTICAL to the pre-R4 baseline (480815b) -- 0 changes, per the reviewer\'s title.mts differential (135 cases, families x fields x titles)', () => {
+    // The differential itself lives outside the repo (title.mts, run against a detached
+    // 480815b worktree) -- this in-repo pin proves the SAME shape survives byte-for-byte: a
+    // synonym for the design's own word ("Father" for "Dad") does not strip the segment.
+    const ctx = buildPhraseTruthCtx(
+      { garmentFamily: 'tee', spec: { material: '100% Ring-Spun Cotton', fit: 'Classic' }, allowedBrand: null, designTokens: ['Girl Dad'], audienceLean: null },
+      'title',
+    )!
+    const seg = 'Funny Dad of Girls Gift Tee' // "Dad" literal -- survived even under R4; proves this case was never the escape
+    expect(phraseTruthVerdict(seg, ctx)).toEqual({ ok: true })
+  })
+})
+
+describe('R2/B2 -- "%" and the word "percent" are ONE concept: a spelled-out percentage binds exactly like "%"', () => {
+  const blendSweatshirt: PhraseTruthCtx = {
+    garmentFamily: 'sweatshirt',
+    spec: { material: '52% Cotton / 48% Polyester', fit: 'Classic' },
+    allowedBrand: null,
+    audience: null,
+    field: 'highlights',
+  }
+  const M5_CONTROL = 'Cozy Crewneck Sweatshirt, 100% Combed Cotton, Soft Brushed Fleece Lining, Classic Fit'
+
+  // RED FIRST: the reviewer's adversary.mts probe, run against this exact HEAD before R2 landed,
+  // measured M2/M3/M4 as ESCAPE (`{ok:true}`, net SHIPS) while M5 was already `caught`
+  // (`material-lie`) -- see phase-a-report.md's "Fix round 3" section for the transcript. The
+  // it()s below are what R2 makes true; re-running that same probe now shows all three `caught`.
+  it('M2 ("One Hundred Percent", split across clauses), M3 ("100 Percent", split) and M4 ("100 Percent", one clause with a word between marker and fibre) now behave EXACTLY like M5 (the "%" control)', () => {
+    const m5 = ihLineTruthVerdict(M5_CONTROL, blendSweatshirt)
+    expect(m5).toEqual({ ok: false, reason: 'material-lie' })
+    const m2 = 'Cozy Crewneck Sweatshirt, Made With One Hundred Percent, Combed Cotton Feel, Classic Fit'
+    const m3 = 'Cozy Crewneck Sweatshirt, Made From 100 Percent, Soft Combed Cotton, Classic Fit'
+    const m4 = 'Cozy Crewneck Sweatshirt, 100 Percent Combed Cotton, Soft Brushed Fleece Lining, Classic Fit'
+    expect(ihLineTruthVerdict(m2, blendSweatshirt)).toEqual(m5)
+    expect(ihLineTruthVerdict(m3, blendSweatshirt)).toEqual(m5)
+    expect(ihLineTruthVerdict(m4, blendSweatshirt)).toEqual(m5)
+  })
+
+  it('"..., 100 Percent Machine Washable, ..." on a blend is the SAME deliberate fail-closed shape as O1 (R5) -- line scope cannot know what a "%"/"percent" marker modifies', () => {
+    const line = 'Cozy Crewneck Sweatshirt, Soft Cotton Feel, 100 Percent Machine Washable, Classic Fit'
+    expect(ihLineTruthVerdict(line, blendSweatshirt)).toEqual({ ok: false, reason: 'material-lie' })
+    // The unmarked "%" twin (O1 itself) fails the identical way -- the two spellings AGREE.
+    const o1 = 'Cozy Crewneck Sweatshirt, Soft Cotton Feel, 100% Machine Washable, Classic Fit'
+    expect(ihLineTruthVerdict(o1, blendSweatshirt)).toEqual({ ok: false, reason: 'material-lie' })
+  })
+
+  it('isCompositionClaim is reached ONLY through rule (g) and lineCompositionVerdict, both gated on field === \'highlights\' (verified by grep, asserted here as a source pin)', () => {
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/fba/contentTruth.ts'), 'utf8') as string
+    const callSites = [...src.matchAll(/\bisCompositionClaim\(/g)].length
+    // Exactly 2 call sites: the definition line itself is `const isCompositionClaim = (...)`, which
+    // does not match a CALL (`isCompositionClaim(`) -- so every match here IS an invocation.
+    expect(callSites).toBe(2)
+  })
+})
+
+describe('R3/B3 -- ONE source for the wear-style fact: the composer\'s "Can be worn as Oversized" survives the terminal net', () => {
+  const CC_SPEC = { brand: 'Comfort Colors', material: '100% Ring-Spun Cotton', fit: 'Relaxed' }
+  const ccCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: CC_SPEC, allowedBrand: 'Comfort Colors', audience: 'adult', field: 'highlights' }
+
+  it('sanctionedWearFact returns the exact PO-sanctioned phrase for a Comfort Colors blank, and null for any other brand', () => {
+    expect(sanctionedWearFact(CC_SPEC)).toBe('Can be worn as Oversized')
+    expect(sanctionedWearFact({ brand: 'Gildan', material: 'Ring-Spun Cotton', fit: 'Classic' })).toBeNull()
+    expect(sanctionedWearFact(null)).toBeNull()
+    expect(sanctionedWearFact(undefined)).toBeNull()
+  })
+
+  it('the WHOLE-clause exemption: "Can be worn as Oversized" passes on a Comfort Colors/Relaxed blank', () => {
+    expect(phraseTruthVerdict('Can be worn as Oversized', ccCtx)).toEqual({ ok: true })
+  })
+
+  it('a SUBSTRING never qualifies: "Oversized Fit" and "Oversized Tee" still assert an ordinary (false, on Relaxed) fit claim', () => {
+    expect(phraseTruthVerdict('Oversized Fit', ccCtx)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+    expect(phraseTruthVerdict('Oversized Tee', ccCtx)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+
+  it('the identical clause on a NON-Comfort-Colors blank is still a lie -- the exemption is per-spec, not a blanket string allowance', () => {
+    const gildanCtx: PhraseTruthCtx = { ...ccCtx, spec: { brand: 'Gildan', material: 'Ring-Spun Cotton', fit: 'Classic' }, allowedBrand: 'Gildan' }
+    expect(phraseTruthVerdict('Can be worn as Oversized', gildanCtx)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+
+  it('a Comfort Colors family with live oversized pool demand composes a SHIPPABLE line (the reviewer\'s exact compose-level regression, closed): the 14 CC ship-to-HOLD flips vs 150778c are gone', () => {
+    const CC = DEFAULT_BLANK_SPECS[0] // { spec: { brand: 'Comfort Colors', fit: 'Relaxed', ... }, garmentFamily: 'tee' }
+    expect(CC.spec.brand).toBe('Comfort Colors')
+    const kw = (keyword: string, searchVolume: number): AnalyzedKeyword =>
+      ({ keyword, searchVolume, themeFit: 3 } as unknown as AnalyzedKeyword)
+    const pool = [
+      kw('pure cotton graphic shirts men', 7500),
+      kw('100% combed ringspun cotton tees', 7000),
+      kw('polycotton crewneck sweatshirt', 6000),
+      kw('cozy everyday pullover top', 5500),
+      kw('soft brushed fleece lining', 5000),
+      kw('oversized sweatshirt', 4800),
+      kw('long sleeve pullover', 4000),
+      kw('warm layer top', 3000),
+    ]
+    const result = buildItemHighlights({
+      finalTitle: 'THE CEO Graphic Crewneck Sweatshirt for Men',
+      pool,
+      apparelProduct: true,
+      blankBrand: CC,
+      netTitles: ['THE CEO Graphic Crewneck Sweatshirt for Men'],
+    })
+    expect(result.hold).toBeNull()
+    expect(result.value).toContain('Can be worn as Oversized')
+    expect(result.value.length).toBeGreaterThanOrEqual(CONTENT_CONTRACT.itemHighlights.min)
   })
 })

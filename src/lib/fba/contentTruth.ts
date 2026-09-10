@@ -64,8 +64,11 @@ export interface PhraseTruthCtx {
    *  backs the weight-class rule. fit/sleeve/neck/material/unisex are NOT read by the predicate
    *  below — they are widened here (2026-08-22) purely so a PROMPT built from this ctx (the council
    *  brief's garment-truth line) can state the product's real facts without a second resolver call;
-   *  every caller already assigns the FULL resolved BlankSpec here, so this costs nothing. */
-  spec: Pick<BlankSpec, 'weightNote' | 'fit' | 'sleeve' | 'neck' | 'material' | 'unisex'> | null | undefined
+   *  every caller already assigns the FULL resolved BlankSpec here, so this costs nothing.
+   *  `brand` widened in (fix round 3, R3/B3) so rule (f) below can ask `sanctionedWearFact` whether
+   *  this family's blank is Comfort Colors — every caller still assigns the FULL resolved BlankSpec,
+   *  so this too costs nothing. */
+  spec: Pick<BlankSpec, 'weightNote' | 'fit' | 'sleeve' | 'neck' | 'material' | 'unisex' | 'brand'> | null | undefined
   allowedBrand: string | null | undefined
   audience: 'kids' | 'adult' | null
   /** EVERY garment family present in a MIXED variation family (B0DSCDZC6K ships Gildan 18000
@@ -235,48 +238,18 @@ export function garmentNounConstraint(ctx: PhraseTruthCtx): { allowed: string[];
 // gender half is now DERIVED from that same core rather than hand-copied; see the comment there.
 const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/gi
 
-/** Lowercased word tokens of a string (design-token phrase, hit, or wide context). */
-const wordsOf = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) ?? []
-
-/**
- * Is this audience HIT (one match of the audience regex, e.g. "girls") the design's own word?
- *
- * FIX ROUND 2 (RULING I-3/R4, reviewer's exact repro): an ADULT tee whose design is named "Girl
- * Dad" ('girl'/'dad' among `tokens`) must keep "Girl Dad Tee for Girls" (the hit "Girls" is this
- * design's own identity, just inflected+separated across the same phrase) but must NOT exempt
- * "Girls Graphic Tee" on the SAME family — "Girls" there is a bare, unrelated audience claim; "dad"
- * (or any other word of the SAME multi-word design token) appears nowhere near it. The OLD version
- * folded singular<->plural on the HIT alone (`design.has(w) || design.has(w.replace(/s$/, ''))`)
- * with NO adjacency/co-occurrence check at all, so a lone singular design word ("girl") exempted
- * ANY plural audience hit ("girls") anywhere in ANY text — exactly the escape a free-prose WRITER
- * can trigger (this net must judge the OUTPUT, not just the picker's whole-token candidates).
- *
- * THE FIX: an EXACT word match against a design token's own words is ALWAYS exempt (a single-word
- * token like "girl" exempts only "girl" — never its plural, per the ruling: "a design token
- * exempts the token it IS, not its derived forms"). An INFLECTED match (hit strips to a token
- * word) is exempt ONLY when the token is multi-word AND at least one of the token's OTHER words is
- * ALSO literally present in `wideText` — i.e. the phrase is actually invoking that design's full
- * identity ("Girl Dad" via "dad" showing up too), not just borrowing one inflected word from it.
- * `wideText` defaults to `hit`'s own source when the caller has no wider context (rule (c)/(c2)
- * below, which judge the WHOLE candidate); the title-strip mechanism (rule (b2) above this file's
- * `applyTitleTruthNet`) passes the enclosing SEGMENT explicitly, since it strips a narrower CLAUSE
- * than the full segment the design's other words may sit in.
- */
-const isDesignOwnWord = (hit: string, tokens: readonly string[] | undefined, wideText: string): boolean => {
-  const hitWords = wordsOf(hit)
-  if (hitWords.length === 0) return false
-  const wideWords = new Set(wordsOf(wideText))
-  return hitWords.every((hw) => (tokens ?? []).some((t) => {
-    const tw = wordsOf(t)
-    if (tw.length === 0) return false
-    if (tw.includes(hw)) return true // exact word — always exempt, no fold needed
-    if (tw.length < 2) return false // single-word token: EXACT match only, never inflected
-    const stripped = hw.replace(/s$/, '')
-    if (!tw.includes(stripped)) return false
-    // Inflected form of one of this token's words — exempt only if the identity is ACTUALLY
-    // invoked: at least one of the token's OTHER words also appears, literally, in the wide text.
-    return tw.some((w) => w !== stripped && wideWords.has(w))
-  }))
+/** The family's design words, plural-folded so a "Girl Dad" design also owns "girls". */
+const designWordSet = (tokens: readonly string[] | undefined): ReadonlySet<string> => {
+  const s = new Set<string>()
+  for (const t of tokens ?? []) {
+    for (const w of t.toLowerCase().match(/[a-z0-9]+/g) ?? []) { s.add(w); s.add(w.replace(/s$/, '')) }
+  }
+  return s
+}
+/** Is every word of this audience hit part of the family's OWN design name? */
+const isDesignOwnWord = (hit: string, design: ReadonlySet<string>): boolean => {
+  const parts = hit.toLowerCase().match(/[a-z0-9]+/g) ?? []
+  return parts.length > 0 && parts.every((w) => design.has(w) || design.has(w.replace(/s$/, '')))
 }
 /**
  * The audience words a phrase asserts that the DESIGN'S OWN NAME does not explain.
@@ -285,13 +258,9 @@ const isDesignOwnWord = (hit: string, tokens: readonly string[] | undefined, wid
  * asserts no audience — 'baby' is the design. "toddler tee" on the same family does, and still
  * dies. "baby shark shirts for kids" does too: ONE foreign hit ('kids') is enough. An empty design
  * set makes every hit foreign, which is the historical behavior exactly.
- *
- * `wideText` (default: `hitSource` itself) is what `isDesignOwnWord` checks a multi-word token's
- * OTHER words against — see that function's doc. Callers that strip a NARROWER clause than the
- * text they're judging (the title's rule (b2) below) must pass their enclosing text explicitly.
  */
-const foreignAudienceHits = (hitSource: string, re: RegExp, tokens: readonly string[] | undefined, wideText: string = hitSource): string[] =>
-  [...hitSource.matchAll(re)].map((m) => m[0]).filter((h) => !isDesignOwnWord(h, tokens, wideText))
+const foreignAudienceHits = (phrase: string, re: RegExp, design: ReadonlySet<string>): string[] =>
+  [...phrase.matchAll(re)].map((m) => m[0]).filter((h) => !isDesignOwnWord(h, design))
 
 /** The two halves of the FORCED-GENDER rule, as pattern STRINGS (not compiled RegExp) — the
  *  canonical, exported core. Adult gender words only — kids words are the kids/adult audience
@@ -697,6 +666,28 @@ const FIT_CLAIM_RE = new RegExp(
 const FIT_WORD_CANON: Readonly<Record<string, string>> = { oversize: 'oversized', crop: 'cropped', taper: 'tapered' }
 
 /**
+ * RULING (fix round 3, R3/B3) — ONE source for WHETHER the composer's PO-sanctioned wear-style fact
+ * is true. The composer (`itemHighlightComposer.ts`) has appended the literal line "Can be worn as
+ * Oversized" since the PO ruling of 2026-08-21 ("A: comfort colors") — Comfort Colors/Relaxed-fit
+ * blanks ONLY, never Gildan 64000/64400 (Classic) or any other blank, gated on live oversized pool
+ * demand. Phase A's terminal `ihLineTruthVerdict` (wired into `buildItemHighlights` at compose time)
+ * then asked rule (f)'s ordinary fit-claim predicate about the JOINED line without ever telling it
+ * this clause was the sanctioned fact, not a pool phrase — "oversized" ≠ spec.fit "Relaxed" by plain
+ * containment, so every Comfort Colors family with oversized demand flipped from ship to HOLD (the
+ * compose differential vs `150778c`: 14 of 126 cases, every one this exact flip). Not a rule (f)
+ * bug — rule (f) doing exactly its job on a clause it was never told is exempt.
+ *
+ * WHETHER the fact is true lives here, ONE owner, reused by both sides: the composer (which decides
+ * WHEN to reach for it — pool demand, budget) and rule (f) (which must recognize it when judging the
+ * composer's own joined-line output). Returns the exact sanctioned string when this family's spec
+ * says Comfort Colors, else `null` — the composer's `isComfortColors`/`OVERSIZED_FACT` predicate,
+ * moved, not duplicated.
+ */
+export function sanctionedWearFact(spec: PhraseTruthCtx['spec']): string | null {
+  return /^comfort\s*colors?$/i.test((spec?.brand ?? '').trim()) ? 'Can be worn as Oversized' : null
+}
+
+/**
  * FIBRE-COMPOSITION CLAIM VOCABULARY (Phase A, redoing the reverted `feat/ih-phase23-wip` @
  * `c466225` Phase 3 with BLOCKING 1 closed — finish-final-review.md). Live B0DMXMH266's shopper-
  * visible Item Highlight begins "Polycotton…" while the blank (Gildan 64000) states
@@ -743,12 +734,31 @@ const POLYCOTTON_RE = /\bpoly[\s-]?cotton\b/i
  *  distinct fibre from "polyester". */
 const FIBER_CANON: Readonly<Record<string, string>> = { poly: 'polyester' }
 /** BLOCKING 1's fix: a purity word directly beside (whitespace/hyphen, either order) a fibre word —
- *  see the block comment above for exactly which spellings this catches and which it does not. */
+ *  see the block comment above for exactly which spellings this catches and which it does not.
+ *  Percent spellings ("100%", "100 percent", "one hundred percent") are NOT here — fix round 3
+ *  (RULING R2/B2) moved them to `PERCENT_MARKER_RE` below, which needs no adjacency at all (see its
+ *  own doc): only the AMBIGUOUS ordinary-English purity words (pure/all/solid/genuine/real) need
+ *  adjacency to avoid "All Season Cotton"/"Real Deal Cotton" false-binding. */
 const PURITY_ADJACENT_RE = new RegExp(
-  `\\b(?:100\\s*%|100[\\s-]?percent|one\\s+hundred\\s+percent|pure|all|solid|genuine|real)[\\s-]+(?:${FIBER_WORDS.join('|')})\\b` +
-  `|\\b(?:${FIBER_WORDS.join('|')})[\\s-]+(?:pure|100\\s*%|100[\\s-]?percent)\\b`,
+  `\\b(?:pure|all|solid|genuine|real)[\\s-]+(?:${FIBER_WORDS.join('|')})\\b` +
+  `|\\b(?:${FIBER_WORDS.join('|')})[\\s-]+pure\\b`,
   'i',
 )
+/**
+ * RULING (fix round 3, R2/B2) — "%" and the word "percent" are ONE concept, not two: the fix round
+ * that closed BLOCKING 1 exempted only the literal "%" character from `PURITY_ADJACENT_RE`'s
+ * adjacency requirement (`isCompositionClaim` below tested `/%/` directly, unconditioned), but left
+ * "100 percent" and "one hundred percent" living inside `PURITY_ADJACENT_RE`, still needing
+ * adjacency to a fibre word. The reviewer proved the exact "same false fact, different spelling"
+ * asymmetry this was supposed to close: "Made With 100%, Combed Cotton Feel" (cross-clause) is
+ * caught, but "Made With One Hundred Percent, Combed Cotton Feel" and "Made From 100 Percent, Soft
+ * Combed Cotton" (cross-clause) and "100 Percent Combed Cotton" (one clause, a word between the
+ * marker and the fibre) all escaped. A "%"/"percent" marker is UNAMBIGUOUS — unlike "pure"/"all"/
+ * "real", English never uses either as an ordinary adjective for something else — so it needs no
+ * adjacency check at all, exactly like the "%" character already had none. Matched anywhere in the
+ * clause/line, same as `isCompositionClaim`'s existing `/%/` test.
+ */
+const PERCENT_MARKER_RE = /%|\bpercent\b/i
 
 /** Every distinct fibre CLASS named in `text` (fold applied), whether or not it reads as a CLAIM —
  *  used for BOTH the candidate phrase and the blank's own `spec.material` string, so the two sides
@@ -774,7 +784,7 @@ const clauseAssertsBlend = (clause: string, fibers: ReadonlySet<string>): boolea
  *  claim — ordinary vocabulary must keep passing. */
 const isCompositionClaim = (clause: string, fibers: ReadonlySet<string>): boolean =>
   fibers.size >= 2 || POLYCOTTON_RE.test(clause) || /\bblend\b/i.test(clause) ||
-  (fibers.size > 0 && /%/.test(clause)) || (fibers.size > 0 && PURITY_ADJACENT_RE.test(clause))
+  (fibers.size > 0 && PERCENT_MARKER_RE.test(clause)) || (fibers.size > 0 && PURITY_ADJACENT_RE.test(clause))
 
 /* ─── THE PREDICATE ───────────────────────────────────────────────────────────────────────────── */
 
@@ -805,8 +815,9 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
   // design-token exemption keeps a "Baby Shark" adult family's own vocabulary in its bullets and
   // backend. It can NEVER license a garment lie — rule (a) runs first and never reads designTokens.
   if (ctx.audience === 'kids' || ctx.audience === 'adult') {
+    const designWords = designWordSet(ctx.designTokens)
     const re = ctx.audience === 'kids' ? ADULT_AUDIENCE_RE : KIDS_AUDIENCE_RE
-    if (foreignAudienceHits(phrase, re, ctx.designTokens).length > 0) {
+    if (foreignAudienceHits(phrase, re, designWords).length > 0) {
       return { ok: false, reason: ctx.audience === 'kids' ? 'audience-adult-on-kids' : 'audience-kids-on-adult' }
     }
   }
@@ -829,8 +840,9 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
       // exemption there): its own `designTokens` is the FAMILY-WIDE union (every sibling's name, per
       // `buildGroupTruthCtx` in listingPipeline.ts), and widening THIS rule to read it would risk an
       // untested behavior change on a path this task must not touch.
-      const fem = foreignAudienceHits(phrase, LEAN_FEM_RE_G, ctx.designTokens).length > 0
-      const masc = foreignAudienceHits(phrase, LEAN_MASC_RE_G, ctx.designTokens).length > 0
+      const designWords = designWordSet(ctx.designTokens)
+      const fem = foreignAudienceHits(phrase, LEAN_FEM_RE_G, designWords).length > 0
+      const masc = foreignAudienceHits(phrase, LEAN_MASC_RE_G, designWords).length > 0
       if (fem !== masc) return { ok: false, reason: 'audience-lean-lie' }
     } else {
       const fem = LEAN_FEM_RE.test(phrase)
@@ -870,14 +882,23 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
   // programme, not this task. `highlights` is the ONE field that had NO fit oracle at all before
   // Task 4 — this rule exists for it.
   if (ctx.field === 'highlights') {
-    const fit = ctx.spec?.fit?.toLowerCase()
-    for (const fm of phrase.matchAll(FIT_CLAIM_RE)) {
-      const claim = (fm[1] ?? fm[2] ?? '').toLowerCase()
-      // T4-b: normalize a spelling variant (e.g. "oversize") to the canonical class word before the
-      // containment check — mirrors titleBand.ts's `fitOk`, so a blank spelled "Oversized" still
-      // backs a claim spelled "oversize".
-      const canonClaim = FIT_WORD_CANON[claim] ?? claim
-      if (!fit || !fit.includes(canonClaim)) return { ok: false, reason: 'fit-claim-lie' }
+    // FIX ROUND 3 (R3/B3): the composer's PO-sanctioned wear-style fact (`sanctionedWearFact`) is a
+    // WHOLE-CLAUSE exemption, never a substring one — "Oversized Fit" and "Oversized Tee" still
+    // assert an ordinary (false, on a Relaxed blank) fit claim and must still fail below. Trimmed,
+    // case-insensitive: the composer joins clauses with ", " so this clause arrives with no leading/
+    // trailing whitespace in practice, but a defensive trim costs nothing.
+    const wearFact = sanctionedWearFact(ctx.spec)
+    const isSanctionedWearFact = !!wearFact && phrase.trim().toLowerCase() === wearFact.toLowerCase()
+    if (!isSanctionedWearFact) {
+      const fit = ctx.spec?.fit?.toLowerCase()
+      for (const fm of phrase.matchAll(FIT_CLAIM_RE)) {
+        const claim = (fm[1] ?? fm[2] ?? '').toLowerCase()
+        // T4-b: normalize a spelling variant (e.g. "oversize") to the canonical class word before the
+        // containment check — mirrors titleBand.ts's `fitOk`, so a blank spelled "Oversized" still
+        // backs a claim spelled "oversize".
+        const canonClaim = FIT_WORD_CANON[claim] ?? claim
+        if (!fit || !fit.includes(canonClaim)) return { ok: false, reason: 'fit-claim-lie' }
+      }
     }
   }
   // (g) material/fibre-composition truth (see the block comment above `FIBER_WORDS` for the live
@@ -1071,13 +1092,11 @@ function scrubMoneyPhrase(
   if (ctx.audience === 'kids' || ctx.audience === 'adult') {
     const reason: PhraseTruthReason = ctx.audience === 'kids' ? 'audience-adult-on-kids' : 'audience-kids-on-adult'
     if (titleNetActsOn(reason, ctx)) {
+      const designWords = designWordSet(ctx.designTokens)
       const re = ctx.audience === 'kids' ? ADULT_AUDIENCE_RE : KIDS_AUDIENCE_RE
       const clauseRe = new RegExp(`(?:\\bfor\\s+)?${re.source}(?:\\s*(?:,|&|\\band\\b)\\s*${re.source})*`, 'gi')
       s = s.replace(clauseRe, (m) => {
-        // `s` (the enclosing SEGMENT, not the narrower matched clause `m`) is the wide-text
-        // context — a design's OTHER word ("dad") may sit outside `m` ("for Girls") but still
-        // inside the same segment ("Girl Dad Tee for Girls"). See `isDesignOwnWord`'s doc.
-        if (foreignAudienceHits(m, re, ctx.designTokens, s).length === 0) return m
+        if (foreignAudienceHits(m, re, designWords).length === 0) return m
         return isProtected(m) ? m : ''
       })
     }
@@ -1475,6 +1494,18 @@ export function applyTitleTruthNet(
  * cross a clause boundary). Redundant with rule (g) on a SAME-clause claim (harmless: identical
  * `material-lie` reason either way) — this function exists ONLY for the cross-clause case rule (g)
  * cannot see. ITEM HIGHLIGHTS ONLY, same field gate as rule (g).
+ *
+ * KNOWN, DELIBERATE OVER-CATCH (fix round 3, R5/M1 — reviewer's O1): a TRUE line like `Cozy
+ * Crewneck Sweatshirt, Soft Cotton Feel, 100% Machine Washable, Classic Fit` on a 52/48 blend is
+ * refused here, even though the "100%" plainly modifies "Machine Washable", not the fibre. LINE
+ * SCOPE cannot know what a "%"/"percent" marker modifies — that is exactly the ambiguity this
+ * function trades away to close the cross-clause recombination escape (a purity/percentage marker
+ * ANYWHERE in the line now binds to a fibre word ANYWHERE in the line, ruling I-3's own naming for
+ * the class). FAILS CLOSED, same doctrine as every other rule in this file: an over-caught TRUE
+ * line HOLDs (loses a real fact) while an escaped LIE would ship a false one — the asymmetry this
+ * codebase always resolves the same way. `O2`/`O3` (the identical line on a pure-cotton blank, and
+ * a genuinely true blend claim) still pass, so this is scoped to the one shape line-scope truly
+ * cannot disambiguate, not a broad regression.
  */
 function lineCompositionVerdict(line: string, ctx: PhraseTruthCtx): PhraseTruthVerdict {
   if (ctx.field !== 'highlights') return { ok: true }

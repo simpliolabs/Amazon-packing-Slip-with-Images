@@ -39,6 +39,7 @@ import { type BlankSpec } from './blankSpecs'
 import {
   phraseTruthVerdict,
   audienceOfGarmentFamily,
+  sanctionedWearFact,
   GARMENT_SURFACE_RE,
   type PhraseTruthCtx,
   type PhraseTruthReason,
@@ -354,9 +355,12 @@ export function composeItemHighlightDetailed(
   // PO RULING 2026-08-21 ("A: comfort colors"): the fact is a COMFORT COLORS (Relaxed-fit) fact
   // ONLY — never Gildan 64000/64400 (Classic) or any other blank; unisex alone no longer qualifies.
   // A mixed-blank intersection drops `brand`, so a CC+Gildan family is correctly ineligible.
-  const OVERSIZED_FACT = 'Can be worn as Oversized'
-  const isComfortColors = /^comfort\s*colors?$/i.test((opts?.spec?.brand ?? '').trim())
-  const factEligible = isComfortColors && pool.some((r) => /\bover[\s-]?sized?\b/i.test(r.keyword))
+  // FIX ROUND 3 (R3/B3): WHETHER the fact is true now has ONE owner, `sanctionedWearFact` in
+  // `contentTruth.ts` — the exact predicate that used to live here (`isComfortColors`), moved so
+  // rule (f)'s terminal truth net can recognize this same clause when it re-judges the joined line
+  // (see that function's doc). WHEN to reach for it (pool demand, budget) stays HERE.
+  const OVERSIZED_FACT = sanctionedWearFact(opts?.spec)
+  const factEligible = !!OVERSIZED_FACT && pool.some((r) => /\bover[\s-]?sized?\b/i.test(r.keyword))
   // BRAND WATERFALL INSIDE THE COMPOSER (PO 2026-08-21, B0FKFHSCS9: the post-net rewrote a good
   // 125-char line to "authentic Comfort Colors blank, …" and truncated the tail). Same trigger as
   // the net (every shipped title must carry the brand — a multi-design child whose title lacks it
@@ -421,7 +425,7 @@ export function composeItemHighlightDetailed(
   const brandPick: string | null = needBrand
     ? titleCasePhrase(brandFromPool ?? brandSpecPhrase(opts!.allowedBrand!, opts?.garmentFamily))
     : null
-  const RESERVE = (factEligible ? OVERSIZED_FACT.length + 2 : 0) + (brandPick ? brandPick.length + 2 : 0)
+  const RESERVE = (factEligible ? OVERSIZED_FACT!.length + 2 : 0) + (brandPick ? brandPick.length + 2 : 0)
   const MAX = CONTENT_CONTRACT.itemHighlights.max - RESERVE
   // TWO NUMBERS, TWO JOBS (controller correction to #677, 2026-09-08 — see the "PO RULING 2+3"
   // comment further down on `MIN`). `AIM` is the FILL target — how far both the pool loop (above)
@@ -499,9 +503,9 @@ export function composeItemHighlightDetailed(
   if (
     factEligible &&
     !usedFolded.has(ihFoldWord('oversized')) &&
-    ihRepeatViolations([...picked, OVERSIZED_FACT].join(', ')).length === 0
+    ihRepeatViolations([...picked, OVERSIZED_FACT!].join(', ')).length === 0
   ) {
-    picked.push(OVERSIZED_FACT)
+    picked.push(OVERSIZED_FACT!)
   }
 
   // PO RULING 2026-08-21, verbatim "44 is NEVER approved, MIN 85% of MAX 125" (the ratio itself is
