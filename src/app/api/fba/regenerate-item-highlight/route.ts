@@ -31,6 +31,12 @@ import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
 import { identityPhrases, readDesignGroupIdentity } from '@/lib/fba/designGroupIdentity'
 import { perDesignIhRows } from '@/lib/fba/perDesignItemHighlights'
+// IH TERMINAL NET PHASE A (2026-09-10, BLOCKING 3 fix): this route bypasses the pipeline entirely
+// (no PipelineInput to hand `deriveDesignSeasons`), so it resolves the design's REAL occasion
+// signal the same way `deriveDesignSeasons` itself does at its core — reading it straight off the
+// title/design-name text this route already has in scope. `seasonsIn` is the zero-import leaf both
+// share. Never a blanket `[]` at this seam either.
+import { seasonsIn } from '@/lib/keyword-engine/seasonalTerms'
 
 function admin() {
   return createClient(
@@ -203,6 +209,10 @@ export async function POST(req: NextRequest) {
       // would be the exact lie the ruling forbids (and the push seam would refuse it) — say so.
       return NextResponse.json({ error: 'Multi-design family without per-design titles yet — run a full AI audit first so each design gets its own title, then regenerate the Item Highlight per design.', hold: 'no-design-groups' }, { status: 422 })
     }
+    // IH TERMINAL NET PHASE A (BLOCKING 3 fix): the family's real occasion signal — every title
+    // this design ships (the family title + every per-child title) plus each design's own name.
+    // Resolved ONCE, threaded to both branches below.
+    const designSeasons = seasonsIn([title, ...pct.map((p) => p.title), ...pct.map((p) => p.designName ?? '')].join(' '))
     if (multi && byKey.size >= 2) {
       const groups = await Promise.all([...byKey.values()].map(async (g) => {
         const gi = await readDesignGroupIdentity(g).catch(() => null)
@@ -216,6 +226,7 @@ export async function POST(req: NextRequest) {
         // DESIGN inside buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.
         audienceLean: apparel ? storedAudienceLean : null,
         audienceLeanByDesign: storedAudienceLeanByDesign,
+        designSeasons,
       })
       const composed = built.perDesign.filter((d) => d.value)
       // FIX WAVE 2 (I-2a, 2026-09-06, controller RULING — final whole-branch review #2, Important
@@ -264,6 +275,7 @@ export async function POST(req: NextRequest) {
       // normalizes the family value inline with the SAME function (contentTruth.ts), never a
       // second rule.
       audienceLean: apparel ? normalizeAudienceLean(storedAudienceLean) : null,
+      designSeasons,
     })
     // FIX ROUND 1 (2026-09-07, controller RULING): `capItemHighlightRepeats` now returns a typed
     // union. A genuine REFUSAL (the net could not net the composer's own output into a compliant

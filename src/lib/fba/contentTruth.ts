@@ -53,6 +53,7 @@ export type PhraseTruthReason =
   | 'weight-class-lie'              // light/mid/heavyweight that the blank's weightNote does not back
   | 'fit-claim-lie'                 // relaxed/classic/slim/regular/oversized/fitted/boxy that spec.fit does not back
   | 'audience-lean-lie'             // a single gender asserted on a unisex-lean family's TITLE or Item Highlight
+  | 'material-lie'                  // a fibre-composition claim (marked OR unmarked) that spec.material does not back — ITEM HIGHLIGHTS ONLY, see the block comment above FIBER_WORDS
 
 /** The seller's declared audience lean, normalized to what the truth rule needs. */
 export type TruthAudienceLean = 'unisex' | 'women' | 'men' | null
@@ -661,6 +662,86 @@ const FIT_CLAIM_RE = new RegExp(
  *  IH's vocabulary ever widens to match. */
 const FIT_WORD_CANON: Readonly<Record<string, string>> = { oversize: 'oversized', crop: 'cropped', taper: 'tapered' }
 
+/**
+ * FIBRE-COMPOSITION CLAIM VOCABULARY (Phase A, redoing the reverted `feat/ih-phase23-wip` @
+ * `c466225` Phase 3 with BLOCKING 1 closed — finish-final-review.md). Live B0DMXMH266's shopper-
+ * visible Item Highlight begins "Polycotton…" while the blank (Gildan 64000) states
+ * `material: 'Ring-Spun Cotton'` — 100% cotton, no polyester at all; `phraseTruthVerdict` returned
+ * `{ok:true}` on it before this rule existed.
+ *
+ * BLOCKING 1, closed here. The reverted version judged only a MARKED claim (a "%" beside a fibre
+ * word, the literal word "blend", the "polycotton" compound, or two-plus distinct fibres named
+ * together) — and thereby STEERED the composer into the UNMARKED spelling of the identical lie: on
+ * a 52/48 blend blank the pool held both "100% Combed Ringspun Cotton Tees" (rejected) and "Pure
+ * Cotton Graphic Shirts Men" (accepted, higher volume) — same false fact, different spelling, and
+ * the marked-only rule picked the one it could not see. `PURITY_ADJACENT_RE` below closes it: a
+ * purity WORD (pure/all/100%/100 percent/one hundred percent/solid/genuine/real) immediately
+ * beside a fibre word is now ALSO a composition claim, so "Pure Cotton" and "100% Cotton" get the
+ * identical verdict against the identical blank — the symmetry the reviewer's required fix names.
+ *
+ * ADJACENCY, not clause-presence, for the purity words specifically: "all" and "real" are common
+ * English words that say nothing about fibre when they are not touching one ("All Season Cotton
+ * Tee" — "all" describes "season", not "cotton"; "Real Deal Graphic Tee"). The "%" marker does not
+ * need this narrowing (a bare "%" beside ANY fibre word in the same clause is already unambiguous),
+ * but the ordinary-English purity words do — this is the SAME "claim vs. vocabulary" discipline
+ * `phraseTruthVerdict`'s fit-claim rule already documents for `oversized`/`relaxed`.
+ *
+ * WHAT THIS CATCHES: "Pure Cotton", "All Cotton"/"All-Cotton", "Solid Cotton", "Genuine Cotton",
+ * "Real Cotton", "100% Cotton", "100 Percent Cotton", "One Hundred Percent Cotton" — the purity
+ * word directly adjacent (whitespace or hyphen) to the fibre word, either order the "%"/"blend"
+ * markers already covered symmetry-tested against. WHAT IT DOES NOT CATCH, ON PURPOSE: a purity
+ * word separated from the fibre word by another word ("All Season Cotton", "Real Deal Cotton Tee")
+ * — those are ordinary vocabulary, not a claim, exactly like a bare "Soft Cotton Tee" is not a
+ * claim without any marker at all; a purity/fibre pair split across two different comma clauses
+ * (rule (g) below judges ONE clause at a time, deliberately, like weight-class-lie/fit-claim-lie);
+ * or a synonym outside the enumerated list ("totally cotton", "straight cotton").
+ *
+ * ITEM HIGHLIGHTS ONLY — same scoping as the fit-claim-lie rule above: bullets/description have an
+ * existing fabric-truth owner (`enforceFabricTruth`, the weight-class half); unifying the two is
+ * future work, not this task.
+ */
+const FIBER_WORDS = ['cotton', 'polyester', 'poly', 'rayon', 'spandex', 'elastane', 'linen', 'wool', 'viscose', 'modal', 'nylon', 'acrylic', 'lycra'] as const
+const FIBER_RE = new RegExp(`\\b(${FIBER_WORDS.join('|')})\\b`, 'gi')
+/** "polycotton"/"poly-cotton"/"poly cotton" as ONE compound blend claim — `FIBER_RE`'s word
+ *  boundaries alone cannot split the no-space spelling into its two fibres. */
+const POLYCOTTON_RE = /\bpoly[\s-]?cotton\b/i
+/** 'poly' (the common shorthand) folds to 'polyester' — a claim spelled "poly" is not a THIRD,
+ *  distinct fibre from "polyester". */
+const FIBER_CANON: Readonly<Record<string, string>> = { poly: 'polyester' }
+/** BLOCKING 1's fix: a purity word directly beside (whitespace/hyphen, either order) a fibre word —
+ *  see the block comment above for exactly which spellings this catches and which it does not. */
+const PURITY_ADJACENT_RE = new RegExp(
+  `\\b(?:100\\s*%|100[\\s-]?percent|one\\s+hundred\\s+percent|pure|all|solid|genuine|real)[\\s-]+(?:${FIBER_WORDS.join('|')})\\b` +
+  `|\\b(?:${FIBER_WORDS.join('|')})[\\s-]+(?:pure|100\\s*%|100[\\s-]?percent)\\b`,
+  'i',
+)
+
+/** Every distinct fibre CLASS named in `text` (fold applied), whether or not it reads as a CLAIM —
+ *  used for BOTH the candidate phrase and the blank's own `spec.material` string, so the two sides
+ *  of the comparison are built the identical way. */
+function fiberSetIn(text: string): Set<string> {
+  const s = new Set<string>()
+  if (POLYCOTTON_RE.test(text)) { s.add('cotton'); s.add('polyester') }
+  for (const m of text.matchAll(FIBER_RE)) s.add(FIBER_CANON[m[1].toLowerCase()] ?? m[1].toLowerCase())
+  return s
+}
+
+/** Does this CLAUSE assert a blend (as opposed to a single pure fibre)? The literal word "blend",
+ *  the "polycotton" compound, or two-plus distinct fibres named together all say so; a single bare
+ *  fibre word with a "%"/purity marker ("100% Combed Ringspun Cotton", "Pure Cotton") does NOT — it
+ *  asserts purity, the opposite claim. */
+const clauseAssertsBlend = (clause: string, fibers: ReadonlySet<string>): boolean =>
+  fibers.size >= 2 || POLYCOTTON_RE.test(clause) || /\bblend\b/i.test(clause)
+
+/** Does this CLAUSE carry an explicit composition CLAIM at all (see the block comment above for
+ *  the "not caught, on purpose" cases) — a "%" beside a fibre word, the word "blend", the
+ *  "polycotton" compound, two-plus distinct fibres named together, OR (BLOCKING 1's fix) a purity
+ *  word directly adjacent to a fibre word. A bare single fibre word with none of those is NOT a
+ *  claim — ordinary vocabulary must keep passing. */
+const isCompositionClaim = (clause: string, fibers: ReadonlySet<string>): boolean =>
+  fibers.size >= 2 || POLYCOTTON_RE.test(clause) || /\bblend\b/i.test(clause) ||
+  (fibers.size > 0 && /%/.test(clause)) || (fibers.size > 0 && PURITY_ADJACENT_RE.test(clause))
+
 /* ─── THE PREDICATE ───────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -765,6 +846,30 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
       // backs a claim spelled "oversize".
       const canonClaim = FIT_WORD_CANON[claim] ?? claim
       if (!fit || !fit.includes(canonClaim)) return { ok: false, reason: 'fit-claim-lie' }
+    }
+  }
+  // (g) material/fibre-composition truth (see the block comment above `FIBER_WORDS` for the live
+  // defect, the BLOCKING 1 fix, and the scoping). ITEM HIGHLIGHTS ONLY, same gate as rule (f) —
+  // placed AFTER fit-claim-lie so an existing multi-clause fixture that already fails on a fit
+  // claim keeps that diagnosis. Bounded to ONE comma-delimited clause at a time — DEFENSIVE: in
+  // production every caller hands this a single un-comma'd candidate (the composer) or a single
+  // segment (`ihLineTruthVerdict`'s sweep below), but a fibre word in one clause must never bind to
+  // a "%"/"blend"/purity marker sitting in an unrelated clause.
+  if (ctx.field === 'highlights') {
+    for (const clause of phrase.split(',')) {
+      const fibers = fiberSetIn(clause)
+      if (!isCompositionClaim(clause, fibers)) continue
+      const trueMaterial = ctx.spec?.material
+      // FAIL CLOSED (same doctrine as weight-class-lie/fit-claim-lie above): an unconfirmed blank
+      // backs no composition claim — a claim with nothing behind it is exactly how the live lie
+      // shipped (B0DMXMH266's blank IS known; this guards the general case).
+      if (!trueMaterial) return { ok: false, reason: 'material-lie' }
+      const trueFibers = fiberSetIn(trueMaterial)
+      if (trueFibers.size === 0) return { ok: false, reason: 'material-lie' }
+      const subset = [...fibers].every((f) => trueFibers.has(f))
+      if (!subset || clauseAssertsBlend(clause, fibers) !== clauseAssertsBlend(trueMaterial, trueFibers)) {
+        return { ok: false, reason: 'material-lie' }
+      }
     }
   }
   return { ok: true }
@@ -1314,4 +1419,39 @@ export function applyTitleTruthNet(
   // 3. ONE garment class for the whole title (defect 3) — primed with the class segment 0 already
   //    committed to, so this never re-litigates what `scrubMoneyPhrase` just decided.
   return collapseRedundantGarmentMention(enforceSingleGarmentClass(swept, ctx, protectHay, seg0.primaryClass), protectHay)
+}
+
+/* ─── THE ITEM HIGHLIGHT LINE-LEVEL TRUTH NET ─────────────────────────────────────────────────── */
+
+/**
+ * PHASE A of the 2026-09-10 writer spec (docs/superpowers/specs/2026-09-10-item-highlight-
+ * writer.md §2 step 3 — "judge the OUTPUT ... this is the title-coherence-architecture provenance-
+ * allowlist idiom, applied to a line instead of a fill fragment"; the reverted `feat/ih-phase23-wip`
+ * @ `c466225` Phase 3). GENERALISES `applyTitleTruthNet`'s own core idea — segment on the line's
+ * separator and judge each segment with `phraseTruthVerdict`, the ONE predicate, never a second
+ * rule list — to the Item Highlight's shape and doctrine, which differ from the title's on purpose:
+ *
+ *   - IH has no privileged "money phrase" (`applyTitleTruthNet`'s segment 0 is never dropped
+ *     because it carries the brand+design); every comma-delimited clause in an Item Highlight is an
+ *     independent feature/benefit phrase — SEGMENTS, not only tokens, is what the adversary section
+ *     names as the residual risk once each candidate is individually true (two admitted facts
+ *     joined into a false implication) — none is structurally protected.
+ *   - IH's own terminal-net doctrine (Phase 1, H10-H12; finish-line R2) is REFUSE, never silently
+ *     edit — "a truncated line is a line whose meaning nobody chose" applies exactly as much to a
+ *     line a truth check would otherwise have to drop a clause from. So this function does not
+ *     drop-and-rejoin like `applyTitleTruthNet`; it reports the FIRST failing verdict (or `ok`) and
+ *     leaves the refuse-vs-ship decision to the caller (`capItemHighlightRepeats`'s `truthCheck`
+ *     opt, productDetailAttrs.ts), matching every other IH terminal-net rule.
+ *
+ * Pure. Idempotent (a passing line is unaffected by being judged again). `ctx.field` should be
+ * `'highlights'` — every rule this reaches is field-agnostic except fit-claim-lie/material-lie
+ * (highlights-gated) and audience-lean-lie (title+highlights-gated), so a caller that passes a
+ * different field gets a strict SUBSET of the highlights rules, never a wrong one.
+ */
+export function ihLineTruthVerdict(line: string, ctx: PhraseTruthCtx): PhraseTruthVerdict {
+  for (const clause of line.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const verdict = phraseTruthVerdict(clause, ctx)
+    if (!verdict.ok) return verdict
+  }
+  return { ok: true }
 }

@@ -29,6 +29,24 @@ import { GARMENT_HEAD_WORDS } from '@/lib/fba/garmentNoun'
 // leaf), so pulling it in here does not compromise this module's client-safety (the client `page.tsx`
 // imports `classifyStoredIhLine` from here directly).
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
+// IH TERMINAL NET PHASE A (2026-09-10, redoing the reverted feat/ih-phase23-wip Phase 2): run
+// scrubTrademarks AND scrubCelebrityNames at the detail push path (buildDetailPatchValue) — both
+// scrubs were generation-time only before this, so a stale/pre-scrub-era stored value, or a
+// refusal that let the pre-scrub value persist, reached this function and Amazon's PATCH body
+// untouched. celebrityGuard.ts is ALSO a zero-import pure leaf (verified, same check as
+// trademarkGuard.ts above) — pulling it in here does not compromise this module's client-safety.
+import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
+// SEASONAL_TERMS/isOffSeasonKeyword MOVED IN (IH terminal net Phase A): seasonalTerms.ts is a
+// documented ZERO-import leaf (verified), so importing it here is safe by the same rule.
+import { SEASONAL_TERMS, isOffSeasonKeyword } from '@/lib/keyword-engine/seasonalTerms'
+// TYPE-ONLY — erased at compile, zero runtime import, so this does NOT create the cycle a VALUE
+// import would (contentTruth.ts imports blankSpecs.ts, which imports THIS module for
+// `capItemHighlightRepeats` — a value import back would be circular, and would also drag
+// blankSpecs.ts's supabase client into the client bundle `page.tsx` pulls this leaf into directly).
+// The caller (listingPipeline.ts, which already imports contentTruth.ts) supplies the actual
+// verdict function as a closure via `CapItemHighlightRepeatsOpts.truthCheck` — this module never
+// calls `phraseTruthVerdict`/`ihLineTruthVerdict` itself, only types the shape of what comes back.
+import type { PhraseTruthReason } from '@/lib/fba/contentTruth'
 
 /**
  * LLM/schema-sourced detail values are NOT guaranteed to be strings: the audit model can
@@ -667,10 +685,202 @@ export function classifyStoredIhLine(value: string | null | undefined): IhLineCl
  * at least recoverable). The refusal is now a TYPED, OUT-OF-BAND result (`IhNetResult`), never a
  * string — a caller that does not destructure `.ok` before reading a value will not typecheck.
  */
-export type IhRefusalReason = 'repeat-over-budget' | 'over-max' | 'under-floor'
+/**
+ * IH TERMINAL NET, PHASE A (2026-09-10, redoing the reverted `feat/ih-phase23-wip` @ `c466225`
+ * Phase 2, docs/superpowers/specs/2026-09-10-item-highlight-writer.md §2 Phase A: "the five
+ * already-written rules ... MOVED — not copied — onto the production path so the compose path,
+ * the Regen route and the push seam all inherit").
+ *
+ * `validateItemHighlights` (listingPipeline.ts) already implemented five deterministic content
+ * rules — off-season terms, promo/pricing language, hardcoded storage capacity, generic third-party
+ * brands, and sentence shape (no sentence punctuation, at least 2 comma-phrases) — but was reachable
+ * ONLY from `check-item-highlight/route.ts`, its one production caller. `capItemHighlightRepeats`
+ * below — the terminal net EVERY producer, the Regen route, and `buildDetailPatchValue` (the actual
+ * SP-API push) already call — never ran them: a hand-typed line containing "Free Shipping" (promo),
+ * "Christmas" (off-season), a hardcoded "128GB", "Nike", or a full sentence with no comma phrases
+ * each flagged by `validateItemHighlights` yet shipped byte-for-byte through the real push path —
+ * the checker and the push boundary DISAGREED, the "two rulebooks" failure the spec's own adversary
+ * names.
+ *
+ * THE MOVE. `THIRD_PARTY_BRANDS`/`THIRD_PARTY_BRAND_PHRASES`/`findThirdPartyBrands`/
+ * `ownBrandTokenSet` (byte-identical bodies) and `CAPACITY_RE`/`HIGHLIGHT_PROMO_RE` relocate HERE
+ * from listingPipeline.ts — the pure, client-safe leaf `capItemHighlightRepeats` already lives in —
+ * and listingPipeline.ts re-imports them for its other ~20 call sites (title/bullets/backend brand
+ * gates), never redefining them. `ihContentRuleViolations` below is the ONE predicate; both
+ * `validateItemHighlights` (which now calls it, never re-implements it) and `capItemHighlightRepeats`
+ * (which enforces it) read the SAME rules — a drift between "what the checker flags" and "what
+ * actually ships" is now structurally impossible, not just coincidentally absent.
+ *
+ * BLOCKING 3, closed here (finish-final-review.md — the reverted branch's push seam asserted the
+ * blanket default `designSeasons: []`, which asserts "this design is about NO occasion" and refused
+ * a true Valentine line at `buildDetailPatchValue`). `designSeasons` below is OPTIONAL with NO
+ * default: `undefined` means "this caller has no occasion signal" and the off-season rule is
+ * SKIPPED entirely (never asserts an absence it does not know); an explicitly-passed `[]` means a
+ * caller genuinely RESOLVED the design's occasions and found none, so the rule fires exactly as the
+ * historical blanket behaviour did. `buildDetailPatchValue` (a pure leaf with no DB/title access —
+ * it provably cannot know a SKU's occasion) omits `designSeasons` and so never runs the off-season
+ * rule; every caller that DOES have real title/design-name context (the compose path via
+ * `deriveDesignSeasons`, the per-child persist net, the Regen route via `seasonsIn`) passes the
+ * real, resolved set. `capacityFamily` (default `false`) and `brandName` (default `'THE CEO'`, the
+ * ONE seller brand this codebase already hardcodes — listingPipeline.ts, `handoff/
+ * SELLER_PROFILE.md:1`) keep the historical safe defaults: they can only ever ADD a refusal when
+ * told the family IS one, never guess, so a caller that never resolves them degrades to today's
+ * behaviour exactly.
+ */
+export const THIRD_PARTY_BRANDS = new Set([
+  // Cameras & imaging
+  'canon', 'nikon', 'sony', 'fujifilm', 'fuji', 'olympus', 'panasonic', 'pentax', 'leica',
+  'kodak', 'gopro', 'insta360', 'dji', 'ricoh', 'sigma', 'tamron',
+  // Memory / storage manufacturers
+  'sandisk', 'samsung', 'lexar', 'kingston', 'pny', 'toshiba', 'transcend', 'adata', 'patriot',
+  'crucial', 'seagate', 'maxell', 'micron',
+  // Phones & computing
+  'apple', 'iphone', 'ipad', 'macbook', 'imac', 'galaxy', 'pixel', 'microsoft', 'surface',
+  'huawei', 'xiaomi', 'oneplus', 'motorola',
+  // Drones
+  'parrot', 'autel', 'skydio', 'yuneec',
+  // Gaming
+  'nintendo', 'playstation', 'xbox', 'switch',
+  // Audio
+  'bose', 'beats', 'jbl', 'sennheiser',
+  // Apparel / athletic competitor RETAIL brands (2026-07-07, B0FRYMM56C: "why do we have NIKE"). The
+  // keyword research pulls the #1 competitor's ranking terms ("nike shirts women") into the pool as
+  // proven converters, and — until now — no filter knew Nike was a brand, so the bullet coverage
+  // backstop wove it straight into customer copy. A graphic tee is NOT "compatible with" Nike, so these
+  // are DROPPED (like trademark phrases), never framed "for [Brand]". OMITTED pending a context-guard
+  // because they double as legit design words: champion / gap / columbia / express (common words),
+  // puma (animal), wrangler (cowboy/Jeep), levis / hollister (names).
+  'nike', 'adidas', 'reebok', 'lululemon', 'athleta', 'underarmour', 'vuori', 'gymshark',
+  'fabletics', 'aeropostale', 'abercrombie', 'nautica',
+])
+
+/** Multi-word brand phrases (checked verbatim, not per-word). */
+const THIRD_PARTY_BRAND_PHRASES = [
+  'western digital', 'audio technica', 'sea gate', 'go pro',
+  // Apparel/athletic competitor brands whose name is multi-word (per-word checks would false-positive
+  // on 'under'/'new'/'north'/'face'). See the apparel block in THIRD_PARTY_BRANDS above.
+  'under armour', 'new balance', 'north face',
+]
+
+/** Find every third-party brand token in `text`, excluding the seller's own brand. MOVED here
+ *  (IH terminal net Phase A) from listingPipeline.ts — byte-identical body; re-imported there too. */
+export function findThirdPartyBrands(text: string, ownBrandTokens: Set<string>): string[] {
+  const lc = text.toLowerCase()
+  const found = new Set<string>()
+  for (const w of lc.split(/[^a-z0-9]+/).filter(Boolean)) {
+    if (ownBrandTokens.has(w)) continue
+    if (THIRD_PARTY_BRANDS.has(w)) found.add(w)
+  }
+  for (const phrase of THIRD_PARTY_BRAND_PHRASES) {
+    if (lc.includes(phrase)) found.add(phrase)
+  }
+  return [...found]
+}
+
+/** Get the seller's own brand tokens for exemption from brand checks. Includes NORMALIZED forms
+ *  (apostrophe-deleted, punctuation-stripped) alongside the raw tokens (adversarial 2026-07-08):
+ *  the backend ban sites compare against normalized tokens ("Darlin' Co." must ban "darlin"), and
+ *  a raw-only set silently no-ops for any punctuated brand. Superset — raw consumers unaffected.
+ *  MOVED here (IH terminal net Phase A) from listingPipeline.ts — byte-identical body. */
+export function ownBrandTokenSet(brandName: string): Set<string> {
+  const s = new Set<string>()
+  for (const t of brandName.toLowerCase().split(/\s+/).filter(Boolean)) {
+    s.add(t)
+    const stripped = t.replace(/['’]/g, '').replace(/[^a-z0-9]/g, '')
+    if (stripped) s.add(stripped)
+  }
+  return s
+}
+
+// A storage-capacity token ("128GB", "1 TB"). MOVED here (IH terminal net Phase A) from
+// listingPipeline.ts, byte-identical — re-imported there for its other call sites (capacityOf,
+// the keyword-pool capacity filter, the per-keyword capacity strip), none of which change.
+export const CAPACITY_RE = /\b(\d{1,4})\s?(t|g)b?\b/i // GB/TB only — "MB" is usually a transfer speed, not capacity
+
+// Pricing/promo language never belongs in a customer-facing highlight. "% off" and "$" match
+// anywhere (a \b next to "$" could never fire — it is not a word char); the words need boundaries.
+// MOVED here (IH terminal net Phase A) from listingPipeline.ts, byte-identical.
+const HIGHLIGHT_PROMO_RE = /\b(?:sale|discount|cheap|free|deal)\b|% ?off|\$/i
+
+/** The five rules moved in Phase A. */
+export type IhContentRuleReason = 'sentence-shape' | 'off-season' | 'promo-pricing' | 'hardcoded-capacity' | 'third-party-brand'
+
+export interface IhContentRuleCtx {
+  /** Seller's own brand — exempted from the third-party-brand check. Default `'THE CEO'` (see the
+   *  block comment above: the ONE brand this codebase already hardcodes as its own fallback). */
+  brandName?: string
+  /** Whether this SKU belongs to a storage-capacity variation family. Default `false` — the
+   *  capacity rule can only ever ADD a refusal when told the family is one; it never guesses. */
+  capacityFamily?: boolean
+  /** Canonical occasions THIS design is about (deriveDesignSeasons/seasonsIn). BLOCKING 3
+   *  (finish-final-review.md): `undefined` (the default — omitted entirely) SKIPS the off-season
+   *  rule — this caller has no occasion signal, so the rule must not assert one. An explicitly
+   *  passed `[]` means the caller genuinely resolved the design's occasions and found none, so the
+   *  rule fires exactly as the historical blanket behaviour did. NEVER default this to `[]`. */
+  designSeasons?: readonly string[]
+}
+
+/** ONE named violation of a moved content rule — `message` is the EXACT text
+ *  `validateItemHighlights` used to hand-roll inline (so it can now delegate here byte-for-byte
+ *  instead of re-implementing), `reason` is the terminal net's refusal bucket. */
+export interface IhContentRuleViolation { reason: IhContentRuleReason; message: string }
+
+/** THE moved predicate (IH terminal net Phase A) — every rule `validateItemHighlights` used to
+ *  enforce alone, now the ONE source both it and `capItemHighlightRepeats` read. Order matches the
+ *  original inline checks (sentence-punctuation, then the moved third-party-brand/off-season/promo/
+ *  capacity block, then the min-phrase check) — no test depends on order (both consumers use
+ *  `.filter`/`.some`/`[0]`, never exact-array equality), but keeping it stable avoids a gratuitous
+ *  diff in the checker route's `problems` array. */
+export function ihContentRuleViolations(s: string, ctx?: IhContentRuleCtx): IhContentRuleViolation[] {
+  const violations: IhContentRuleViolation[] = []
+  if (/[.!?](\s|$)/.test(s)) {
+    violations.push({ reason: 'sentence-shape', message: 'reads as a full sentence — use short comma-separated feature/benefit phrases with NO sentence punctuation (. ! ?)' })
+  }
+  const brandName = ctx?.brandName ?? 'THE CEO'
+  const capacityFamily = ctx?.capacityFamily ?? false
+  const brands = findThirdPartyBrands(s, ownBrandTokenSet(brandName))
+  if (brands.length) violations.push({ reason: 'third-party-brand', message: `contains third-party brand(s)/team(s): ${brands.join(', ')}` })
+  const lc = s.toLowerCase()
+  // OFF-SEASON only (2026-07-23): "evergreen" means "not about a holiday we are not about". A
+  // Valentine design's own "Valentine" is its subject, not a seasonal claim. BLOCKING 3: this rule
+  // runs ONLY when the caller actually resolved a real occasion signal (`ctx.designSeasons !==
+  // undefined`) — never on the bare absence of a ctx, which used to be indistinguishable from "we
+  // checked and this design has no occasion" (see the type doc above).
+  if (ctx?.designSeasons !== undefined) {
+    const season = SEASONAL_TERMS.find((t) => lc.includes(t) && isOffSeasonKeyword(t, ctx.designSeasons))
+    if (season) violations.push({ reason: 'off-season', message: `contains the seasonal term "${season}" — this is an evergreen field` })
+  }
+  if (HIGHLIGHT_PROMO_RE.test(s)) violations.push({ reason: 'promo-pricing', message: 'contains pricing/promotional language (sale/discount/cheap/free/deal/$/% off)' })
+  if (capacityFamily && CAPACITY_RE.test(s)) violations.push({ reason: 'hardcoded-capacity', message: 'hardcodes a storage capacity — the field is shared across all capacity variants' })
+  if (s.split(',').map((p) => p.trim()).filter(Boolean).length < 2) {
+    violations.push({ reason: 'sentence-shape', message: 'must be at least 2 comma-separated phrases' })
+  }
+  return violations
+}
+
+/** The FIRST moved-rule violation, or null — what the terminal net (`capItemHighlightRepeats`)
+ *  refuses on. Reads `ihContentRuleViolations` (never a second copy of the same checks) so the
+ *  net and the checker can never drift apart from each other again. */
+export function ihFirstContentRuleViolation(s: string, ctx?: IhContentRuleCtx): IhContentRuleReason | null {
+  return ihContentRuleViolations(s, ctx)[0]?.reason ?? null
+}
+
+export type IhRefusalReason = 'repeat-over-budget' | 'over-max' | 'under-floor' | IhContentRuleReason | PhraseTruthReason
 export type IhNetResult = { ok: true; value: string } | { ok: false; reason: IhRefusalReason }
 
+/** PHASE A: the shape of a line-level truth check, injected by the caller (see the `truthCheck`
+ *  doc below) — the SAME shape `ihLineTruthVerdict`/`phraseTruthVerdict` (contentTruth.ts) already
+ *  return, typed here without importing them (value import would cycle — see the top-of-file
+ *  comment on the `PhraseTruthReason` type-only import). */
+export type IhTruthCheckFn = (line: string) => { ok: true } | { ok: false; reason: PhraseTruthReason }
+
 export interface CapItemHighlightRepeatsOpts {
+  /** IH terminal net Phase A: real context for the moved content-rule checks (see the block
+   *  comment above `IhContentRuleReason` for the safe defaults every caller gets when this is
+   *  omitted). Only a caller that resolves a real brand/capacity/season signal needs to pass this —
+   *  every pre-Phase-A call site did not, and stays byte-identical under the defaults (BLOCKING 3's
+   *  fix keeps `designSeasons` unconditionally skip-by-default, not blanket-refuse-by-default). */
+  contentCtx?: IhContentRuleCtx
   /** R2 (finish-line-rulings.md, controller RULING, 2026-09-08) refuses any ACTUAL length-driven
    *  drop outright — see the `lengthDropped` block below. The ONE named, deliberate exception:
    *  `ensureBlankBrandInHighlights` (blankSpecs.ts) calls this net on its OWN
@@ -683,6 +893,18 @@ export interface CapItemHighlightRepeatsOpts {
    *  other call site is exactly the terminal-net validation of a FINAL, already-composed/stored
    *  line R2 is about. */
   allowLengthAmputation?: boolean
+  /** PHASE A (IH terminal net): the line-level content-TRUTH check — garment-noun, capability,
+   *  audience, competitor-brand, weight-class, fit-claim, audience-lean, and material-lie — run on
+   *  the FINAL netted bytes, after every other stage, exactly where the moved content rules (above)
+   *  are wired. Injected (never imported — see the block comment on the `PhraseTruthReason` import
+   *  at the top of this file) as a closure over `ihLineTruthVerdict(line, ctx)` and the caller's
+   *  already-resolved `PhraseTruthCtx` (the SAME ctx the composer already built for this design,
+   *  where one is available). Omitted ⇒ skip — a caller with no resolvable product-fact context
+   *  (`buildDetailPatchValue`, a generic leaf with no DB/spec access) stays byte-identical; the
+   *  composer's own per-candidate `ihTruthVerdict` check already covers a FRESH compose, so this is
+   *  the backstop for a stale stored value, a hand-edit, or a candidate the compose-time check never
+   *  saw assembled together with the brand/wear-fact phrase. */
+  truthCheck?: IhTruthCheckFn
 }
 
 export function capItemHighlightRepeats(value: string, opts?: CapItemHighlightRepeatsOpts): IhNetResult {
@@ -781,6 +1003,27 @@ export function capItemHighlightRepeats(value: string, opts?: CapItemHighlightRe
   if (lengthDropped && !opts?.allowLengthAmputation) {
     return { ok: false, reason: 'over-max' }
   }
+  // IH TERMINAL NET, PHASE A: the moved content rules run on `joined` — the FINAL shipped bytes,
+  // after every other stage (repeat cap, length cap, floor/amputation refusals) — never on the raw
+  // candidate. This matches the spec's own requirement ("it runs on what is about to be written to
+  // Amazon, after every other stage — not on candidate phrases") and, as important, keeps this
+  // net's EXISTING diagnoses specific: a comma-less line the repeat or length cap alone already
+  // reduces to zero phrases refuses with `repeat-over-budget`/`over-max` exactly as before — it
+  // never reaches here, so it is never masked by the generic `sentence-shape` "must be at least 2
+  // comma-separated phrases" rule. Safe defaults (see the block comment above `IhContentRuleReason`)
+  // apply when `opts.contentCtx` is omitted — byte-identical on every real composed line (the
+  // composer never emits these five violations to begin with).
+  const contentViolation = ihFirstContentRuleViolation(joined, opts?.contentCtx)
+  if (contentViolation) return { ok: false, reason: contentViolation }
+  // IH TERMINAL NET, PHASE A (line-level truth): runs LAST of all, on `joined`, same "final shipped
+  // bytes" discipline as the content-rule check above — so a comma-less line the repeat/length cap
+  // alone already emptied is never masked by a truth diagnosis either. Skipped when the caller has
+  // no ctx to check with (a generic push-boundary leaf); see the `truthCheck` doc above for why this
+  // is injected rather than imported.
+  if (opts?.truthCheck) {
+    const truthVerdict = opts.truthCheck(joined)
+    if (!truthVerdict.ok) return { ok: false, reason: truthVerdict.reason }
+  }
   return { ok: true, value: joined }
 }
 
@@ -819,14 +1062,47 @@ export function buildDetailPatchValue(
   // Item Highlight: cap repeated words so a non-compliant value (LLM/stored/stale) can never be the reason
   // Amazon rejects this OR any other attribute's patch for the SKU (Amazon re-validates the whole item).
   if (isItemHighlightsField(null, attr.spApiKey)) {
+    // IH TERMINAL NET, PHASE A (2026-09-10, redoing the reverted feat/ih-phase23-wip Phase 2):
+    // scrub trademarks + celebrity names AT THE ACTUAL PUSH BOUNDARY. Both scrubs were
+    // generation-time only before this — the ONE celebrity door lived at listingPipeline.ts's
+    // `scrubPub` — so a stale/pre-scrub-era stored value, or a refusal that let the pre-scrub value
+    // persist, reached this function and Amazon's PATCH body untouched. Idempotent pure removal
+    // (both functions are zero-import leaves), so already-clean content is unaffected; this is the
+    // SAME order (`scrubCelebrityNames(scrubTrademarks(s))`) every other push-time scrub site in
+    // this codebase already uses.
+    const preScrubLen = trimmed.length
+    trimmed = scrubCelebrityNames(scrubTrademarks(trimmed), `push:item-highlights:${attr.spApiKey}`)
+    // A scrub that empties the whole line (the line WAS only a trademark/celebrity name) falls
+    // through the SAME "nothing to patch" `[]` path this function already uses for empty input two
+    // lines up — not `[{value:''}]`, the field-clearing defect this function already guards below.
+    if (!trimmed) return []
+    // BLOCKING 2 (opus review, finish-final-review.md, reproduced against feat/ih-phase23-wip @
+    // c466225 unmodified: scratchpad probe repro-blocking2-under-floor-scrub.mts — a 109-char line
+    // whose ONLY change is the scrub removing "Nike" ships as a 104-char PATCH body with ZERO
+    // refusal). The scrub above is a length-REDUCING transform that runs OUTSIDE
+    // `capItemHighlightRepeats`, so that net's own floor check — conditioned on a drop the net
+    // itself performed — can never see scrub-driven shortening. Checked HERE, on whether THE SCRUB
+    // itself carried a compliant line under the floor (never conditioned on any drop the net makes)
+    // — never on the bare fact that the survivor is short: a value that was ALREADY under the floor
+    // before the scrub ran (untouched by it) is `capItemHighlightRepeats`'s own documented case
+    // (a naturally-short, untouched value passes unflagged — see that function's doc and
+    // `itemHighlightOneRule.test.ts`/`blankBrandHighlightNet.test.ts`'s pinned short fixtures); this
+    // is a NEW, narrower check for the one thing those fixtures never exercised: the SCRUB crossing
+    // the floor on a line that was compliant before it ran.
+    if (preScrubLen >= CONTENT_CONTRACT.itemHighlights.min && trimmed.length < CONTENT_CONTRACT.itemHighlights.min) return []
+    // BLOCKING 3 (opus review, finish-final-review.md, reproduced: scratchpad probe
+    // repro-blocking3-designseasons-blanket.mts): deliberately NO `contentCtx`/`truthCheck` passed
+    // to the net below. This function is a pure leaf — no DB, no title, no design-name, no
+    // spec/garmentFamily access — so it provably cannot resolve which occasion(s) this design is
+    // about or its product facts. Passing `designSeasons: []` (the reverted branch's default)
+    // asserts "this design is about NO occasion" and refuses a truthful on-season line (a live
+    // Valentine design's own "Valentine" is its SUBJECT, not a seasonal claim) —
+    // `ihContentRuleViolations`'s own contract (above) treats an OMITTED `designSeasons` as "no
+    // signal, skip the off-season rule", never as "resolved to no occasion". Every caller that HAS
+    // real context (the compose path via `deriveDesignSeasons`, the per-child persist net, the
+    // Regen route via `seasonsIn`) passes it instead — this seam correctly omits rather than guesses.
     const netResult = capItemHighlightRepeats(trimmed)
-    // BLOCKING 1 (controller RULING, fix round 1): a refusal must NEVER become `[{value:''}]` — that
-    // array is the literal body of an SP-API `replace` patch, so it would CLEAR a live,
-    // shopper-visible field. `[]` (no patch entries at all — the same "nothing to patch" shape this
-    // function already returns for empty input two lines up) is the correct signal for "this net
-    // refused"; the caller is responsible for skipping the SKU/attribute and reporting why (the
-    // per-SKU push loop — see pushExecutor.ts's `patchSkuDetail` guard and Important 3's UNDER_FLOOR
-    // surfacing at the pre-flight skip checks).
+    // BLOCKING 1 (controller RULING, fix round 1): a refusal must NEVER become `[{value:''}]`.
     if (!netResult.ok) return []
     trimmed = netResult.value
   }

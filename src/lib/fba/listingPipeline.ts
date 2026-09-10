@@ -51,7 +51,21 @@ import { guaranteedIdentitySynonyms, identitySynonymPhrases, getSeedPool, normal
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
-import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck, ihRepeatViolations, IH_MAX_WORD_REPEATS, mergeDetailRowsByPrecedence, type EnumCoercer } from '@/lib/fba/productDetailAttrs'
+import {
+  detailValueToString, capItemHighlightRepeats, collarStyleForNeck, ihRepeatViolations, IH_MAX_WORD_REPEATS, mergeDetailRowsByPrecedence, type EnumCoercer,
+  // IH TERMINAL NET PHASE A (2026-09-10): THIRD_PARTY_BRANDS/findThirdPartyBrands/ownBrandTokenSet/
+  // CAPACITY_RE MOVED to productDetailAttrs.ts (the pure, client-safe leaf `capItemHighlightRepeats`
+  // already lives in) — re-imported here, byte-identical, for this file's ~20 other call sites
+  // (title/bullets/backend brand gates, the keyword-pool capacity filter). Never redefined here
+  // again. `ihContentRuleViolations` is the ONE moved-five-rules predicate `validateItemHighlights`
+  // below now delegates to instead of re-implementing.
+  THIRD_PARTY_BRANDS, findThirdPartyBrands, ownBrandTokenSet, CAPACITY_RE, ihContentRuleViolations,
+  type IhContentRuleCtx,
+} from '@/lib/fba/productDetailAttrs'
+// `findThirdPartyBrands` used to be DEFINED (and exported) here; it is now only re-imported (see
+// above) — re-export it under the same name so its pre-existing external importers
+// (scripts/stress-brand-safety.ts, scripts/stress-trademark-and-framing.ts) are unaffected.
+export { findThirdPartyBrands }
 import { coerceToEnum, coerceGenderToEnum } from '@/lib/fba/productTypeDefinitions'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversaryTrademarkClause } from '@/lib/fba/trademarkGuard'
 import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalCompounds'
@@ -75,6 +89,7 @@ import {
   buildPhraseTruthCtx,
   youthMarkerFor,
   resolveGarmentAudience,
+  ihLineTruthVerdict,
   type PhraseTruthCtx,
   type TruthGarmentFamily,
   type TruthAudienceLean,
@@ -1034,54 +1049,12 @@ function enforceHardAudience(text: string, audience: 'Men' | 'Women'): string {
 // now lives once in designName.ts; this alias keeps all eight call sites below unchanged.
 const BASIC_COLOR_RE = BASIC_COLOR_WORD_RE
 
-/**
- * Third-party brand names that REQUIRE 'for [Brand]' or 'compatible with [Brand]' framing
- * in titles and bullets. Amazon's Jan 2025 enforcement (tightened Q4 2025): bare third-party
- * brand references in titles trigger listing suppression and can lead to ASIN takedown.
- * Sources: DAM Law Firm 2026 Q4 enforcement report; Amazon Seller Central Product Title
- * Guidelines effective Jan 21, 2025.
- *
- * The seller's own brand (input.brandName) is exempted at runtime — this list is
- * COMPETITORS / accessories ecosystems the seller's product is compatible WITH, not made by.
- *
- * Apparel "blank" brands (Comfort Colors, Bella Canvas, Gildan…) are deliberately NOT here.
- * Amazon has long tolerated them as material/style descriptors and the existing pipeline
- * handles them via `attributePin`. This list focuses on actively-enforcing trademark holders.
- */
-const THIRD_PARTY_BRANDS = new Set([
-  // Cameras & imaging
-  'canon', 'nikon', 'sony', 'fujifilm', 'fuji', 'olympus', 'panasonic', 'pentax', 'leica',
-  'kodak', 'gopro', 'insta360', 'dji', 'ricoh', 'sigma', 'tamron',
-  // Memory / storage manufacturers
-  'sandisk', 'samsung', 'lexar', 'kingston', 'pny', 'toshiba', 'transcend', 'adata', 'patriot',
-  'crucial', 'seagate', 'maxell', 'micron',
-  // Phones & computing
-  'apple', 'iphone', 'ipad', 'macbook', 'imac', 'galaxy', 'pixel', 'microsoft', 'surface',
-  'huawei', 'xiaomi', 'oneplus', 'motorola',
-  // Drones
-  'parrot', 'autel', 'skydio', 'yuneec',
-  // Gaming
-  'nintendo', 'playstation', 'xbox', 'switch',
-  // Audio
-  'bose', 'beats', 'jbl', 'sennheiser',
-  // Apparel / athletic competitor RETAIL brands (2026-07-07, B0FRYMM56C: "why do we have NIKE"). The
-  // keyword research pulls the #1 competitor's ranking terms ("nike shirts women") into the pool as
-  // proven converters, and — until now — no filter knew Nike was a brand, so the bullet coverage
-  // backstop wove it straight into customer copy. A graphic tee is NOT "compatible with" Nike, so these
-  // are DROPPED (like trademark phrases), never framed "for [Brand]". OMITTED pending a context-guard
-  // because they double as legit design words: champion / gap / columbia / express (common words),
-  // puma (animal), wrangler (cowboy/Jeep), levis / hollister (names).
-  'nike', 'adidas', 'reebok', 'lululemon', 'athleta', 'underarmour', 'vuori', 'gymshark',
-  'fabletics', 'aeropostale', 'abercrombie', 'nautica',
-])
-
-/** Multi-word brand phrases (checked verbatim, not per-word). */
-const THIRD_PARTY_BRAND_PHRASES = [
-  'western digital', 'audio technica', 'sea gate', 'go pro',
-  // Apparel/athletic competitor brands whose name is multi-word (per-word checks would false-positive
-  // on 'under'/'new'/'north'/'face'). See the apparel block in THIRD_PARTY_BRANDS above.
-  'under armour', 'new balance', 'north face',
-]
+// THIRD_PARTY_BRANDS / THIRD_PARTY_BRAND_PHRASES MOVED (IH terminal net Phase A, 2026-09-10) to
+// productDetailAttrs.ts — the pure, client-safe leaf `capItemHighlightRepeats` already lives in —
+// and re-imported at the top of this file, byte-identical, so the ~20 call sites below (title/
+// bullets/backend brand gates) are unaffected. See the block comment on `IhContentRuleReason`
+// (productDetailAttrs.ts) for why: the Item Highlights terminal net needed this vocabulary too, and
+// a second copy is exactly the "two rulebooks" class this move exists to prevent.
 
 /**
  * Sports teams, college athletic programs, media franchises, and other licensed
@@ -1200,19 +1173,7 @@ export function findTrademarkPhrases(text: string): string[] {
   return [...found]
 }
 
-/** Find every third-party brand token in `text`, excluding the seller's own brand. */
-export function findThirdPartyBrands(text: string, ownBrandTokens: Set<string>): string[] {
-  const lc = text.toLowerCase()
-  const found = new Set<string>()
-  for (const w of lc.split(/[^a-z0-9]+/).filter(Boolean)) {
-    if (ownBrandTokens.has(w)) continue
-    if (THIRD_PARTY_BRANDS.has(w)) found.add(w)
-  }
-  for (const phrase of THIRD_PARTY_BRAND_PHRASES) {
-    if (lc.includes(phrase)) found.add(phrase)
-  }
-  return [...found]
-}
+// findThirdPartyBrands MOVED (IH terminal net Phase A) to productDetailAttrs.ts, re-imported above.
 
 /**
  * True if EVERY occurrence of `brandToken` in `text` is properly preceded by a framing
@@ -1261,19 +1222,7 @@ export function isBrandProperlyFramed(text: string, brandToken: string): boolean
   return true
 }
 
-/** Get the seller's own brand tokens for exemption from brand checks. Includes NORMALIZED forms
- *  (apostrophe-deleted, punctuation-stripped) alongside the raw tokens (adversarial 2026-07-08):
- *  the backend ban sites compare against normalized tokens ("Darlin' Co." must ban "darlin"), and
- *  a raw-only set silently no-ops for any punctuated brand. Superset — raw consumers unaffected. */
-function ownBrandTokenSet(brandName: string): Set<string> {
-  const s = new Set<string>()
-  for (const t of brandName.toLowerCase().split(/\s+/).filter(Boolean)) {
-    s.add(t)
-    const stripped = t.replace(/['’]/g, '').replace(/[^a-z0-9]/g, '')
-    if (stripped) s.add(stripped)
-  }
-  return s
-}
+// ownBrandTokenSet MOVED (IH terminal net Phase A) to productDetailAttrs.ts, re-imported above.
 // Product-type words capped at 2 total in the backend core (Amazon's bag-of-words already
 // has them from the title; >2 is the "shirt ×7" waste the PO flagged).
 const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees'])
@@ -1955,9 +1904,9 @@ function looksApparel(category?: string | null, repTitle?: string | null, produc
 // "ring-spun cotton", "for men", etc. Only applied when the product is non-apparel.
 const APPAREL_CONTAMINANTS = /\b(?:t[-\s]?shirts?|tees?|shirts?|graphic\s*tees?|hoodie|sweat\s?shirts?|sweater|apparel|clothing|garments?|fabric|cotton|ring[-\s]?spun|jersey|knit(?:ted)?|relaxed\s*fit|regular\s*fit|comfort\s*colors|bella\s*canvas|gildan|next\s*level|unisex|m[ae]ns?|wom[ae]ns?|fashion|outfit|wardrobe|sleeves?|crew\s?neck|tank\s?tops?|garment[-\s]?dyed|\bdye\b|wear|wearable)\b/i
 
-// A storage-capacity token ("128GB", "1 TB"). When children span >=2 distinct capacities the
-// title is per-child (each carries its own capacity) — NOT a concept that ever matches apparel.
-const CAPACITY_RE = /\b(\d{1,4})\s?(t|g)b?\b/i // GB/TB only — "MB" is usually a transfer speed, not capacity
+// CAPACITY_RE MOVED (IH terminal net Phase A) to productDetailAttrs.ts, re-imported above — same
+// meaning ("128GB", "1 TB"; GB/TB only). When children span >=2 distinct capacities the title is
+// per-child (each carries its own capacity) — NOT a concept that ever matches apparel.
 function capacityOf(s: string | null | undefined): string | null {
   const m = (s ?? '').match(CAPACITY_RE)
   // "32G"/"64G." -> 32GB/64GB, "128GB" -> 128GB, "1T"/"1TB" -> 1TB
@@ -2252,17 +2201,26 @@ import { capTitle75 } from './titleCap'
 // ONE named reason. `validateItemHighlights` below remains the seller-facing checker (the
 // check-item-highlight route) for hand-edited values.
 
-// Pricing/promo language never belongs in a customer-facing highlight. "% off" and "$" match
-// anywhere (a \b next to "$" could never fire — it is not a word char); the words need boundaries.
-const HIGHLIGHT_PROMO_RE = /\b(?:sale|discount|cheap|free|deal)\b|% ?off|\$/i
+// HIGHLIGHT_PROMO_RE MOVED (IH terminal net Phase A) to productDetailAttrs.ts, inside
+// `ihContentRuleViolations` — never re-declared here.
 
 /** Deterministic Item Highlights gates — ALL must pass. Returns the violations (empty = compliant).
  *  Callers scrub trademarks BEFORE validating (the scrubbed string is what ships), so the
- *  trademark gate only fires if a mark somehow survives the scrub. */
+ *  trademark gate only fires if a mark somehow survives the scrub.
+ *
+ *  IH TERMINAL NET PHASE A (2026-09-10): the five content rules (sentence-shape, off-season,
+ *  promo-pricing, hardcoded-capacity, third-party-brand) now delegate to `ihContentRuleViolations`
+ *  (productDetailAttrs.ts) instead of re-implementing — the SAME predicate `capItemHighlightRepeats`
+ *  enforces at every producer, the Regen route, and the push seam, so this checker can never again
+ *  drift from what actually ships (finish-final-review.md's "two rulebooks" class). Only the checks
+ *  that are NOT part of the five moved rules (max length, the repeat cap, the raw trademark-mark
+ *  check) stay inline here — they have their OWN single-source owners elsewhere already. */
 export function validateItemHighlights(
   s: string, brandName: string, capacityFamily: boolean,
   /** Canonical occasions THIS design is about (deriveDesignSeasons). Default [] = the historical
-   *  blanket rule, which is what the out-of-file caller (regenerate-item-highlight) keeps. */
+   *  blanket rule, which is what the out-of-file caller (check-item-highlight route) keeps — that
+   *  caller always resolves real seasons before calling, so `[]` here means "resolved, found none",
+   *  never a guess (contrast `ihContentRuleViolations`'s own `undefined` = "no signal, skip"). */
   designSeasons: readonly string[] = [],
 ): string[] {
   const problems: string[] = []
@@ -2272,7 +2230,6 @@ export function validateItemHighlights(
   // ~120-char comma-sentence live (B0FKKN8XKV). Cap 75 + ban sentence punctuation so the corrective-retry
   // loop + the deterministic fallback both converge on short phrases.
   if (s.length > CONTENT_CONTRACT.itemHighlights.max) problems.push(`${s.length} characters — keep it ≤${CONTENT_CONTRACT.itemHighlights.max}; short feature/benefit phrases, not a sentence`)
-  if (/[.!?](\s|$)/.test(s)) problems.push('reads as a full sentence — use short comma-separated feature/benefit phrases with NO sentence punctuation (. ! ?)')
   /* ONE RULE, shared with the push boundary (productDetailAttrs.ihRepeatViolations, 2026-08-18).
    * This used to count locally with `c > 1` — STRICTER than Amazon, which allows a word twice. The
    * generator therefore rejected values `capItemHighlightRepeats` would have shipped unchanged, so
@@ -2282,16 +2239,8 @@ export function validateItemHighlights(
   const repeated = ihRepeatViolations(s)
   if (repeated.length) problems.push(`these words appear more than ${IH_MAX_WORD_REPEATS}x: ${repeated.join(', ')} — Amazon rejects the SKU above that`)
   if (scrubTrademarks(s).trim() !== s.trim()) problems.push('contains a protected trademark (e.g. "World Cup" — the safe phrasing is "World Futbol Cup")')
-  const brands = findThirdPartyBrands(s, ownBrandTokenSet(brandName))
-  if (brands.length) problems.push(`contains third-party brand(s)/team(s): ${brands.join(', ')}`)
-  const lc = s.toLowerCase()
-  // OFF-SEASON only (2026-07-23): "evergreen" means "not about a holiday we are not about". A Valentine
-  // design's own "Valentine" is its subject, not a seasonal claim, so it is no longer a violation.
-  const season = SEASONAL_TERMS.find((t) => lc.includes(t) && isOffSeasonKeyword(t, designSeasons))
-  if (season) problems.push(`contains the seasonal term "${season}" — this is an evergreen field`)
-  if (HIGHLIGHT_PROMO_RE.test(s)) problems.push('contains pricing/promotional language (sale/discount/cheap/free/deal/$/% off)')
-  if (capacityFamily && CAPACITY_RE.test(s)) problems.push('hardcodes a storage capacity — the field is shared across all capacity variants')
-  if (s.split(',').map((p) => p.trim()).filter(Boolean).length < 2) problems.push('must be at least 2 comma-separated phrases')
+  // The five MOVED rules — ONE call, never a second hand-rolled copy (see the doc above).
+  for (const v of ihContentRuleViolations(s, { brandName, capacityFamily, designSeasons })) problems.push(v.message)
   return problems
 }
 
@@ -2333,6 +2282,12 @@ export interface ItemHighlightsInput {
   /** THIS design's own name/identity tokens — the forced-gender rule's design-own-name exemption.
    *  NEVER the family-wide union; see `ComposerOpts.designTokens` (itemHighlightComposer.ts). */
   designTokens?: readonly string[]
+  /** IH TERMINAL NET PHASE A (2026-09-10): the family's REAL resolved occasions
+   *  (`deriveDesignSeasons`) — threaded to the moved off-season rule (`ihContentRuleViolations`, via
+   *  `capItemHighlightRepeats`'s `contentCtx`). BLOCKING 3 (finish-final-review.md): absent/undefined
+   *  here means "the caller has no occasion signal" and the off-season rule is SKIPPED at this call
+   *  — never defaulted to `[]`, which would assert "no occasion" and refuse a true on-season line. */
+  designSeasons?: readonly string[]
 }
 
 /**
@@ -2344,25 +2299,35 @@ export interface ItemHighlightsInput {
 export function buildItemHighlights(input: ItemHighlightsInput): { value: string; hold: IhHoldReason | null } {
   const { finalTitle, pool, apparelProduct, blankBrand } = input
   const titles = (input.netTitles ?? [finalTitle]).filter((t): t is string => !!t)
+  // Named so the terminal net's line-level truth check (below) can reuse the IDENTICAL ctx the
+  // composer's own per-candidate truth stage already judges against — never a second resolution.
+  // NOT annotated `: PhraseTruthCtx` on purpose: `composeItemHighlightDetailed` wants the WIDER
+  // `ComposerOpts['spec']` (brand/stretch/dye included, from `blankBrand.spec`'s own full type);
+  // narrowing this const to `PhraseTruthCtx` would make TS see only the narrower fields, and it
+  // would then reject `spec` at the composer call below. Left uninferred, structural typing
+  // satisfies BOTH the composer's `ComposerOpts` (below) and `ihLineTruthVerdict`'s `PhraseTruthCtx`
+  // (the truthCheck closure) — a superset object literal is assignable to either.
+  const truthCtx = {
+    // Truth stage inputs: the blank's facts + the family's garment class (UNFOLDED — kids_tee
+    // drives the audience rule; long_sleeve_tee names its own brand spec phrase). NON-APPAREL
+    // families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocabulary. The
+    // title regex remains the fallback for an unresolved blank only.
+    spec: blankBrand?.spec ?? null,
+    garmentFamily: (!apparelProduct ? 'none' : (blankBrand?.garmentFamily ?? (/sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee'))) as TruthGarmentFamily,
+    // Audience comes from the BLANK's family only (PO: never inferred from a title) — an
+    // unresolved blank has no audience rule rather than a title-guessed one.
+    audience: ihAudienceOf(blankBrand?.garmentFamily ?? null),
+    // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
+    allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
+    // Task 5: threaded straight through — undefined on every caller that doesn't set it.
+    audienceLean: input.audienceLean,
+    designTokens: input.designTokens,
+    field: 'highlights' as const,
+  }
   const res = composeItemHighlightDetailed(
     pool.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: k.themeFit ?? null })),
     titles,
-    {
-      // Truth stage inputs: the blank's facts + the family's garment class (UNFOLDED — kids_tee
-      // drives the audience rule; long_sleeve_tee names its own brand spec phrase). NON-APPAREL
-      // families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocabulary. The
-      // title regex remains the fallback for an unresolved blank only.
-      spec: blankBrand?.spec ?? null,
-      garmentFamily: !apparelProduct ? 'none' : (blankBrand?.garmentFamily ?? (/sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee')),
-      // Audience comes from the BLANK's family only (PO: never inferred from a title) — an
-      // unresolved blank has no audience rule rather than a title-guessed one.
-      audience: ihAudienceOf(blankBrand?.garmentFamily ?? null),
-      // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
-      allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
-      // Task 5: threaded straight through — undefined on every caller that doesn't set it.
-      audienceLean: input.audienceLean,
-      designTokens: input.designTokens,
-    },
+    truthCtx,
   )
   if (res.line) {
     console.log(JSON.stringify({ tag: 'IH_COMPOSED', len: res.line.length, ih: res.line.slice(0, 140) }))
@@ -2374,8 +2339,18 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
     // (no new hold semantics, per the spec's own non-goals): the repeat net emptying everything is
     // the same fact `under-floor-no-repeat` already names (a repeat-permitting selection was the
     // only way to reach the floor and the PO's absolute no-repeat ruling forbids it); every other
-    // refusal (over-max, or a length/repeat-driven drop landing under the floor) is `under-floor`.
-    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand))
+    // refusal (over-max, or a length/repeat-driven drop landing under the floor, or — IH TERMINAL
+    // NET PHASE A — a moved content rule or the line-level truth net) is `under-floor`.
+    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand), {
+      // BLOCKING 3's fix: pass the REAL resolved occasions when the caller has them; `undefined`
+      // (every pre-Phase-A caller, and any caller that never resolved them) skips the off-season
+      // rule rather than asserting a blanket "no occasion".
+      contentCtx: input.designSeasons !== undefined ? { designSeasons: input.designSeasons } : undefined,
+      // PHASE A: the line-level truth net (contentTruth.ts), bound to the SAME ctx the composer's
+      // per-candidate check already used above — defense-in-depth on the FINAL joined bytes (a
+      // brand-insertion or pad filler assembled after per-candidate selection, or a stale value).
+      truthCheck: (line) => ihLineTruthVerdict(line, truthCtx),
+    })
     if (!capResult.ok) {
       console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'buildItemHighlights', reason: capResult.reason, len: res.line.length }))
       const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
@@ -2429,6 +2404,11 @@ export interface PerDesignItemHighlightsInput {
   /** PER-DESIGN seller-declared lean override (PipelineInput.audienceLeanByDesign, migration 070),
    *  {designKey: lean}. Absent/empty key ⇒ pure family fallback, same precedence as the title path. */
   audienceLeanByDesign?: Record<string, string> | null
+  /** IH TERMINAL NET PHASE A: the family's REAL resolved occasions (`deriveDesignSeasons`) —
+   *  threaded to each design's own `buildItemHighlights` call below. See `ItemHighlightsInput.
+   *  designSeasons` for the BLOCKING-3 contract (undefined ⇒ skip the off-season rule, never a
+   *  blanket `[]`). */
+  designSeasons?: readonly string[]
 }
 
 export interface PerDesignItemHighlight {
@@ -2535,6 +2515,9 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
       // THIS design's own name only (never the family union) — a sibling's name stays foreign to
       // the forced-gender rule's exemption exactly as it already does to the pool partition above.
       designTokens: [g.designName],
+      // IH TERMINAL NET PHASE A: the family-wide resolved occasions, threaded straight through —
+      // undefined on every caller that doesn't set it (byte-identical).
+      designSeasons: input.designSeasons,
     })
     console.log(JSON.stringify({ tag: 'IH_PER_DESIGN', design: g.key, pool: pool.length, scoped: scoped.length, len: r.value.length, hold: r.hold }))
     return { designKey: g.key, designName: g.designName, skus: g.skus, value: r.value, hold: r.hold, foreignDropped }
@@ -10113,7 +10096,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     per_child_item_highlights: r.per_child_item_highlights?.map((c) => {
       if (!c.item_highlight) return { ...c, item_highlight: '' }
       const scrubbed = scrubPub(c.item_highlight, 'per-child-item-highlight')
-      const capResult = capItemHighlightRepeats(scrubbed)
+      // IH TERMINAL NET PHASE A (BLOCKING 2's class, same mechanism as productDetailAttrs.ts's
+      // `buildDetailPatchValue`): `scrubPub` is a length-REDUCING transform that runs BEFORE
+      // `capItemHighlightRepeats`, so that net's own floor check — conditioned on a drop the net
+      // itself performed — cannot see scrub-driven shortening. Checked HERE, unconditionally, on
+      // the scrub survivor, before the net runs, mirroring the push-seam fix exactly.
+      if (scrubbed && scrubbed.length < CONTENT_CONTRACT.itemHighlights.min) {
+        console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'per-child-item-highlight', sku: c.sku, reason: 'under-floor-post-scrub' }))
+        return { ...c, item_highlight: scrubbed, hold: 'under-floor' as IhHoldReason }
+      }
+      // IH TERMINAL NET PHASE A (BLOCKING 3 fix): the SAME real, resolved `designSeasons` this
+      // function's own season policy already derived — never a blanket `[]`.
+      const capResult = capItemHighlightRepeats(scrubbed, { contentCtx: { designSeasons } })
       if (!capResult.ok) {
         console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'per-child-item-highlight', sku: c.sku, reason: capResult.reason }))
         const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
@@ -11951,6 +11945,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.
         audienceLean: apparelProduct ? input.audienceLean : null,
         audienceLeanByDesign: input.audienceLeanByDesign,
+        // IH TERMINAL NET PHASE A (BLOCKING 3 fix): the SAME real, resolved `designSeasons` the
+        // title/bullets/backend paths already read from above (`deriveDesignSeasons(input,
+        // designName)`, computed ONCE per regen at the season-policy block) — never a blanket `[]`
+        // guess at THIS seam, which has full pipeline context and can resolve it for real.
+        designSeasons,
       })
       perChildItemHighlights = built.perChild
       // SILENT-HOLD CLASS CLOSED (2026-09-04): the marker row ships EVERY TIME the attribute is in
@@ -11987,6 +11986,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // same `buildItemHighlights`; this single-design branch has no per-design resolver to do
         // that for it, so it normalizes the family value directly — same function, same rule.
         audienceLean: apparelProduct ? normalizeAudienceLean(input.audienceLean) : null,
+        // IH TERMINAL NET PHASE A (BLOCKING 3 fix): same real, resolved `designSeasons` the
+        // multi-design branch above now threads — never a blanket `[]` guess.
+        designSeasons,
       })
       // SILENT-HOLD CLASS CLOSED (2026-09-04): same fix as the multi-design branch above — a held
       // single-design family (hl === '') used to push NO row at all. Always push; carry `hold` so the
