@@ -226,6 +226,32 @@ Part 1's compose change against `150778c` (96 rows) is intended. "Polyester Blen
 100% cotton Gildan 64000 is a lie, and an unresolved blank backs no composition claim. From here on,
 the flag-off baseline for writer differentials is `974cb1a`.
 
+## 2e. AMENDMENT 2026-09-10 (B4 panel) — the joins, the shape, and what a relation does NOT bound
+
+*Where this stands.* The truth lens found ZERO Blocking at `7a05570`. What remained were contracts
+still judged by the writer's own copy, rules enforced but not taught (a 22-44% first-call pass rate),
+and wiring.
+
+*Refinements to the grammar:*
+1. **Abutment is legal only after the IDENTITY unit.** `<pool unit><garment head>` manufactures a
+   style, cut, feature or size claim that no unit carries: "Cream of the Crop Top", "Test Tube Top",
+   "Money in My Pocket Tee", "No Sweat Shirt". After a pool unit, a join is required.
+2. **The brand unit is list-joined only**, whatever its origin, and never takes `number`. "Shirt with
+   Comfort Colors Tee" reads as a second garment; "Comfort Colors Tees" reads as a multi-pack.
+3. **Span truth is judged inside a comma clause**, across every contiguous sub-span, and never across
+   a comma. The tail already owns clause scope and line scope, and crossing a comma made the
+   PO-sanctioned "Can be worn as Oversized" unusable while the composer ships that same clause.
+4. **Readability has one shape:** a line needs at least one relation clause (`with` / `in`) and at
+   most one list section. A keyword list has no relation clause at all, which is exactly the PO's
+   complaint.
+5. **A rule is enforced only if it is taught.** Every rule sentence in the prompt, its violation
+   message and its check read the same constants, and a fidelity test fails when they drift.
+
+*What rule 3 does NOT bound.* A relation attaches a TRUE fact of this product; it says nothing about
+the SUBJECT it hangs that fact on. "Cozy Nights Tee with a Classic Fit, Brushed Fleece Lining in 100%
+Ring-Spun Cotton" ships because the picker itself admits "brushed fleece lining" on that blank. That
+is the admission oracle's gap, and it is FILED, not the writer's.
+
 ## 3. ADVERSARY
 
 - **"The writer will hallucinate a spec."** Provenance makes that a rejection, not a hope: a token
