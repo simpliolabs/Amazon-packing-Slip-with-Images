@@ -77,7 +77,7 @@ import { loadBlankSpecRows, loadBlankAssignments, resolveFamilyBlank, familyBlan
 import { composeItemHighlightDetailed, ihAudienceOf, type ComposerResult } from '@/lib/fba/itemHighlightComposer'
 // WRITER SPEC PART 2 (2026-09-10, B4) — the writer is a LEAF (see its own header for why); this file
 // is a CONSUMER, never the other way, so the dependency graph stays acyclic.
-import { ihWriterMode, ihWriterMaxCallsBudget, runWriterForDesign, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
+import { ihWriterMode, ihWriterMaxCallsBudget, runWriterForDesign, IH_WRITER_RETRY_CAP, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
 /* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
  * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
  * highlights. Blank-grounded (resolveFamilyBlank), never title-derived: a title cannot vouch for
@@ -2760,23 +2760,32 @@ export async function produceItemHighlightsPerDesign(
   const mode = ihWriterMode()
   if (mode === 'off') return built
   const groupsByKey = new Map(input.groups.map((g) => [g.key, g]))
-  // RULING W8: a per-regen call budget, shared ACROSS every design in this family (distinct from
-  // `IH_WRITER_RETRY_CAP`'s per-design cap). Concurrency 3 means up to 3 designs' retry loops can be
-  // in flight together, so `callsUsed` is a soft/best-effort bound (a design already running is never
-  // aborted mid-loop) — the ruling's own words are "counted across designs", not "enforced
-  // atomically per call".
+  // RULING G8 (F7): an EXACT per-regen call budget, shared ACROSS every design in this family
+  // (distinct from `IH_WRITER_RETRY_CAP`'s per-design cap). FIX ROUND B3: the PRIOR "check after"
+  // shape (`if (callsUsed >= budget)`, incrementing only once a design's run had already finished)
+  // let up to `concurrency` designs' retry loops start together before any of them observed the
+  // exhausted budget — review B2 measured a soft overshoot of +6 (default budget 18) and +8 (budget
+  // 1). The fix RESERVES the full `IH_WRITER_RETRY_CAP` calls for a design BEFORE it starts, so the
+  // running total can never exceed `budget`: a design that cannot reserve its whole cap gets the
+  // composer result with 0 calls, never a partial start. The reservation check-and-increment below
+  // is synchronous (no `await` between them), and `mapWithConcurrency`'s worker loop calls each
+  // design's async function synchronously up to ITS first `await` before the next worker starts
+  // (`Array.from`'s mapper runs every `worker()` invocation synchronously) — so this plain counter
+  // needs no lock. Pinned: budget 18 with 10 always-invalid designs spends AT MOST 18 calls (exactly
+  // 6 designs × 3 retries, never the pre-fix 24).
   const budget = ihWriterMaxCallsBudget()
-  let callsUsed = 0
+  let callsReserved = 0
   const writerLogByIndex: (IhWriterLogRow | null)[] = new Array(built.perDesign.length).fill(null)
 
   const nextPerDesign = await mapWithConcurrency(built.perDesign, 3, async (d, i): Promise<PerDesignItemHighlight> => {
     if (!d.composed || !d.truthCtx) return d
-    if (callsUsed >= budget) {
+    if (callsReserved + IH_WRITER_RETRY_CAP > budget) {
       console.warn(JSON.stringify({ tag: 'IH_WRITER_BUDGET_EXHAUSTED', design: d.designKey, budget }))
       const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [`skip: per-regen call budget (${budget}) exhausted`], calls: 0 }
       writerLogByIndex[i] = row
       return d
     }
+    callsReserved += IH_WRITER_RETRY_CAP
     const g = groupsByKey.get(d.designKey)
     const titles = g?.titles ?? []
     const truthCtx = d.truthCtx
@@ -2793,7 +2802,6 @@ export async function produceItemHighlightsPerDesign(
       }),
       deps,
     })
-    callsUsed += outcome.calls
     const row: IhWriterLogRow = {
       design: d.designKey, composer: d.value, writer: outcome.accepted ? outcome.value : null,
       accepted: outcome.accepted, reasons: outcome.reasons, calls: outcome.calls,

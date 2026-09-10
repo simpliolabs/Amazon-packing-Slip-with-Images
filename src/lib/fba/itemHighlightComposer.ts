@@ -631,8 +631,9 @@ export function composeItemHighlightDetailed(
     line: scrubTrademarks(picked.join(', ')), stage: null,
     // B1 (writer spec Part 2): same admitted-set fields as every HELD exit above — a SHIPPED line
     // still exposes them, because the per-design writer wrapper re-judges the composer's own
-    // accepted line through the identical `judgeWriterLine` (idempotence, B4 point 3) and needs the
-    // same admitted set to do it.
+    // accepted line through the identical `judgeWriterArrangement` (idempotence, B4 point 3 / G10)
+    // and needs the same admitted set to do it. (`judgeWriterLine`, the free-text judge this comment
+    // used to name, was deleted with the free-text parser in fix round B2 — W1/§2b.)
     candidates: candidatePhrasesForWriter, specFacts: specFactsForWriter, brandPick, wearFact: factEligible ? OVERSIZED_FACT : null,
   }
 }

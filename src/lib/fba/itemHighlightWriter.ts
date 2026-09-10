@@ -35,11 +35,14 @@ import {
   type PhraseTruthCtx,
 } from '@/lib/fba/contentTruth'
 import { PERFORMANCE_CLAIM_RE } from '@/lib/fba/blankSpecs'
-import { ihFoldWord, IH_GARMENT_HEAD_FOLDED } from '@/lib/fba/productDetailAttrs'
+import { ihFoldWord, IH_GARMENT_HEAD_FOLDED, ihRepeatViolations, IH_MAX_WORD_REPEATS } from '@/lib/fba/productDetailAttrs'
 import { titleCasePhrase } from '@/lib/fba/titleBand'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { type ComposerResult } from '@/lib/fba/itemHighlightComposer'
 import { getLlmClientForRequest } from '@/lib/fba/llmGateway'
+import { GARMENT_HEAD_WORDS } from '@/lib/fba/garmentNoun'
+import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
+import { hasCelebrityName, scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
 
 // ─── B9: THE FLAG ──────────────────────────────────────────────────────────────────────────────
 
@@ -86,10 +89,19 @@ export interface AdmittedUnit {
   numberable: boolean
 }
 
-/** Does `text`'s LAST tokenized word fold to a garment head noun? Reuses the SAME derivation
- *  (`IH_GARMENT_HEAD_FOLDED`, itself derived from `GARMENT_HEAD_WORDS` via `ihFoldWord` —
- *  productDetailAttrs.ts) every other repeat-budget/garment-noun consumer in this codebase reads —
- *  never a second hand-written list. */
+/** Does `text`'s LAST tokenized word LITERALLY (case-insensitive) belong to `GARMENT_HEAD_WORDS`
+ *  (garmentNoun.ts)? FIX ROUND B3 (RULING G3, closing review B2's criterion-2 FAIL): the PRIOR
+ *  check folded the word first (`IH_GARMENT_HEAD_FOLDED`/`ihFoldWord`), and the fold strips a
+ *  trailing "s" — so "Tight" (identity unit "Hold On Tight") folds to "tight", which collides with
+ *  the PLURAL-only set member "tights" and was wrongly admitted as numberable, letting `{"number":
+ *  "plural"}` render "Hold On Tights" (a garment noun for a DIFFERENT product on a tee — X13). The
+ *  fold is the right tool for READABILITY's clause scan (rendered text, casing/inflection varies —
+ *  untouched below) but wrong for THIS gate: rule (a)/(d) must ask "is this word ITSELF one of the
+ *  literal spellings this codebase already recognizes as naming a garment", never "does some OTHER
+ *  spelling fold to the same stem". Literal membership is intentionally asymmetric (`GARMENT_HEAD_
+ *  WORDS` carries some singulars without their plural, and vice versa, per its own docstring) — that
+ *  asymmetry is accepted rather than patched with a second list, per the ruling's own words ("never
+ *  from ihFoldWord"). */
 function lastWordMatch(text: string): { word: string; index: number } | null {
   const matches = [...text.matchAll(WORD_RE)]
   if (!matches.length) return null
@@ -98,7 +110,7 @@ function lastWordMatch(text: string): { word: string; index: number } | null {
 }
 function isNumberable(text: string): boolean {
   const last = lastWordMatch(text)
-  return !!last && IH_GARMENT_HEAD_FOLDED.has(ihFoldWord(last.word))
+  return !!last && GARMENT_HEAD_WORDS.has(last.word.toLowerCase())
 }
 
 /** W1: builds the writer's admitted set FROM the composer's own additively-exposed fields
@@ -122,15 +134,36 @@ export function buildAdmittedUnits(
     units.push({ id: `u${n++}`, text, kind, numberable: isNumberable(text) })
   }
 
-  const identityTexts = [opts.designName, ...(opts.identityPhrases ?? [])]
-    .filter((s): s is string => !!s && !!s.trim())
+  // RULING G2 (§2c rule 5, F10): identity admission also passes the composer's OWN trademark and
+  // celebrity doors (`scrubTrademarks` — compare, never rewrite, same discipline as `itemHighlight-
+  // Composer.ts:433`'s candidate filter; `hasCelebrityName` — the pipeline's own pool-side predicate,
+  // itemHighlightComposer.ts's final-line scrub sits downstream of where identity used to never
+  // reach at all). EVERY dropped identity unit is logged (`IH_WRITER_IDENTITY_DROPPED`), not only the
+  // trademark/celebrity ones — this also closes F10's SILENT drop on the single-design path, where an
+  // untrue identity phrase used to disappear with no trace.
+  // RULING G2 (§2c rule 5): the design name as stored (no word-count floor — a one-word design
+  // name is still THE identity), plus vision phrases of 2+ WORDS only. X10 (phase-b2-review.md §4)
+  // reached its lie through exactly a single-word vision "seed" ("Girls") admitted as an identity
+  // unit — a single word is never enough context to be a safe, self-contained identity claim.
+  const designNameText = (opts.designName ?? '').trim() || null
+  const visionPhrases = (opts.identityPhrases ?? [])
     .map((s) => s.trim())
+    .filter((s) => s.length > 0 && s.split(/\s+/).length >= 2)
+  const identityTexts = [designNameText, ...visionPhrases].filter((s): s is string => !!s)
   const seenIdentity = new Set<string>()
   for (const text of identityTexts) {
     const key = text.toLowerCase()
     if (seenIdentity.has(key)) continue
     seenIdentity.add(key)
-    if (phraseTruthVerdict(text, opts.truthCtx).ok) push(text, 'identity')
+    const reason = !phraseTruthVerdict(text, opts.truthCtx).ok ? 'untrue'
+      : scrubTrademarks(text) !== text ? 'trademark'
+        : hasCelebrityName(text) ? 'celebrity'
+          : null
+    if (reason) {
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_IDENTITY_DROPPED', phrase: text, reason }))
+      continue
+    }
+    push(text, 'identity')
   }
   for (const text of composed.specFacts ?? []) push(text, 'spec-fact')
   if (composed.brandPick) push(composed.brandPick, 'brand')
@@ -151,27 +184,70 @@ export function buildAdmittedUnits(
   return units
 }
 
-// ─── W1: THE CLOSED GLUE + PUNCTUATION SETS ───────────────────────────────────────────────────────
-
-/** Function words that carry no product claim — ruling B2's literal starting list, unchanged by W1.
- *  An arrangement's `{"glue": "..."}` part must match one of these EXACTLY (case-sensitive — the
+// ─── FIX ROUND B3 (spec §2c, rulings G1/G9): THE CLOSED GRAMMAR's glue/punctuation ────────────────
+//
+// Review B2 proved that §2b's closed glue LIST was not enough: GLUE and ADJACENCY between admitted
+// units create relations no unit itself carries ("with Deep Pockets" invents a feature; "in Pink
+// Lemonade" invents a colour; "for Little Man"/"for Girls" invent an audience). The cure is not a
+// bigger blocklist of banned glue words — it is a smaller, CLASSIFIED glue set, so every join has a
+// grammatical ROLE the validator can check against the unit CLASSES on either side (below), instead
+// of trusting any word that merely carries "no product claim on its own".
+//
+// `for`/`of`/`to`/`your`/`on`/`from`/`that`/`this`/`the` are REMOVED outright (§2c rule 4) — every
+// one of them was the exact mechanism a review adversary used to invent a feature/colour/audience/
+// material relation (X5/X6/X7/X8/X9/X10/X11). What remains is classified into three grammatical
+// roles:
+//   LIST joins  (`,` `and` `&` `—` `|`)      — §2c rule 2: assert nothing between their items; the
+//                                               picker's own comma-list shape. May join ANY two units.
+//   RELATION joins (`with` `in`)              — §2c rule 3: may introduce ONLY a spec-class unit (a
+//                                               blank spec fact, the brand phrase, or the sanctioned
+//                                               wear fact) — so a relation can only ever attach a
+//                                               TRUE fact of this product.
+//   ARTICLE  (`a` `an`)                       — never a joiner on its own; legal only directly before
+//                                               a spec-class unit (G9), typically riding a relation
+//                                               join ("with a Classic Fit") or a list join ("and a
+//                                               Classic Fit" — the spec's own readability-ceiling
+//                                               example, §2c).
+/** An arrangement's `{"glue": "..."}` part must match one of these EXACTLY (case-sensitive — the
  *  model is instructed to use these exact lowercase spellings), or one of `GLUE_PUNCTUATION` below. */
-const GLUE_WORDS_RAW = ['a', 'an', 'the', 'and', 'with', 'in', 'for', 'of', 'to', 'your', 'on', 'from', 'that', 'this'] as const
+const GLUE_WORDS_RAW = ['a', 'an', 'and', 'with', 'in'] as const
 export const GLUE_WORDS: ReadonlySet<string> = new Set(GLUE_WORDS_RAW)
-/** The FOLDED form of the same list — used only by readability's clause scan (B6.1/W7) on the
- *  RENDERED line, where casing/inflection may vary; arrangement validation (W1 rule (c)) uses the
- *  exact-string `GLUE_WORDS` above instead. */
-const GLUE_WORDS_FOLDED: ReadonlySet<string> = new Set(GLUE_WORDS_RAW.map(ihFoldWord))
+/** FIX ROUND B3: readability's "does this clause read like a sentence" check (B6.1/W7,
+ *  `clauseIsKeywordShaped` below) needs a WIDER notion of "connecting word" than the arrangement's
+ *  now-narrower closed glue set. §2c removed `for`/`of`/`to`/`your`/`on`/`from`/`that`/`this`/`the`
+ *  from what a MODEL may INSERT BETWEEN two units — but a unit's OWN verbatim text may still
+ *  legitimately CONTAIN one of those words (a pool phrase like "Fall Sweatshirts for Women" renders
+ *  with "for" inside it, not as inter-unit glue). Deliberately its OWN list — not derived from
+ *  `GLUE_WORDS_RAW` — so narrowing the arrangement grammar never narrows what readability recognizes
+ *  as a connecting word in already-rendered text. This is the pre-§2c `GLUE_WORDS_RAW` list,
+ *  unchanged, kept for this one purpose only. */
+const READABILITY_CONNECTING_WORDS_RAW = ['a', 'an', 'the', 'and', 'with', 'in', 'for', 'of', 'to', 'your', 'on', 'from', 'that', 'this'] as const
+const GLUE_WORDS_FOLDED: ReadonlySet<string> = new Set(READABILITY_CONNECTING_WORDS_RAW.map(ihFoldWord))
 
-/** W1's closed punctuation set. Attaches to the word on its LEFT when rendered (no space before;
- *  the ordinary inter-token space still follows, via the render join). */
+/** The closed punctuation set (unchanged by §2c — these were never the recombination mechanism).
+ *  Rendering (G9) differs by member: `,` attaches to the word on its LEFT (no space before); `&`
+ *  `|` `—` are space-padded on BOTH sides (they read as list joins between whole phrases, not
+ *  trailing marks) — see `PUNCTUATION_ATTACH_LEFT`/`renderArrangement` below. */
 export const GLUE_PUNCTUATION: ReadonlySet<string> = new Set([',', '—', '|', '&'])
+/** The one punctuation mark that attaches LEFT when rendered; every other member of
+ *  `GLUE_PUNCTUATION` is space-padded on both sides (G9). */
+const PUNCTUATION_ATTACH_LEFT: ReadonlySet<string> = new Set([','])
 
-/** NEVER glue (ruling B2, verbatim, unchanged by W1): negations, quantifiers, purity words, gendered
- *  pronouns. Not consumed at runtime (they simply are never added to `GLUE_WORDS` above) — kept as
- *  data so a test can assert `GLUE_WORDS` never grows to include one of these AND that none of them
- *  (nor any glue word) matches an exported truth regex (the build-time collision guard, kept from B2
- *  per ruling W1: "Keep the glue-vs-lexicon disjointness test."). */
+/** §2c's classification of each glue role, for the grammar walk in `validateArrangement` below. */
+const LIST_GLUE: ReadonlySet<string> = new Set(['and', ',', '—', '|', '&'])
+const RELATION_GLUE: ReadonlySet<string> = new Set(['with', 'in'])
+const ARTICLE_GLUE: ReadonlySet<string> = new Set(['a', 'an'])
+
+/** §2c's unit classes. `SPEC` unions the three "true fact of this product" kinds a relation join
+ *  may introduce (a blank spec fact, the brand phrase, the sanctioned wear fact) — `GARMENT` is
+ *  `garment-head` alone (rule 1's "garment noun"); every other kind (`identity`, `pool`) is neither. */
+const SPEC_KINDS: ReadonlySet<AdmittedUnitKind> = new Set(['spec-fact', 'brand', 'wear-fact'])
+
+/** NEVER glue (ruling B2, verbatim, unchanged by W1/§2c): negations, quantifiers, purity words,
+ *  gendered pronouns. Not consumed at runtime (they simply are never added to `GLUE_WORDS` above) —
+ *  kept as data so a test can assert `GLUE_WORDS` never grows to include one of these AND that none
+ *  of them (nor any glue word) matches an exported truth regex (the build-time collision guard, kept
+ *  from B2 per ruling W1: "Keep the glue-vs-lexicon disjointness test."). */
 export const NEVER_GLUE_WORDS: readonly string[] = ['not', 'no', 'without', 'non', 'all', 'only', 'just', 'pure', 'entirely', 'nothing', 'her', 'his', 'him', 'she', 'he']
 
 const WORD_RE = /[A-Za-z0-9]+(?:['’][A-Za-z]+)*/g
@@ -181,8 +257,9 @@ const WORD_RE = /[A-Za-z0-9]+(?:['’][A-Za-z]+)*/g
 /** Explicit singular/plural pairs for the closed `GARMENT_HEAD_WORDS` vocabulary (garmentNoun.ts) —
  *  hand-paired rather than a generic English inflector, because a generic rule mis-pluralizes
  *  irregular members of this exact list (e.g. "dress" → "dresss"). Adding a WORD here never adds new
- *  VOCABULARY (the fold-derivation `IH_GARMENT_HEAD_FOLDED` already gates which units are numberable
- *  at all) — it only teaches the renderer the other half of a pair already in that closed list. */
+ *  VOCABULARY — `isNumberable`'s literal `GARMENT_HEAD_WORDS` membership check (RULING G3) already
+ *  gates which units are numberable at all; this table only teaches the renderer the other half of
+ *  a pair for a word already admitted through that gate. */
 const GARMENT_NUMBER_PAIRS: readonly [string, string][] = [
   ['shirt', 'shirts'], ['t-shirt', 't-shirts'], ['tshirt', 'tshirts'], ['tee', 'tees'],
   ['hat', 'hats'], ['cap', 'caps'], ['snapback', 'snapbacks'], ['beanie', 'beanies'], ['visor', 'visors'],
@@ -223,12 +300,106 @@ export interface ArrangementUnitPart { unit: string; number?: 'singular' | 'plur
 export interface ArrangementGluePart { glue: string }
 export type ArrangementPart = ArrangementUnitPart | ArrangementGluePart
 
+/** Human-readable class name for a violation message ("pool unit" / "identity unit" / ...). */
+function unitClassName(kind: AdmittedUnitKind): string {
+  return kind === 'spec-fact' ? 'spec-fact' : kind === 'garment-head' ? 'garment-head' : kind
+}
+
+/** §2c's glue-role classifier over an ALREADY-VALIDATED part (unit / list-join / relation-join /
+ *  article) — used only by the grammar walk below, never by the structural checks above it. */
+type GlueRole = 'unit' | 'list' | 'relation' | 'article'
+function glueRole(part: ArrangementPart): GlueRole {
+  if ('unit' in part) return 'unit'
+  if (LIST_GLUE.has(part.glue)) return 'list'
+  if (RELATION_GLUE.has(part.glue)) return 'relation'
+  return 'article' // the only remaining closed-glue words are 'a'/'an' (ARTICLE_GLUE)
+}
+
+/**
+ * FIX ROUND B3 (RULING G1, spec §2c rules 1-4) — the CLOSED ARRANGEMENT GRAMMAR, walked over an
+ * already unit/glue-validated `parts` sequence. Two units may sit next to each other in exactly two
+ * shapes:
+ *   ABUTMENT (no glue between them) — rule 1: legal ONLY when the RIGHT-hand unit is `garment-head`
+ *     ("<design name> Sweatshirt", "<pool phrase> Tee"). Any other abutment (a pool/identity/spec
+ *     unit on the right) is a NAMED violation — this alone kills X1/X2/X3/X4/X13's "abut a bare
+ *     identity/pool phrase onto another" mechanism.
+ *   ONE OR TWO glue tokens between them:
+ *     - a single LIST join (`,` `and` `&` `—` `|`) — rule 2: legal between ANY two units.
+ *     - a single RELATION join (`with`/`in`) — rule 3: legal ONLY when the RIGHT-hand unit is
+ *       SPEC-class (`spec-fact`/`brand`/`wear-fact`). This is what kills X5 ("with Deep Pockets",
+ *       a pool unit), X7 ("in Pink Lemonade", an identity unit), and would kill X8/X9/X10/X11's
+ *       "for"/"from" relations even before this rule runs, because `for`/`from` are no longer in
+ *       the closed glue set at all (rule 4 — see the `GLUE_WORDS_RAW` block comment).
+ *     - a RELATION join immediately followed by an ARTICLE (`a`/`an`) — the optional article rule
+ *       3 names — legal under the SAME right-hand-unit-is-SPEC condition; likewise a LIST join
+ *       immediately followed by an article (the spec's own readability-ceiling example, "and a
+ *       Classic Fit") — G9's restatement, "an article may appear only immediately before a spec
+ *       unit", is the general form of both.
+ *     - anything else (three or more glue tokens in a row; an article NOT immediately followed by a
+ *       unit; a bare article with no preceding join; two consecutive list joins) is a NAMED
+ *       violation — rule 4's "no other glue exists between units" plus G9's hygiene rules.
+ * No glue or punctuation may open or close the line (rule 4 / G9).
+ */
+function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<string, AdmittedUnit>): string | null {
+  if (glueRole(parts[0]) !== 'unit') return 'no glue or punctuation may open the line'
+  if (glueRole(parts[parts.length - 1]) !== 'unit') return 'no glue or punctuation may close the line'
+  const unitAt = (p: ArrangementPart): AdmittedUnit => byId.get((p as ArrangementUnitPart).unit)!
+  let i = 0
+  while (i < parts.length) {
+    if (glueRole(parts[i]) === 'unit') { i++; continue }
+    let j = i
+    while (j < parts.length && glueRole(parts[j]) !== 'unit') j++
+    // `i > 0` and `j < parts.length` are guaranteed by the start/end checks above.
+    const left = unitAt(parts[i - 1])
+    const right = unitAt(parts[j])
+    const run = parts.slice(i, j) as ArrangementGluePart[]
+    const roles = run.map(glueRole)
+    if (run.length > 2) {
+      return `too many glue tokens in a row ('${run.map((g) => g.glue).join(' ')}') between '${left.text}' and '${right.text}'`
+    }
+    if (run.length === 2) {
+      if (roles[1] !== 'article' || roles[0] === 'article') {
+        return `'${run[0].glue} ${run[1].glue}' is not a legal join between '${left.text}' and '${right.text}' — only a join followed by 'a'/'an' is`
+      }
+      if (!SPEC_KINDS.has(right.kind)) {
+        return `article '${run[1].glue}' must introduce a spec fact; '${right.text}' is a ${unitClassName(right.kind)} unit`
+      }
+      i = j
+      continue
+    }
+    // run.length === 1
+    const role = roles[0]
+    if (role === 'relation' && !SPEC_KINDS.has(right.kind)) {
+      return `relation '${run[0].glue}' must introduce a spec fact; '${right.text}' is a ${unitClassName(right.kind)} unit`
+    }
+    if (role === 'article' && !SPEC_KINDS.has(right.kind)) {
+      return `article '${run[0].glue}' must introduce a spec fact; '${right.text}' is a ${unitClassName(right.kind)} unit`
+    }
+    // list join: legal between any two units (rule 2).
+    i = j
+  }
+  // Abutment pass (rule 1): re-walk for any adjacent unit/unit pair with no glue in between.
+  for (let k = 0; k < parts.length - 1; k++) {
+    if (glueRole(parts[k]) !== 'unit' || glueRole(parts[k + 1]) !== 'unit') continue
+    const left = unitAt(parts[k])
+    const right = unitAt(parts[k + 1])
+    if (right.kind !== 'garment-head') {
+      return `'${left.text}' and '${right.text}' abut with no join; only a garment noun may follow another unit directly`
+    }
+  }
+  return null
+}
+
 /**
  * W1 validation (pure, exported), rejecting with a NAMED violation for the retry:
  *   (a) a unit ID that does not exist;
  *   (b) a unit used twice;
  *   (c) a glue token outside the closed GLUE set or the closed punctuation set;
- *   (d) `number` on a unit whose LAST word is not a garment head noun.
+ *   (d) `number` on a unit whose LAST word is not a garment head noun;
+ *   (e) [RULING G9] an unknown key on a part;
+ *   (f) [RULING G1, spec §2c] the closed arrangement GRAMMAR (`validateGrammar` above) — abutment,
+ *       list joins and relation joins must each attach a legal unit class;
+ *   (g) [RULING G4] the composer's mandatory brand unit, when one exists in `units`, must appear.
  * Anything else malformed (not `{"parts":[...]}`, an empty array, a part that is neither
  * `{"unit":...}` nor `{"glue":...}`) is its own named violation.
  */
@@ -248,6 +419,9 @@ export function validateArrangement(
     if (!item || typeof item !== 'object') return { ok: false, violation: `malformed part: ${JSON.stringify(item)}` }
     const p = item as Record<string, unknown>
     if (typeof p.unit === 'string') {
+      // RULING G9 (F8): an unknown key on a unit part is a NAMED violation, never silently dropped.
+      const extra = Object.keys(p).filter((k) => k !== 'unit' && k !== 'number')
+      if (extra.length) return { ok: false, violation: `unit part carries unknown key(s): ${extra.join(', ')}` }
       const unit = byId.get(p.unit)
       if (!unit) return { ok: false, violation: `unit id '${p.unit}' does not exist` }
       if (seen.has(p.unit)) return { ok: false, violation: `unit '${p.unit}' used more than once` }
@@ -264,6 +438,9 @@ export function validateArrangement(
       }
       out.push(number ? { unit: p.unit, number } : { unit: p.unit })
     } else if (typeof p.glue === 'string') {
+      // RULING G9 (F8): same unknown-key discipline for a glue part.
+      const extra = Object.keys(p).filter((k) => k !== 'glue')
+      if (extra.length) return { ok: false, violation: `glue part carries unknown key(s): ${extra.join(', ')}` }
       if (!GLUE_WORDS.has(p.glue) && !GLUE_PUNCTUATION.has(p.glue)) {
         return { ok: false, violation: `glue token '${p.glue}' is outside the closed glue/punctuation set` }
       }
@@ -272,12 +449,24 @@ export function validateArrangement(
       return { ok: false, violation: `part is neither {"unit":...} nor {"glue":...}: ${JSON.stringify(p)}` }
     }
   }
+  const grammarViolation = validateGrammar(out, byId)
+  if (grammarViolation) return { ok: false, violation: grammarViolation }
+  // RULING G4 (F3): when the composer's brand unit exists in the admitted set, the arrangement MUST
+  // carry it — an arrangement that omits it ships unbranded even though the composer's own line
+  // would have carried the brand waterfall (X17).
+  const brandUnit = units.find((u) => u.kind === 'brand')
+  if (brandUnit && !seen.has(brandUnit.id)) {
+    return { ok: false, violation: `missing required brand unit '${brandUnit.text}' — the composer's brand is mandatory for this family` }
+  }
   return { ok: true, parts: out }
 }
 
 /** Renders a VALIDATED arrangement. Units appear verbatim (stored words, order, numbers and
- *  punctuation), glue joins with single spaces, and punctuation attaches to the word on its left
- *  (W1). Pure. Assumes `parts` already passed `validateArrangement` against the SAME `units`. */
+ *  punctuation). Glue WORDS join with single spaces. Punctuation (RULING G9): `,` attaches to the
+ *  word on its LEFT (no space before); `&`/`|`/`—` are space-padded on BOTH sides instead — they
+ *  read as a join BETWEEN two whole phrases, not a trailing mark on the first one ("Tee & Vintage
+ *  Beach Vibes", not "Tee& Vintage Beach Vibes"). Pure. Assumes `parts` already passed
+ *  `validateArrangement` against the SAME `units`. */
 export function renderArrangement(parts: readonly ArrangementPart[], units: readonly AdmittedUnit[]): string {
   const byId = new Map(units.map((u) => [u.id, u] as const))
   const out: string[] = []
@@ -290,7 +479,7 @@ export function renderArrangement(parts: readonly ArrangementPart[], units: read
     } else {
       token = p.glue
     }
-    if (GLUE_PUNCTUATION.has(token) && out.length > 0) {
+    if (PUNCTUATION_ATTACH_LEFT.has(token) && out.length > 0) {
       out[out.length - 1] = out[out.length - 1] + token
     } else {
       out.push(token)
@@ -368,8 +557,37 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
   if (!v.ok) return { ok: false, violations: [`arrangement: ${v.violation}`] }
   const line = renderArrangement(v.parts, units).trim()
   if (!line) return { ok: false, violations: ['arrangement: rendered to an empty line'] }
+  // RULING G5 (F4): DEFENSIVE fail-closed, in front of the tail. Every one of these doors is
+  // already an admission-time gate for identity units (G2, `buildAdmittedUnits`) — this is defense
+  // in depth for anything that reaches the RENDERED line by another route (a pool/spec unit the
+  // composer's own admission missed, or a combination effect). COMPARE, never rewrite (X19/X20):
+  // a line `scrubTrademarks`/`scrubCelebrityNames` would change is a named rejection, not a silent
+  // substitution — a silent substitution is exactly the push-boundary amputation review I2 found
+  // ("World Cup Champs..." -> "World Futbol Cup Champs...", changing the CLAIM, not removing it).
+  if (scrubTrademarks(line) !== line) {
+    return { ok: false, violations: ['trademark: rendered line carries a protected mark'] }
+  }
+  if (scrubCelebrityNames(line, 'ih-writer') !== line || hasCelebrityName(line)) {
+    return { ok: false, violations: ['celebrity: rendered line carries a celebrity name'] }
+  }
+  // RULING G6 (F5): compute the length/repeat violations with the SAME functions the tail uses
+  // (imported, never copied) BEFORE calling the tail, so a retry that fails for one of these two
+  // reasons gets the PRECISE cause ("'soft' used 3 times") instead of the tail's coarser bucket
+  // (I3: a repeat-driven drop that lands under the floor otherwise comes back as the uninformative
+  // "tail: refused (under-floor)", which taught the model nothing to fix). This NEVER short-circuits
+  // the tail call itself (the tail's own truth/content/floor gates still run and their real reason
+  // still flows through, per RULING W4) — it only sharpens the message when the tail's failure is
+  // explained by one of these two pre-computed facts.
+  const repeatWords = ihRepeatViolations(line)
+  const overMax = line.length > CONTENT_CONTRACT.itemHighlights.max
   const tail = ctx.runTail(line)
   if (!tail.value) {
+    if (repeatWords.length) {
+      return { ok: false, violations: [`repeat: '${repeatWords[0]}' used more than ${IH_MAX_WORD_REPEATS} times`] }
+    }
+    if (overMax) {
+      return { ok: false, violations: [`rendered ${line.length} chars, max ${CONTENT_CONTRACT.itemHighlights.max}`] }
+    }
     // RULING W4: surface the REAL reason (e.g. "material-lie"), never the coarser hold bucket, when
     // the tail's own gates named one.
     return { ok: false, violations: [`tail: refused (${tail.reason ?? tail.hold ?? 'refused'})`] }
@@ -407,15 +625,24 @@ function unitsByKind(units: readonly AdmittedUnit[]): Record<AdmittedUnitKind, {
  *  the render step, so there is nothing for a provenance parser to be fooled by any more. */
 function buildWriterPrompt(units: readonly AdmittedUnit[], designName: string | null, priorViolations: readonly string[]): { system: string; user: string } {
   const grouped = unitsByKind(units)
+  const hasBrand = units.some((u) => u.kind === 'brand')
+  // RULING G6 (F5): the prompt states the GRAMMAR itself (spec §2c rules 1-6), the length band, the
+  // repeat rule and the brand requirement in plain words — not only in the validator's after-the-
+  // fact rejections. I3 (phase-b2-review.md) measured 18/18, then 12/12, calls wasted on a repeat-
+  // driven drop the model never saw coming because none of this was ever said up front.
   const system = [
     'You arrange ONE Amazon Item Highlight line for a t-shirt/apparel listing out of ADMITTED UNITS — you do NOT write free text.',
     'Return JSON: {"parts": [...]} — an ORDERED list where each element is EITHER {"unit": "<id>"} (optionally {"unit": "<id>", "number": "singular"|"plural"}) OR {"glue": "<token>"}.',
     `Every "unit" id must be one of the ids given to you below. Each unit may be used AT MOST ONCE. Units render VERBATIM — their own exact words, order, numbers and punctuation. The ONLY change you may request is "number" (singular/plural), and ONLY on a unit whose id is listed as numberable below.`,
     `A "glue" token must be exactly one of these words: ${GLUE_WORDS_RAW.join(', ')} — or one of these punctuation marks: , — | &`,
     'Do not invent a unit id, a glue token, or any text — every word in the final line comes from a unit you chose.',
+    'THE GRAMMAR (the only legal ways two units may sit next to each other): (1) two units may touch with NO glue between them ONLY when the RIGHT-hand one is a garment-head unit (e.g. "<design name> Sweatshirt", "<pool phrase> Tee") — never any other pairing. (2) "," "and" "&" "—" "|" are LIST joins and may join ANY two units — they assert nothing between the items, exactly like a plain list. (3) "with" and "in" are RELATION joins and may ONLY introduce a spec-fact, brand, or wear-fact unit — never a pool or identity unit (a relation must only ever attach a TRUE fact of this product; "with Deep Pockets" or "in Pink Lemonade" invent a feature/colour that is not a unit, which is exactly what this rule forbids). "a"/"an" may appear directly before a spec-fact/brand/wear-fact unit only (e.g. "with a Classic Fit", "and a Classic Fit") — never before a pool or identity unit, and never standing alone. (4) No other glue word exists — do not use "for", "of", "to", "your", "on", "from", "that", "this" or "the"; they are not in the closed set above. No glue or punctuation may open or close the line, and no two glue tokens may sit next to each other except exactly one join immediately followed by "a"/"an".',
+    `The rendered line must be ${CONTENT_CONTRACT.itemHighlights.min}-${CONTENT_CONTRACT.itemHighlights.max} characters.`,
+    'Repeat rule: each significant word may appear at most once, EXCEPT a garment head noun (shirt/tee/sweatshirt/hoodie/etc.), which may appear up to twice.',
+    hasBrand ? 'This family REQUIRES its brand unit (listed below, kind "brand") to appear somewhere in your arrangement — an arrangement that omits it will be rejected.' : '',
     'The rendered line must read as 2+ human phrases joined with a connecting word (not a bare comma-separated keyword dump), and if the design has an identity unit, the line must name or evoke it.',
     'If you cannot honestly build a good line from only the admitted units, still return your best attempt as {"parts": [...]} — do not apologize or explain, only the JSON.',
-  ].join(' ')
+  ].filter(Boolean).join(' ')
   const numberableIds = units.filter((u) => u.numberable).map((u) => u.id)
   const user = [
     `DESIGN NAME (reproduce spelling EXACTLY, including any typo): ${JSON.stringify(designName ?? '')}`,

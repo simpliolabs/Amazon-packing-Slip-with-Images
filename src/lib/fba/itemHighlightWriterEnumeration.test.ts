@@ -167,6 +167,209 @@ export function findSyncBuilderBypassImports(relPath: string, source: string): s
   return violations
 }
 
+// ─── FIX ROUND B3 (RULING G7, closing review B2's I4 residual gap): NAMESPACE imports, RE-EXPORTS,
+// and DYNAMIC imports of a restricted name ──────────────────────────────────────────────────────
+//
+// Review B2 §7 measured the import-scanner above (W6) still goes GREEN on two shapes that reach a
+// restricted name without ever writing its bare identifier as an `import { ... }` specifier:
+//   lower-namespace: `import * as pipeline from '.../listingPipeline'` then `pipeline.runIhTail(...)`
+//     — the restricted name is a PROPERTY access, never an import specifier.
+//   barrel:          `export { buildItemHighlights as buildIh } from '.../listingPipeline'` in a
+//     helper file, then a THIRD file `import { buildIh } from './helper'` — the restricted name is
+//     written once, at the RE-EXPORT site, and every downstream import spells only the alias.
+// Tightening the W6 scanner rule-by-rule for each new shape is the treadmill this round's own spec
+// amendment (§2c) exists to end for the GRAMMAR; the same discipline applies here — read the
+// STRUCTURE (a namespace import's alias + property access; an `export ... from` clause's own
+// specifier list) instead of chasing spellings.
+
+/** True/module-tag when `spec` (an import/export specifier string) targets one of the two
+ *  restricted-name HOME modules, by path substring — deliberately loose (matches any relative
+ *  depth: `./listingPipeline`, `../../lib/fba/listingPipeline`, `@/lib/fba/listingPipeline`) because
+ *  the violation is in what the specifier NAMES, not in how many `../` segments reach it. */
+function specifierTargetsRestrictedHome(spec: string): 'pipeline' | 'composer' | null {
+  if (/listingPipeline/.test(spec)) return 'pipeline'
+  if (/itemHighlightComposer/.test(spec)) return 'composer'
+  return null
+}
+
+/**
+ * Scans for `import * as <alias> from '<spec>'` where `<spec>` targets a restricted home module,
+ * followed anywhere in the SAME file by a property-access CALL `<alias>.<restrictedName>(`. Exempt
+ * exactly like `findSyncBuilderBypassImports`: the name's own home file, and `listingPipeline.ts`
+ * (the sanctioned consumer of the composer's two names).
+ */
+export function findNamespaceBypassCalls(relPath: string, source: string): string[] {
+  const stripped = stripLineComments(source)
+  const violations: string[] = []
+  const NS_RE = /import\s+\*\s+as\s+([A-Za-z0-9_]+)\s+from\s*['"]([^'"]+)['"]/g
+  let m: RegExpExecArray | null
+  while ((m = NS_RE.exec(stripped))) {
+    const alias = m[1]
+    if (!specifierTargetsRestrictedHome(m[2])) continue
+    for (const name of RESTRICTED_IMPORT_NAMES) {
+      const home = HOME_FILE_OF[name]
+      if (relPath === home || relPath === LISTING_PIPELINE_REL) continue
+      if (new RegExp(`\\b${alias}\\.${name}\\(`).test(stripped)) {
+        violations.push(`${relPath}: namespace-imports '${m[2]}' as ${alias} and calls .${name}(...) — outside its home module (${home}); route through the produce* wrapper instead`)
+      }
+    }
+  }
+  return violations
+}
+
+/**
+ * Scans for `export * from '<spec>'` (leaks EVERY name, restricted ones included) and
+ * `export { <name>[ as <alias>] } from '<spec>'` where `<name>` is restricted — the barrel shape
+ * (I4): the restricted identifier is written once, here, even though every downstream file that
+ * imports the alias never spells it again.
+ */
+export function findReExportBypass(relPath: string, source: string): string[] {
+  const stripped = stripLineComments(source)
+  const violations: string[] = []
+  const STAR_RE = /export\s*\*\s*from\s*['"]([^'"]+)['"]/g
+  let m: RegExpExecArray | null
+  while ((m = STAR_RE.exec(stripped))) {
+    if (specifierTargetsRestrictedHome(m[1])) {
+      violations.push(`${relPath}: 'export * from ${JSON.stringify(m[1])}' re-exports EVERY name, including its restricted ones`)
+    }
+  }
+  const NAMED_RE = /export\s+(type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g
+  while ((m = NAMED_RE.exec(stripped))) {
+    if (m[1]) continue // `export type { ... } from` — no runtime binding
+    const [, , specs, spec] = m
+    for (const rawSpec of specs.split(',')) {
+      const s = rawSpec.trim()
+      if (!s || /^type\s/.test(s)) continue
+      const original = s.split(/\s+as\s+/)[0].trim()
+      if (!(RESTRICTED_IMPORT_NAMES as readonly string[]).includes(original)) continue
+      const home = HOME_FILE_OF[original]
+      if (relPath === home || relPath === LISTING_PIPELINE_REL) continue
+      const alias = s.includes(' as ') ? s.split(/\s+as\s+/)[1].trim() : null
+      violations.push(`${relPath}: re-exports '${original}'${alias ? ` (as ${alias})` : ''} from '${spec}' — outside its home module (${home})`)
+    }
+  }
+  return violations
+}
+
+/**
+ * Scans for a dynamic `import('<spec>')` that reaches a RESTRICTED name — either destructured
+ * directly (`const { buildItemHighlights } = await import('...')`), bound to an identifier that is
+ * later property-accessed (`const pipeline = await import('...'); pipeline.runIhTail(...)`), or
+ * called inline (`(await import('...')).runIhTail(...)`). Deliberately NARROWER than "any dynamic
+ * import of the module" — this codebase already dynamically imports `listingPipeline.ts` for an
+ * UNRESTRICTED export (`APPAREL_PRODUCT_TYPES`, syncKeywordIntelligence.ts), which is not a bypass;
+ * the violation is reaching a restricted NAME, exactly like the namespace/re-export scanners above,
+ * not merely dynamically importing the module that happens to contain one. */
+export function findDynamicImportBypass(relPath: string, source: string): string[] {
+  const stripped = stripLineComments(source)
+  const violations: string[] = []
+  const isRestrictedHere = (spec: string): { home: string } | null => {
+    const target = specifierTargetsRestrictedHome(spec)
+    if (!target) return null
+    const home = target === 'pipeline' ? LISTING_PIPELINE_REL : ITEM_HIGHLIGHT_COMPOSER_REL
+    if (relPath === home || relPath === LISTING_PIPELINE_REL) return null
+    return { home }
+  }
+  const DECL_RE = /(?:const|let|var)\s+(\{[^}]*\}|[A-Za-z0-9_]+)\s*=\s*await\s+import\(\s*['"]([^'"]+)['"]\s*\)/g
+  let m: RegExpExecArray | null
+  while ((m = DECL_RE.exec(stripped))) {
+    const [, binding, spec] = m
+    const hit = isRestrictedHere(spec)
+    if (!hit) continue
+    if (binding.startsWith('{')) {
+      for (const rawSpec of binding.slice(1, -1).split(',')) {
+        const original = rawSpec.trim().split(':')[0].trim()
+        if (original && (RESTRICTED_IMPORT_NAMES as readonly string[]).includes(original)) {
+          violations.push(`${relPath}: dynamic import('${spec}') destructures restricted name '${original}' — outside its home module (${hit.home})`)
+        }
+      }
+    } else {
+      for (const name of RESTRICTED_IMPORT_NAMES) {
+        if (new RegExp(`\\b${binding}\\.${name}\\(`).test(stripped)) {
+          violations.push(`${relPath}: dynamic import('${spec}') as ${binding}, calling .${name}(...) — outside its home module (${hit.home})`)
+        }
+      }
+    }
+  }
+  const INLINE_RE = /\(\s*await\s+import\(\s*['"]([^'"]+)['"]\s*\)\s*\)\s*\.\s*([A-Za-z0-9_]+)\s*\(/g
+  while ((m = INLINE_RE.exec(stripped))) {
+    const [, spec, name] = m
+    if (!(RESTRICTED_IMPORT_NAMES as readonly string[]).includes(name)) continue
+    const hit = isRestrictedHere(spec)
+    if (!hit) continue
+    violations.push(`${relPath}: dynamic import('${spec}') inline-calls .${name}(...) — outside its home module (${hit.home})`)
+  }
+  return violations
+}
+
+describe('Item Highlights writer (B4/G7): namespace imports, re-exports, and dynamic imports of a restricted name', () => {
+  it('sensitivity (G7 shape 1, "lower-namespace") — a namespace import combined with a property-access call is flagged on BOTH', () => {
+    const fakeFile = 'src/app/api/fba/some-namespace-route/route.ts'
+    const fakeSource = `
+      import * as composer from '@/lib/fba/itemHighlightComposer'
+      import * as pipeline from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        const res = composer.composeItemHighlightDetailed([], [], {} as never)
+        return pipeline.runIhTail(res.line ?? '', {} as never)
+      }
+    `
+    const violations = findNamespaceBypassCalls(fakeFile, fakeSource)
+    expect(violations).toEqual([
+      expect.stringContaining("calls .composeItemHighlightDetailed(...)"),
+      expect.stringContaining("calls .runIhTail(...)"),
+    ])
+  })
+
+  it('sensitivity (G7 shape 2, "barrel") — a re-export of a restricted name under an alias is flagged at the RE-EXPORT site', () => {
+    const fakeFile = 'src/lib/fba/someHelperBarrel.ts'
+    const fakeSource = `export { buildItemHighlights as buildIh } from '@/lib/fba/listingPipeline'`
+    expect(findReExportBypass(fakeFile, fakeSource)).toEqual([
+      expect.stringContaining("re-exports 'buildItemHighlights' (as buildIh)"),
+    ])
+  })
+
+  it('sensitivity — "export * from" the pipeline module is flagged outright', () => {
+    const fakeFile = 'src/lib/fba/someHelperBarrel.ts'
+    expect(findReExportBypass(fakeFile, `export * from '@/lib/fba/listingPipeline'`)).toEqual([
+      expect.stringContaining("re-exports EVERY name"),
+    ])
+  })
+
+  it('sensitivity — a dynamic import of the composer module is flagged', () => {
+    const fakeFile = 'src/app/api/fba/some-dynamic-route/route.ts'
+    const fakeSource = `
+      export async function POST() {
+        const composer = await import('@/lib/fba/itemHighlightComposer')
+        return composer.composeItemHighlight([], {} as never)
+      }
+    `
+    expect(findDynamicImportBypass(fakeFile, fakeSource)).toEqual([
+      expect.stringContaining("dynamic import('@/lib/fba/itemHighlightComposer')"),
+    ])
+  })
+
+  it('a `type`-only re-export of a restricted name carries no runtime binding and is NOT flagged', () => {
+    const fakeSource = `export type { buildItemHighlightsPerDesign } from '@/lib/fba/listingPipeline'`
+    expect(findReExportBypass('src/lib/fba/someTypesOnly.ts', fakeSource)).toEqual([])
+  })
+
+  it('the REAL tree: zero production file namespace-imports+calls, re-exports, or dynamic-imports a restricted name outside its home module', () => {
+    const nsViolations: string[] = []
+    const reExportViolations: string[] = []
+    const dynViolations: string[] = []
+    for (const abs of listTsFiles(SRC_ROOT)) {
+      const rel = path.relative(process.cwd(), abs).replace(/\\/g, '/')
+      const source = fs.readFileSync(abs, 'utf8')
+      nsViolations.push(...findNamespaceBypassCalls(rel, source))
+      reExportViolations.push(...findReExportBypass(rel, source))
+      dynViolations.push(...findDynamicImportBypass(rel, source))
+    }
+    expect(nsViolations).toEqual([])
+    expect(reExportViolations).toEqual([])
+    expect(dynViolations).toEqual([])
+  })
+})
+
 describe('Item Highlights writer (B4/W6): sync builders/composer/tail are called ONLY through the async wrappers', () => {
   it('sensitivity (W6/I4 shape 1) — an ALIASED import of buildItemHighlights in a new route is flagged even though the call site never spells the real name', () => {
     const fakeFile = 'src/app/api/fba/some-aliased-route/route.ts'

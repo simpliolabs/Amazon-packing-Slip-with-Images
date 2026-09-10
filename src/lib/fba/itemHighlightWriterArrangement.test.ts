@@ -137,11 +137,60 @@ describe('W1: validateArrangement', () => {
     if (!v.ok) expect(v.violation).toMatch(/outside the closed/)
   })
 
-  it('(c) accepts every closed glue WORD and every closed PUNCTUATION mark', () => {
+  it('(c)/(f) accepts every closed glue token in a grammatically LEGAL position (spec §2c) — a relation/article must introduce a spec-fact unit, a list join may introduce any unit', () => {
+    const specUnit = units.find((u) => u.kind === 'spec-fact')!.id // 'Classic Fit'
+    const poolUnit = units.find((u) => u.kind === 'pool')!.id // 'Cozy Graphic Sweatshirt' — not u0
     for (const g of [...GLUE_WORDS, ...GLUE_PUNCTUATION]) {
-      const v = validateArrangement({ parts: [{ unit: u0 }, { glue: g }] }, units)
-      expect(v.ok, `glue "${g}" should validate`).toBe(true)
+      const rightUnit = g === 'with' || g === 'in' || g === 'a' || g === 'an' ? specUnit : poolUnit
+      const v = validateArrangement({ parts: [{ unit: u0 }, { glue: g }, { unit: rightUnit }] }, units)
+      expect(v.ok, `glue "${g}" should validate: ${!v.ok ? v.violation : ''}`).toBe(true)
     }
+  })
+
+  it('(f) a RELATION join ("with"/"in") to a non-spec unit is a named grammar violation (spec §2c rule 3)', () => {
+    const poolUnit = units.find((u) => u.kind === 'pool')!.id
+    const v = validateArrangement({ parts: [{ unit: u0 }, { glue: 'with' }, { unit: poolUnit }] }, units)
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.violation).toMatch(/must introduce a spec fact/)
+  })
+
+  it('(f) two units ABUTTING with no glue is legal ONLY when the right-hand unit is a garment-head unit (spec §2c rule 1)', () => {
+    const garmentHead = units.find((u) => u.kind === 'garment-head')!.id
+    const poolUnit = units.find((u) => u.kind === 'pool')!.id
+    expect(validateArrangement({ parts: [{ unit: u0 }, { unit: garmentHead }] }, units).ok).toBe(true)
+    const v = validateArrangement({ parts: [{ unit: u0 }, { unit: poolUnit }] }, units)
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.violation).toMatch(/abut with no join/)
+  })
+
+  it('(f) no glue or punctuation may open or close the line (spec §2c rule 4 / RULING G9)', () => {
+    const poolUnit = units.find((u) => u.kind === 'pool')!.id
+    expect(validateArrangement({ parts: [{ glue: ',' }, { unit: u0 }, { glue: 'and' }, { unit: poolUnit }] }, units).ok).toBe(false)
+    expect(validateArrangement({ parts: [{ unit: u0 }, { glue: 'and' }, { unit: poolUnit }, { glue: ',' }] }, units).ok).toBe(false)
+  })
+
+  it('(f) an article ("a"/"an") may sit only immediately before a spec unit, optionally riding a relation or list join (RULING G9)', () => {
+    const specUnit = units.find((u) => u.kind === 'spec-fact')!.id
+    const poolUnit = units.find((u) => u.kind === 'pool')!.id
+    // "and a Classic Fit" — the spec's own §2c readability-ceiling example shape.
+    expect(validateArrangement({ parts: [{ unit: u0 }, { glue: 'and' }, { glue: 'a' }, { unit: specUnit }] }, units).ok).toBe(true)
+    // "with a <pool unit>" — the article precedes a NON-spec unit: illegal.
+    const v = validateArrangement({ parts: [{ unit: u0 }, { glue: 'with' }, { glue: 'a' }, { unit: poolUnit }] }, units)
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.violation).toMatch(/must introduce a spec fact/)
+  })
+
+  it('(g) [RULING G4] when the admitted units carry a brand unit, an arrangement omitting it is a named violation', () => {
+    const withBrand = buildAdmittedUnits(
+      { candidates: ['Cozy Graphic Sweatshirt'], specFacts: ['Classic Fit'], brandPick: 'Comfort Colors Tee', wearFact: null },
+      { designName: 'Retro Sunset', truthCtx: { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic' }, allowedBrand: 'Comfort Colors', audience: 'adult', field: 'highlights' } },
+    )
+    const id = (t: string) => withBrand.find((u) => u.text === t)!.id
+    const v = validateArrangement({ parts: [{ unit: id('Retro Sunset') }, { glue: ',' }, { unit: id('Cozy Graphic Sweatshirt') }] }, withBrand)
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.violation).toMatch(/missing required brand unit/)
+    const withBrandOk = validateArrangement({ parts: [{ unit: id('Retro Sunset') }, { glue: ',' }, { unit: id('Comfort Colors Tee') }] }, withBrand)
+    expect(withBrandOk.ok).toBe(true)
   })
 
   it('(d) rejects "number" on a unit whose last word is not a garment head noun', () => {
@@ -375,10 +424,14 @@ describe('judgeWriterArrangement (validate -> render -> tail -> readability)', (
   })
 
   it('a valid, tail-accepted, readable arrangement passes end to end', () => {
+    // Grammar-legal (spec §2c): a LIST join (',') between the identity and the pool unit, then a
+    // RELATION join ('with') introducing a SPEC-fact unit — never a bare identity-pool abutment or
+    // a relation onto a non-spec unit (both now named grammar violations, see the describe block
+    // above).
     const designId = units.find((u) => u.kind === 'identity')!.id
     const poolId = units.find((u) => u.text === 'Cozy Graphic Sweatshirt')!.id
     const factId = units.find((u) => u.text === 'Unisex Fit')!.id
-    const parts = [{ unit: designId }, { unit: poolId }, { glue: 'with' }, { unit: units.find((u) => u.text === 'Pullover Comfort')!.id }, { glue: ',' }, { unit: factId }]
+    const parts = [{ unit: designId }, { glue: ',' }, { unit: poolId }, { glue: 'with' }, { unit: factId }]
     const v = judgeWriterArrangement({ parts }, units, { truthCtx: { garmentFamily: 'sweatshirt', spec: null, allowedBrand: null, audience: 'adult', field: 'highlights' }, runTail: passthroughTail })
     expect(v.ok, JSON.stringify(!v.ok && v.violations)).toBe(true)
   })

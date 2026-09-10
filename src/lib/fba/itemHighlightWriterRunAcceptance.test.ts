@@ -56,10 +56,15 @@ function stubArrangementClient(responses: unknown[]) {
   return { client: { chat: { completions: { create: mockCreate } } } as never, create: mockCreate }
 }
 
-/** Greedily assembles a VALID arrangement (real admitted units, joined only with "with"/",") that
+/** Greedily assembles a VALID arrangement (real admitted units, joined only with "and"/",") that
  *  renders within [min, max] — deterministic, order-preserving over `units`. Returns null if no
  *  such assembly exists from this exact unit list. Test-only: exercises the SAME `renderArrangement`
- *  production code renders with, never a parallel re-implementation of it. */
+ *  production code renders with, never a parallel re-implementation of it. RULING G1 (spec §2c):
+ *  joins are "and"/"," ONLY (both LIST joins, legal between ANY two units regardless of kind) — the
+ *  prior "with" alternation is no longer grammar-legal between two arbitrary units (a RELATION join
+ *  may only introduce a spec-fact/brand/wear-fact unit); "and" (not a bare ",") for every join but
+ *  the last keeps at least one clause containing a real connecting word, so the readability check's
+ *  "reads as 2+ phrases" rule (at most one keyword-shaped clause) still has something to pass on. */
 function buildAcceptableArrangement(units: readonly AdmittedUnit[], min: number, max: number): { json: unknown; expected: string } | null {
   const chosen: AdmittedUnit[] = []
   for (const u of units) {
@@ -75,7 +80,7 @@ function buildAcceptableArrangement(units: readonly AdmittedUnit[], min: number,
   const parts: (string | { glue: string })[] = []
   chosen.forEach((u, i) => {
     parts.push(u.id)
-    if (i < chosen.length - 1) parts.push({ glue: i === chosen.length - 2 ? ',' : 'with' })
+    if (i < chosen.length - 1) parts.push({ glue: i === chosen.length - 2 ? ',' : 'and' })
   })
   return { json: arrangementJson(parts), expected: text }
 }
@@ -83,7 +88,7 @@ function renderTrial(pieces: readonly AdmittedUnit[]): string {
   const parts: (string | { glue: string })[] = []
   pieces.forEach((u, i) => {
     parts.push(u.id)
-    if (i < pieces.length - 1) parts.push({ glue: i === pieces.length - 2 ? ',' : 'with' })
+    if (i < pieces.length - 1) parts.push({ glue: i === pieces.length - 2 ? ',' : 'and' })
   })
   const arr = arrangementJson(parts) as { parts: { unit?: string; glue?: string }[] }
   return renderArrangement(arr.parts.map((p) => (p.unit ? { unit: p.unit } : { glue: p.glue as string })), pieces)
@@ -299,7 +304,10 @@ describe('mechanics: a malformed/hallucinating arrangement is rejected on every 
     const units = buildAdmittedUnits(COMPOSED, { designName: 'Retro Sunset', truthCtx: TEE_CTX })
     const identityId = units.find((u) => u.kind === 'identity')!.id
     const poolId = units.find((u) => u.text === 'Soft Everyday Cotton Feel')!.id
-    const { client, create: c } = stubArrangementClient([arrangementJson([identityId, { glue: 'with' }, poolId])])
+    // Grammar-legal (spec §2c): "and" is a LIST join and may join ANY two units — a RELATION join
+    // ("with"/"in") could not join an identity unit to a pool unit (rule 3: relations only introduce
+    // a spec-fact/brand/wear-fact unit).
+    const { client, create: c } = stubArrangementClient([arrangementJson([identityId, { glue: 'and' }, poolId])])
     const r = await runWriterForDesign({ composed: COMPOSED, fallbackHold: 'thin-candidates', designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
     expect(r.accepted).toBe(true)
     expect(c).toHaveBeenCalledTimes(1)
@@ -459,8 +467,8 @@ describe('W5: single-design identity threading', () => {
 
 // ─── W8: per-regen budget + bounded concurrency ───────────────────────────────────────────────────
 
-describe('W8: per-regen call budget (shared across designs) + bounded concurrency', () => {
-  it('when the budget is exhausted, a design BEYOND the initial concurrent wave (concurrency 3) ships the composer result and the log names the skip — the bound is BEST-EFFORT across designs, never per-call-exact (documented: a design already running is never aborted mid-loop)', async () => {
+describe('W8/G8: per-regen call budget (shared across designs) + bounded concurrency', () => {
+  it('when the budget cannot cover even ONE design\'s full retry cap, EVERY design is skipped with zero calls — RULING G8: the budget is RESERVED before a design starts, not checked after one finishes', async () => {
     process.env.IH_WRITER = 'on'
     process.env.IH_WRITER_MAX_CALLS = '1'
     try {
@@ -473,19 +481,51 @@ describe('W8: per-regen call budget (shared across designs) + bounded concurrenc
       ]
       const input = { groups, pool, apparelProduct: true, blankBrand: null, familyTitleText: 'Beach Family' }
       const sync = buildItemHighlightsPerDesign(input)
-      // Every stub call always fails (bad unit id) — the budget of 1 is exhausted by whichever
-      // design(s) run in the FIRST concurrent wave (bounded parallelism 3); by the time a LATER
-      // design's turn comes up, `callsUsed >= budget` and it must be SKIPPED with zero calls.
-      const { client } = stubArrangementClient([arrangementJson(['does-not-exist'])])
+      // Every stub call always fails (bad unit id). budget=1 cannot cover even one design's
+      // IH_WRITER_RETRY_CAP (3) — RULING G8 (FIX ROUND B3): the FIRST design to run must RESERVE
+      // its whole retry cap BEFORE starting, and 0 + 3 > 1, so it (and every design after it) is
+      // skipped with zero calls. PRE-FIX (a soft "check after" bound), the first concurrent wave of
+      // up to 3 designs would each have STARTED (seeing `callsUsed === 0 < budget` before any of
+      // them finished) and spent their own full 3 calls apiece — an overshoot this fixture used to
+      // rely on (9 calls, not 0) that G8 closes.
+      const { client, create: c } = stubArrangementClient([arrangementJson(['does-not-exist'])])
       const result = await produceItemHighlightsPerDesign(input, { openai: client as never })
       expect(result.perDesign).toEqual(sync.perDesign) // nothing was accepted either way — composer result throughout
-      // NOT every design spent its own full retry-cap worth of calls — the whole point of a shared
-      // budget across 5 designs with a budget of 1 is that most of them are skipped at zero.
+      expect(c).not.toHaveBeenCalled() // RULING G8: an exact bound — zero calls, not merely "fewer than every design's cap"
       const totalCalls = (result.writerLog ?? []).reduce((n, r) => n + r.calls, 0)
-      expect(totalCalls).toBeLessThan(KEYS.length * IH_WRITER_RETRY_CAP)
-      const skippedRow = (result.writerLog ?? []).find((r) => r.reasons.some((x) => x.includes('budget')))
-      expect(skippedRow, JSON.stringify(result.writerLog)).toBeTruthy()
-      expect(skippedRow?.calls).toBe(0)
+      expect(totalCalls).toBe(0)
+      for (const row of result.writerLog ?? []) {
+        expect(row.calls).toBe(0)
+        expect(row.reasons.some((x) => x.includes('budget'))).toBe(true)
+      }
+    } finally { delete process.env.IH_WRITER; delete process.env.IH_WRITER_MAX_CALLS }
+  })
+
+  it('RULING G8 pin (phase-b3-rulings.md G8): budget 18 with 10 always-invalid designs spends AT MOST 18 calls — exactly 6 designs x 3 retries, never the soft-bound overshoot (+6 measured pre-fix)', async () => {
+    process.env.IH_WRITER = 'on'
+    process.env.IH_WRITER_MAX_CALLS = '18'
+    try {
+      const KEYS = Array.from({ length: 10 }, (_, i) => `D${i}`)
+      const groups = KEYS.map((k) => ({ key: k, designName: `Design ${k}`, skus: [{ sku: `${k}1`, asin: `B0${k}0000001` }], titles: [`THE CEO Design ${k} Tee for Women`] }))
+      const pool = [
+        kwPD('funny graphic novelty tee', 450, 3, KEYS), kwPD('cute cartoon animal print', 900, 3, KEYS), kwPD('retro vintage style clothing', 300, 3, KEYS),
+        kwPD('cozy everyday casual wear', 250, 3, KEYS), kwPD('bold bright colorful design', 200, 2, KEYS), kwPD('soft comfortable cotton feel', 5000, 2, KEYS),
+        kwPD('playful humor apparel gift', 150, 2, KEYS), kwPD('trendy modern weekend outfit', 5000, 3, KEYS), kwPD('unique custom art print top', 5000, 3, KEYS),
+      ]
+      const input = { groups, pool, apparelProduct: true, blankBrand: null, familyTitleText: 'Beach Family' }
+      // Every stub call always fails (bad unit id) -> every design that gets to run spends its FULL
+      // IH_WRITER_RETRY_CAP (3) calls. 18 / 3 = exactly 6 designs can reserve; the other 4 are
+      // skipped with 0 calls each.
+      const { client } = stubArrangementClient([arrangementJson(['does-not-exist'])])
+      const result = await produceItemHighlightsPerDesign(input, { openai: client as never })
+      const totalCalls = (result.writerLog ?? []).reduce((n, r) => n + r.calls, 0)
+      expect(totalCalls).toBeLessThanOrEqual(18)
+      expect(totalCalls).toBe(18) // exact, not merely bounded — 6 * IH_WRITER_RETRY_CAP
+      const ranDesigns = (result.writerLog ?? []).filter((r) => r.calls > 0).length
+      expect(ranDesigns).toBe(18 / IH_WRITER_RETRY_CAP)
+      const skipped = (result.writerLog ?? []).filter((r) => r.calls === 0)
+      expect(skipped.length).toBe(KEYS.length - ranDesigns)
+      for (const row of skipped) expect(row.reasons.some((x) => x.includes('budget'))).toBe(true)
     } finally { delete process.env.IH_WRITER; delete process.env.IH_WRITER_MAX_CALLS }
   })
 })
