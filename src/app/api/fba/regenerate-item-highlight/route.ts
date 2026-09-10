@@ -24,7 +24,7 @@ import { selectionMode, resolveRankingTargets } from '@/lib/keyword-engine/selec
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
-import { buildItemHighlights, buildItemHighlightsPerDesign, buildPerDesignIhDetailPatch, IH_REASON, IH_HOLD_MESSAGES, type IhHoldReason } from '@/lib/fba/listingPipeline'
+import { buildItemHighlights, buildItemHighlightsPerDesign, buildPerDesignIhDetailPatch, deriveCapacityFamily, IH_REASON, IH_HOLD_MESSAGES, type IhHoldReason } from '@/lib/fba/listingPipeline'
 import { normalizeAudienceLean } from '@/lib/fba/contentTruth'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
@@ -142,6 +142,11 @@ export async function POST(req: NextRequest) {
     }
 
     const apparel = /\b(shirt|tee|t-?shirts?|hoodie|sweatshirt|tank|apparel|garment)\b/i.test(title)
+    // FIX ROUND 2 (RULING I-2/F3): the ONE seller brand this codebase hardcodes (matches
+    // ai-recommendations/route.ts's own `const brandName = 'THE CEO'` — the same real signal
+    // `PipelineInput.brandName` carries on the full-pipeline path) — threaded explicitly rather than
+    // relying on `ihContentRuleViolations`'s coincidental-matching default.
+    const brandName = 'THE CEO'
 
     // ── BLANK-BRAND WATERFALL (PO 2026-08-08, all-paths invariant): this route bypasses the
     // pipeline, so it resolves its own blank row — via the ONE shared spec-truth resolver
@@ -167,6 +172,12 @@ export async function POST(req: NextRequest) {
     // child (this route never spends a vision call — POST scan-identity {per_design:true}
     // populates it). The broadcast row becomes the per-design MARKER (no line).
     const pct = (Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { sku: string; asin: string; title: string; designName?: string | null; designKey?: string | null }[]
+    // FIX ROUND 2 (RULING I-2/F2): this route bypasses the pipeline entirely (no `PipelineInput.
+    // children` to hand `deriveCapacityFamily`), so it resolves the SAME signal off the one
+    // SKU/title list it already has in scope — `pct`, this family's per-child rows. Best-effort:
+    // an empty/thin `pct` (e.g. a family that never fanned out per-child) degrades to `false`,
+    // the historical default, never a false refusal.
+    const capacityFamily = deriveCapacityFamily(pct.map((p) => ({ sku: p.sku, title: p.title })), apparel)
     // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): two more columns on this SAME existing select —
     // the family's seller-declared audience lean (migration 029) + its per-design override map
     // (migration 070) — listingPipeline.ts:276-289 is the DB-shape source of truth this mirrors, so
@@ -227,6 +238,10 @@ export async function POST(req: NextRequest) {
         audienceLean: apparel ? storedAudienceLean : null,
         audienceLeanByDesign: storedAudienceLeanByDesign,
         designSeasons,
+        // FIX ROUND 2 (RULING I-2/F2, I-2/F3): real signal, resolved above the SAME way the
+        // pipeline's own multi-design branch does — never the leaf's coincidental default.
+        capacityFamily,
+        brandName,
       })
       const composed = built.perDesign.filter((d) => d.value)
       // FIX WAVE 2 (I-2a, 2026-09-06, controller RULING — final whole-branch review #2, Important
@@ -276,13 +291,20 @@ export async function POST(req: NextRequest) {
       // second rule.
       audienceLean: apparel ? normalizeAudienceLean(storedAudienceLean) : null,
       designSeasons,
+      // FIX ROUND 2 (RULING I-2/F2, I-2/F3): same real signal the multi-design branch above now
+      // threads — never the leaf's coincidental default.
+      capacityFamily,
+      brandName,
     })
     // FIX ROUND 1 (2026-09-07, controller RULING): `capItemHighlightRepeats` now returns a typed
     // union. A genuine REFUSAL (the net could not net the composer's own output into a compliant
     // line — an edge case, since the composer already floor-checks) maps onto the SAME
     // IhHoldReason vocabulary this route already used (no new hold semantics); the pre-existing
     // "built.value was already empty" HOLD path below is unchanged.
-    const capResult = capItemHighlightRepeats((built.value || '').trim())
+    // FIX ROUND 2 (RULING I-2/F2, I-2/F3): same real contentCtx `buildItemHighlights` above already
+    // netted `built.value` against — idempotent defense-in-depth on these final bytes, never a
+    // second, differently-scoped check.
+    const capResult = capItemHighlightRepeats((built.value || '').trim(), { contentCtx: { designSeasons, capacityFamily, brandName } })
     if (!capResult.ok) {
       const reason: IhHoldReason = built.hold ?? (capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor')
       return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason }, { status: 422 })

@@ -721,11 +721,26 @@ export function classifyStoredIhLine(value: string | null | undefined): IhLineCl
  * it provably cannot know a SKU's occasion) omits `designSeasons` and so never runs the off-season
  * rule; every caller that DOES have real title/design-name context (the compose path via
  * `deriveDesignSeasons`, the per-child persist net, the Regen route via `seasonsIn`) passes the
- * real, resolved set. `capacityFamily` (default `false`) and `brandName` (default `'THE CEO'`, the
- * ONE seller brand this codebase already hardcodes — listingPipeline.ts, `handoff/
- * SELLER_PROFILE.md:1`) keep the historical safe defaults: they can only ever ADD a refusal when
- * told the family IS one, never guess, so a caller that never resolves them degrades to today's
- * behaviour exactly.
+ * real, resolved set.
+ *
+ * FIX ROUND 2 (RULING I-2/F2, I-2/F3): `capacityFamily` (default `false`) and `brandName` (default
+ * `'THE CEO'`) are SAFE defaults in the sense that they can only ever ADD a refusal when told the
+ * real signal, never guess — but a default that also happens to be a legal, common value HIDES a
+ * caller's failure to resolve it (`research-vs-publish-boundary`'s own naming for this class): the
+ * reviewer measured BOTH directions live — `hardcoded-capacity` never fired on the push path
+ * because no caller threaded `capacityFamily: true` for a real multi-capacity family (a "128GB
+ * Storage Room" line the CHECKER flagged still SHIPPED), and the `brandName` default disagreed with
+ * the checker the other way when the seller's OWN brand token collides with a THIRD_PARTY_BRANDS
+ * entry. Every caller that CAN resolve the real value now does: the compose path
+ * (`buildItemHighlights`/`buildItemHighlightsPerDesign`, threaded from the SAME `PipelineInput.
+ * brandName` and the pipeline's own family-wide capacity-token detection, listingPipeline.ts), the
+ * per-child persist net (same closure scope, same two signals), and the Regen route (which
+ * re-derives both locally, since it bypasses the pipeline — see that route's own comment).
+ * `buildDetailPatchValue` (a pure leaf with no DB/brand-config/children access — it provably cannot
+ * resolve either) is the ONE caller left on the default, which is why it is safe ONLY here: this
+ * codebase hardcodes exactly one seller brand (`'THE CEO'` — listingPipeline.ts, `handoff/
+ * SELLER_PROFILE.md:1`) and every OTHER caller of this leaf now supplies the real signal instead of
+ * relying on the coincidence that the default happens to match.
  */
 export const THIRD_PARTY_BRANDS = new Set([
   // Cameras & imaging
@@ -1089,6 +1104,17 @@ export function buildDetailPatchValue(
     // `itemHighlightOneRule.test.ts`/`blankBrandHighlightNet.test.ts`'s pinned short fixtures); this
     // is a NEW, narrower check for the one thing those fixtures never exercised: the SCRUB crossing
     // the floor on a line that was compliant before it ran.
+    //
+    // FIX ROUND 2 (RULING I-1): the per-child PERSIST net (listingPipeline.ts's `scrubPublished`)
+    // used to run this SAME idea unconditionally on the survivor (`scrubbed.length < min`, no
+    // preScrubLen gate at all) while its own comment claimed to mirror THIS check "exactly" — it
+    // did not: measured, a 77-char, scrub-untouched, otherwise-compliant value SHIPPED here and was
+    // HELD there. `capItemHighlightRepeats`'s own doc (and `itemHighlightOneRule.test.ts`/
+    // `blankBrandHighlightNet.test.ts`'s T4.8 pin, a 94-char scrub-untouched value) requires a
+    // naturally-short, untouched value to pass unflagged — an UNCONDITIONAL check breaks that pin,
+    // which is why this seam's check has always been scrub-CROSSING-scoped, never unconditional.
+    // The persist net is now narrowed to this EXACT predicate (same `preScrubLen`/floor shape) —
+    // ONE predicate for both seams, per the ruling's preferred resolution, not a pinned difference.
     if (preScrubLen >= CONTENT_CONTRACT.itemHighlights.min && trimmed.length < CONTENT_CONTRACT.itemHighlights.min) return []
     // BLOCKING 3 (opus review, finish-final-review.md, reproduced: scratchpad probe
     // repro-blocking3-designseasons-blanket.mts): deliberately NO `contentCtx`/`truthCheck` passed

@@ -144,3 +144,124 @@ describe('BLOCKING 3 closed: buildDetailPatchValue never asserts a blanket desig
     expect(String(patch[0].value)).toBe(line)
   })
 })
+
+/**
+ * FIX ROUND 2 (2026-09-10, controller RULING on the opus review of Phase A -- phase-a-fix-
+ * rulings.md I-1/I-2/I-3). Closes the net BEFORE the writer (Phase B) is built on it, per the
+ * ruling: "the checks go in the NET, never in the writer" -- a check living in the producer is
+ * bypassed by the next producer, which is the defect class this branch series exists to close.
+ */
+describe('I-3/R1 -- cross-clause composition binding (recombination escape, reviewer\'s exact repro)', () => {
+  const blendSweatshirt: PhraseTruthCtx = {
+    garmentFamily: 'sweatshirt',
+    spec: { material: '52% Cotton 48% Polyester Blend', fit: 'Classic' },
+    allowedBrand: null,
+    audience: null,
+    field: 'highlights',
+  }
+
+  it('a "%" marker in ONE clause and a fibre word in a DIFFERENT clause together assert the same lie a single clause would already catch -- now REFUSED, not ok:true', () => {
+    const line = 'Cozy Crewneck Sweatshirt, Made With 100%, Combed Cotton Feel, Classic Fit'
+    // Each clause ALONE is not a claim (the exact reviewer finding) -- proven here too, so a
+    // regression that reverts to per-clause-only judging would show up as this sub-assertion
+    // flipping back to ok:true instead of the whole-line assertion below.
+    expect(phraseTruthVerdict('Made With 100%', blendSweatshirt)).toEqual({ ok: true })
+    expect(phraseTruthVerdict('Combed Cotton Feel', blendSweatshirt)).toEqual({ ok: true })
+    expect(ihLineTruthVerdict(line, blendSweatshirt)).toEqual({ ok: false, reason: 'material-lie' })
+  })
+
+  it('the identical marker+fibre pair in the SAME clause was already caught before this fix (rule (g), unchanged) -- the line-wide check is redundant there, not a new false-positive', () => {
+    expect(phraseTruthVerdict('Made With 100% Cotton', blendSweatshirt)).toEqual({ ok: false, reason: 'material-lie' })
+  })
+
+  it('a TRUE cross-clause composition (blank genuinely is that fibre) still passes -- the fix is scoped to the LIE, not to any % anywhere near any fibre word', () => {
+    const pureCottonSweatshirt: PhraseTruthCtx = { ...blendSweatshirt, spec: { ...blendSweatshirt.spec, material: '100% Cotton' } }
+    const line = 'Cozy Crewneck Sweatshirt, Made With 100%, Combed Cotton Feel, Classic Fit'
+    expect(ihLineTruthVerdict(line, pureCottonSweatshirt)).toEqual({ ok: true })
+  })
+
+  it('purity WORDS (ambiguous English, not "%") still need adjacency even line-wide -- a comma still breaks "All Season"/"Real Deal", never a new false-positive', () => {
+    const line = 'All Season Layer, Combed Cotton Feel, Classic Fit'
+    expect(ihLineTruthVerdict(line, blendSweatshirt)).toEqual({ ok: true })
+  })
+})
+
+describe('I-3/R4 -- the design-token exemption no longer covers INFLECTED forms (recombination escape, reviewer\'s exact repro)', () => {
+  const adultTeeGirlDad: PhraseTruthCtx = {
+    garmentFamily: 'tee',
+    spec: {},
+    allowedBrand: null,
+    audience: 'adult',
+    designTokens: ['girl', 'dad'],
+    field: 'highlights',
+  }
+
+  it('"Girls Graphic Tee" and "Graphic Tee for Girls" on an adult family whose designTokens include "girl" -- now REFUSED, not ok:true', () => {
+    expect(phraseTruthVerdict('Girls Graphic Tee', adultTeeGirlDad)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+    expect(phraseTruthVerdict('Graphic Tee for Girls', adultTeeGirlDad)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+  })
+
+  it('removing the design token still correctly rejects the SAME phrase (proves the exemption, not the rule itself, was the escape)', () => {
+    expect(phraseTruthVerdict('Girls Graphic Tee', { ...adultTeeGirlDad, designTokens: [] })).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+  })
+
+  it('the LEGITIMATE "Girl Dad" identity still survives -- the fix narrows the escape, it does not remove the exemption. Production always stores ONE multi-word design-name string per design (listingPipeline.ts `designTokens: [g.designName]`), never two separate single-word entries -- that single-string shape is what carries the inflection exemption (contentTruthSpine.test.ts\'s own pin, re-asserted here)', () => {
+    const girlDadOneToken: PhraseTruthCtx = { ...adultTeeGirlDad, designTokens: ['Girl Dad'] }
+    expect(phraseTruthVerdict('girl dad shirt', girlDadOneToken)).toEqual({ ok: true })
+    expect(phraseTruthVerdict('girls dad shirt', girlDadOneToken)).toEqual({ ok: true })
+  })
+
+  it('the SAME two words as SEPARATE single-word tokens (no shared multi-word phrase) get the STRICTEST reading -- exact match only, no inflection at all, since single-word tokens never fold (RULING: "a design token exempts the token it IS, not its derived forms")', () => {
+    expect(phraseTruthVerdict('girls dad shirt', adultTeeGirlDad)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+    expect(phraseTruthVerdict('girl dad shirt', adultTeeGirlDad)).toEqual({ ok: true }) // exact match, no inflection needed
+  })
+
+  it('a SINGLE-WORD design token exempts ONLY its exact spelling -- "girl" alone (no sibling "dad" token) never exempts "girls"', () => {
+    expect(phraseTruthVerdict('Girls Graphic Tee', { ...adultTeeGirlDad, designTokens: ['girl'] })).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+    expect(phraseTruthVerdict('Girl Graphic Tee', { ...adultTeeGirlDad, designTokens: ['girl'] })).toEqual({ ok: true })
+  })
+})
+
+describe('I-1 -- ONE floor predicate: the push seam and the per-child persist net now use the IDENTICAL scrub-crossing shape (source pin, the persist net closure is not directly unit-testable)', () => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const pipelineSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/fba/listingPipeline.ts'), 'utf8') as string
+  const pushSeamSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/fba/productDetailAttrs.ts'), 'utf8') as string
+
+  it('both seams gate on preScrubLen >= min && survivor.length < min -- never an unconditional survivor-only check', () => {
+    const predicate = /preScrubLen >= CONTENT_CONTRACT\.itemHighlights\.min && \w+\.length < CONTENT_CONTRACT\.itemHighlights\.min/
+    expect(pipelineSrc).toMatch(predicate)
+    expect(pushSeamSrc).toMatch(predicate)
+  })
+
+  it('a 77-char, scrub-untouched, otherwise-compliant value clears the floor at the push seam (the exact reviewer repro -- the persist net now agrees by construction, same predicate above)', () => {
+    const value = 'Graphic Crewneck Sweatshirt, Cozy Everyday Pullover Top, Soft Fleece, Classic'
+    expect(value.length).toBe(77)
+    const attr = { spApiKey: 'title_differentiation', scope: 'broadcast' as const }
+    const [entry] = buildDetailPatchValue(attr, value, 'ATVPDKIKX0DER')
+    expect(String(entry.value)).toBe(value)
+  })
+})
+
+describe('I-2/F2, I-2/F3 -- capacityFamily/brandName threaded to the compose, persist and Regen sites (source pins -- the checker and the push seam can no longer structurally disagree)', () => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const pipelineSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/fba/listingPipeline.ts'), 'utf8') as string
+  const routeSrc = fs.readFileSync(path.join(process.cwd(), 'src/app/api/fba/regenerate-item-highlight/route.ts'), 'utf8') as string
+
+  it('the compose path threads capacityFamily/brandName into BOTH buildItemHighlightsPerDesign and buildItemHighlights (never left on the leaf default)', () => {
+    expect(pipelineSrc).toMatch(/capacityFamily: capacityFamilyTokens\.length >= 2,\s*\n\s*brandName: input\.brandName,/g)
+  })
+
+  it('the Regen route resolves its own capacityFamily (deriveCapacityFamily off its own per-child SKU rows) and a real brandName, and threads both to every Item Highlight call', () => {
+    expect(routeSrc).toMatch(/const capacityFamily = deriveCapacityFamily\(/)
+    expect(routeSrc).toMatch(/const brandName = 'THE CEO'/)
+    expect(routeSrc.match(/capacityFamily,\s*\n\s*brandName,/g)?.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('a real "128GB Storage Room" family family-wide capacity signal now refuses at the net level exactly like the checker (the reviewer\'s exact measured disagreement, closed)', () => {
+    const line = 'Graphic Crewneck Sweatshirt, Cozy Everyday Pullover Top, 128GB Storage Room, Soft Brushed Fleece Lining'
+    expect(ihContentRuleViolations(line, { capacityFamily: true })[0]?.reason).toBe('hardcoded-capacity')
+    expect(capItemHighlightRepeats(line, { contentCtx: { capacityFamily: true } })).toEqual({ ok: false, reason: 'hardcoded-capacity' })
+  })
+})

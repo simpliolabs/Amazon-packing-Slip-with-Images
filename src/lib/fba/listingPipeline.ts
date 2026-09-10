@@ -1913,6 +1913,25 @@ function capacityOf(s: string | null | undefined): string | null {
   return m ? `${m[1]}${m[2].toUpperCase()}B` : null
 }
 
+/** FIX ROUND 2 (RULING I-2/F2): does this family vary by storage capacity (2+ children carrying
+ *  DIFFERENT GB/TB tokens on their SKU or title)? The shared signal `hardcoded-capacity` (the moved
+ *  Item Highlights content rule) needs at every seam that can resolve it — a broadcast field naming
+ *  one variant's "128GB" misleads the 32GB/64GB siblings. Exported so a caller with no full
+ *  `PipelineInput` in scope (`regenerate-item-highlight/route.ts`, which bypasses the pipeline
+ *  entirely) can derive the identical signal `runBulletsAgent`'s own local `capacityFamily` const
+ *  and Stage 2's `capacityFamilyTokens` (both still computed inline at their own call sites,
+ *  byte-identical to this — this export exists for a caller that has no equivalent of its own, not
+ *  to replace either). */
+export function deriveCapacityFamily(children: readonly { sku?: string | null; title?: string | null }[] | undefined, apparel: boolean): boolean {
+  if (apparel) return false
+  const caps = new Set<string>()
+  for (const c of children ?? []) {
+    const cap = capacityOf(c.sku) || capacityOf(c.title)
+    if (cap) caps.add(cap)
+  }
+  return caps.size >= 2
+}
+
 /* ── SEASON POLICY (KEYWORD_TARGET_SET, PO 2026-07-23) ────────────────────────────────────────────
  *
  * THE PROBLEM. Six of the seven keyword consumers below used to BLANKET-strip every SEASONAL_TERM
@@ -2288,6 +2307,16 @@ export interface ItemHighlightsInput {
    *  here means "the caller has no occasion signal" and the off-season rule is SKIPPED at this call
    *  — never defaulted to `[]`, which would assert "no occasion" and refuse a true on-season line. */
   designSeasons?: readonly string[]
+  /** FIX ROUND 2 (RULING I-2/F2): does this family vary by storage capacity (2+ children carrying
+   *  different GB/TB tokens)? Threaded to the moved `hardcoded-capacity` rule. Undefined/false (the
+   *  default every pre-fix-round caller left it at) is safe — it can only ever ADD a refusal, never
+   *  guess — but a caller that CAN resolve this (every real call site now does) should. */
+  capacityFamily?: boolean
+  /** FIX ROUND 2 (RULING I-2/F3): the seller's own resolved brand — exempts it from the moved
+   *  `third-party-brand` rule. Undefined defaults to `'THE CEO'` (`ihContentRuleViolations`'s own
+   *  default), safe today because this codebase hardcodes exactly one seller; every real call site
+   *  now threads `PipelineInput.brandName` instead of relying on that coincidence. */
+  brandName?: string
 }
 
 /**
@@ -2344,8 +2373,12 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
     const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand), {
       // BLOCKING 3's fix: pass the REAL resolved occasions when the caller has them; `undefined`
       // (every pre-Phase-A caller, and any caller that never resolved them) skips the off-season
-      // rule rather than asserting a blanket "no occasion".
-      contentCtx: input.designSeasons !== undefined ? { designSeasons: input.designSeasons } : undefined,
+      // rule rather than asserting a blanket "no occasion". FIX ROUND 2 (RULING I-2/F2, I-2/F3):
+      // `capacityFamily`/`brandName` thread the same way — `undefined` here (a caller that never
+      // resolved them) reads as `ihContentRuleViolations`'s own safe defaults, byte-identical to
+      // omitting the object entirely (a present key whose value is `undefined` is indistinguishable
+      // from an absent key to `ctx?.field ?? default` / `ctx?.field !== undefined`).
+      contentCtx: { designSeasons: input.designSeasons, capacityFamily: input.capacityFamily, brandName: input.brandName },
       // PHASE A: the line-level truth net (contentTruth.ts), bound to the SAME ctx the composer's
       // per-candidate check already used above — defense-in-depth on the FINAL joined bytes (a
       // brand-insertion or pad filler assembled after per-candidate selection, or a stale value).
@@ -2409,6 +2442,12 @@ export interface PerDesignItemHighlightsInput {
    *  designSeasons` for the BLOCKING-3 contract (undefined ⇒ skip the off-season rule, never a
    *  blanket `[]`). */
   designSeasons?: readonly string[]
+  /** FIX ROUND 2 (RULING I-2/F2): threaded to each design's own `buildItemHighlights` call below.
+   *  See `ItemHighlightsInput.capacityFamily`. */
+  capacityFamily?: boolean
+  /** FIX ROUND 2 (RULING I-2/F3): threaded to each design's own `buildItemHighlights` call below.
+   *  See `ItemHighlightsInput.brandName`. */
+  brandName?: string
 }
 
 export interface PerDesignItemHighlight {
@@ -2518,6 +2557,10 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
       // IH TERMINAL NET PHASE A: the family-wide resolved occasions, threaded straight through —
       // undefined on every caller that doesn't set it (byte-identical).
       designSeasons: input.designSeasons,
+      // FIX ROUND 2 (RULING I-2/F2, I-2/F3): same straight-through threading, same byte-identical
+      // default when the caller doesn't set them.
+      capacityFamily: input.capacityFamily,
+      brandName: input.brandName,
     })
     console.log(JSON.stringify({ tag: 'IH_PER_DESIGN', design: g.key, pool: pool.length, scoped: scoped.length, len: r.value.length, hold: r.hold }))
     return { designKey: g.key, designName: g.designName, skus: g.skus, value: r.value, hold: r.hold, foreignDropped }
@@ -10095,19 +10138,29 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // and keep THAT on refusal (never the raw pre-scrub value).
     per_child_item_highlights: r.per_child_item_highlights?.map((c) => {
       if (!c.item_highlight) return { ...c, item_highlight: '' }
+      const preScrubLen = c.item_highlight.trim().length
       const scrubbed = scrubPub(c.item_highlight, 'per-child-item-highlight')
       // IH TERMINAL NET PHASE A (BLOCKING 2's class, same mechanism as productDetailAttrs.ts's
       // `buildDetailPatchValue`): `scrubPub` is a length-REDUCING transform that runs BEFORE
       // `capItemHighlightRepeats`, so that net's own floor check — conditioned on a drop the net
-      // itself performed — cannot see scrub-driven shortening. Checked HERE, unconditionally, on
-      // the scrub survivor, before the net runs, mirroring the push-seam fix exactly.
-      if (scrubbed && scrubbed.length < CONTENT_CONTRACT.itemHighlights.min) {
+      // itself performed — cannot see scrub-driven shortening. Checked HERE, before the net runs.
+      // FIX ROUND 2 (RULING I-1): this used to fire UNCONDITIONALLY on the survivor
+      // (`scrubbed.length < min`, no `preScrubLen` gate), while claiming to mirror the push seam
+      // "exactly" — it did not: a naturally-short, scrub-UNTOUCHED value (`capItemHighlightRepeats`'s
+      // own documented case, pinned by `blankBrandHighlightNet.test.ts` T4.8) shipped at the push
+      // seam and was HELD here. Narrowed to the EXACT same scrub-CROSSING predicate the push seam
+      // uses (`buildDetailPatchValue`, productDetailAttrs.ts) — ONE predicate for one concept.
+      if (preScrubLen >= CONTENT_CONTRACT.itemHighlights.min && scrubbed.length < CONTENT_CONTRACT.itemHighlights.min) {
         console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'per-child-item-highlight', sku: c.sku, reason: 'under-floor-post-scrub' }))
         return { ...c, item_highlight: scrubbed, hold: 'under-floor' as IhHoldReason }
       }
       // IH TERMINAL NET PHASE A (BLOCKING 3 fix): the SAME real, resolved `designSeasons` this
       // function's own season policy already derived — never a blanket `[]`.
-      const capResult = capItemHighlightRepeats(scrubbed, { contentCtx: { designSeasons } })
+      // FIX ROUND 2 (RULING I-2/F2, I-2/F3): `capacityFamily`/`brandName` threaded from the SAME
+      // closure scope (`capacityFamilyTokens` computed once at Stage 2 above; `input.brandName` is
+      // the pipeline's own resolved seller brand) — the real signal, never the leaf's coincidental
+      // default, at every site that CAN resolve it.
+      const capResult = capItemHighlightRepeats(scrubbed, { contentCtx: { designSeasons, capacityFamily: capacityFamilyTokens.length >= 2, brandName: input.brandName } })
       if (!capResult.ok) {
         console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'per-child-item-highlight', sku: c.sku, reason: capResult.reason }))
         const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
@@ -11950,6 +12003,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // designName)`, computed ONCE per regen at the season-policy block) — never a blanket `[]`
         // guess at THIS seam, which has full pipeline context and can resolve it for real.
         designSeasons,
+        // FIX ROUND 2 (RULING I-2/F2, I-2/F3): the SAME family-wide capacity-token signal Stage 2
+        // already computed (`capacityFamilyTokens`) + the pipeline's own resolved seller brand —
+        // real signal, never `ihContentRuleViolations`'s coincidental-default fallback.
+        capacityFamily: capacityFamilyTokens.length >= 2,
+        brandName: input.brandName,
       })
       perChildItemHighlights = built.perChild
       // SILENT-HOLD CLASS CLOSED (2026-09-04): the marker row ships EVERY TIME the attribute is in
@@ -11989,6 +12047,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // IH TERMINAL NET PHASE A (BLOCKING 3 fix): same real, resolved `designSeasons` the
         // multi-design branch above now threads — never a blanket `[]` guess.
         designSeasons,
+        // FIX ROUND 2 (RULING I-2/F2, I-2/F3): same real signal the multi-design branch above now
+        // threads — never `ihContentRuleViolations`'s coincidental-default fallback.
+        capacityFamily: capacityFamilyTokens.length >= 2,
+        brandName: input.brandName,
       })
       // SILENT-HOLD CLASS CLOSED (2026-09-04): same fix as the multi-design branch above — a held
       // single-design family (hl === '') used to push NO row at all. Always push; carry `hold` so the

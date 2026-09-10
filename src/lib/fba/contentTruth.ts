@@ -235,18 +235,48 @@ export function garmentNounConstraint(ctx: PhraseTruthCtx): { allowed: string[];
 // gender half is now DERIVED from that same core rather than hand-copied; see the comment there.
 const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/gi
 
-/** The family's design words, plural-folded so a "Girl Dad" design also owns "girls". */
-const designWordSet = (tokens: readonly string[] | undefined): ReadonlySet<string> => {
-  const s = new Set<string>()
-  for (const t of tokens ?? []) {
-    for (const w of t.toLowerCase().match(/[a-z0-9]+/g) ?? []) { s.add(w); s.add(w.replace(/s$/, '')) }
-  }
-  return s
-}
-/** Is every word of this audience hit part of the family's OWN design name? */
-const isDesignOwnWord = (hit: string, design: ReadonlySet<string>): boolean => {
-  const parts = hit.toLowerCase().match(/[a-z0-9]+/g) ?? []
-  return parts.length > 0 && parts.every((w) => design.has(w) || design.has(w.replace(/s$/, '')))
+/** Lowercased word tokens of a string (design-token phrase, hit, or wide context). */
+const wordsOf = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) ?? []
+
+/**
+ * Is this audience HIT (one match of the audience regex, e.g. "girls") the design's own word?
+ *
+ * FIX ROUND 2 (RULING I-3/R4, reviewer's exact repro): an ADULT tee whose design is named "Girl
+ * Dad" ('girl'/'dad' among `tokens`) must keep "Girl Dad Tee for Girls" (the hit "Girls" is this
+ * design's own identity, just inflected+separated across the same phrase) but must NOT exempt
+ * "Girls Graphic Tee" on the SAME family — "Girls" there is a bare, unrelated audience claim; "dad"
+ * (or any other word of the SAME multi-word design token) appears nowhere near it. The OLD version
+ * folded singular<->plural on the HIT alone (`design.has(w) || design.has(w.replace(/s$/, ''))`)
+ * with NO adjacency/co-occurrence check at all, so a lone singular design word ("girl") exempted
+ * ANY plural audience hit ("girls") anywhere in ANY text — exactly the escape a free-prose WRITER
+ * can trigger (this net must judge the OUTPUT, not just the picker's whole-token candidates).
+ *
+ * THE FIX: an EXACT word match against a design token's own words is ALWAYS exempt (a single-word
+ * token like "girl" exempts only "girl" — never its plural, per the ruling: "a design token
+ * exempts the token it IS, not its derived forms"). An INFLECTED match (hit strips to a token
+ * word) is exempt ONLY when the token is multi-word AND at least one of the token's OTHER words is
+ * ALSO literally present in `wideText` — i.e. the phrase is actually invoking that design's full
+ * identity ("Girl Dad" via "dad" showing up too), not just borrowing one inflected word from it.
+ * `wideText` defaults to `hit`'s own source when the caller has no wider context (rule (c)/(c2)
+ * below, which judge the WHOLE candidate); the title-strip mechanism (rule (b2) above this file's
+ * `applyTitleTruthNet`) passes the enclosing SEGMENT explicitly, since it strips a narrower CLAUSE
+ * than the full segment the design's other words may sit in.
+ */
+const isDesignOwnWord = (hit: string, tokens: readonly string[] | undefined, wideText: string): boolean => {
+  const hitWords = wordsOf(hit)
+  if (hitWords.length === 0) return false
+  const wideWords = new Set(wordsOf(wideText))
+  return hitWords.every((hw) => (tokens ?? []).some((t) => {
+    const tw = wordsOf(t)
+    if (tw.length === 0) return false
+    if (tw.includes(hw)) return true // exact word — always exempt, no fold needed
+    if (tw.length < 2) return false // single-word token: EXACT match only, never inflected
+    const stripped = hw.replace(/s$/, '')
+    if (!tw.includes(stripped)) return false
+    // Inflected form of one of this token's words — exempt only if the identity is ACTUALLY
+    // invoked: at least one of the token's OTHER words also appears, literally, in the wide text.
+    return tw.some((w) => w !== stripped && wideWords.has(w))
+  }))
 }
 /**
  * The audience words a phrase asserts that the DESIGN'S OWN NAME does not explain.
@@ -255,9 +285,13 @@ const isDesignOwnWord = (hit: string, design: ReadonlySet<string>): boolean => {
  * asserts no audience — 'baby' is the design. "toddler tee" on the same family does, and still
  * dies. "baby shark shirts for kids" does too: ONE foreign hit ('kids') is enough. An empty design
  * set makes every hit foreign, which is the historical behavior exactly.
+ *
+ * `wideText` (default: `hitSource` itself) is what `isDesignOwnWord` checks a multi-word token's
+ * OTHER words against — see that function's doc. Callers that strip a NARROWER clause than the
+ * text they're judging (the title's rule (b2) below) must pass their enclosing text explicitly.
  */
-const foreignAudienceHits = (phrase: string, re: RegExp, design: ReadonlySet<string>): string[] =>
-  [...phrase.matchAll(re)].map((m) => m[0]).filter((h) => !isDesignOwnWord(h, design))
+const foreignAudienceHits = (hitSource: string, re: RegExp, tokens: readonly string[] | undefined, wideText: string = hitSource): string[] =>
+  [...hitSource.matchAll(re)].map((m) => m[0]).filter((h) => !isDesignOwnWord(h, tokens, wideText))
 
 /** The two halves of the FORCED-GENDER rule, as pattern STRINGS (not compiled RegExp) — the
  *  canonical, exported core. Adult gender words only — kids words are the kids/adult audience
@@ -771,9 +805,8 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
   // design-token exemption keeps a "Baby Shark" adult family's own vocabulary in its bullets and
   // backend. It can NEVER license a garment lie — rule (a) runs first and never reads designTokens.
   if (ctx.audience === 'kids' || ctx.audience === 'adult') {
-    const designWords = designWordSet(ctx.designTokens)
     const re = ctx.audience === 'kids' ? ADULT_AUDIENCE_RE : KIDS_AUDIENCE_RE
-    if (foreignAudienceHits(phrase, re, designWords).length > 0) {
+    if (foreignAudienceHits(phrase, re, ctx.designTokens).length > 0) {
       return { ok: false, reason: ctx.audience === 'kids' ? 'audience-adult-on-kids' : 'audience-kids-on-adult' }
     }
   }
@@ -796,9 +829,8 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
       // exemption there): its own `designTokens` is the FAMILY-WIDE union (every sibling's name, per
       // `buildGroupTruthCtx` in listingPipeline.ts), and widening THIS rule to read it would risk an
       // untested behavior change on a path this task must not touch.
-      const designWords = designWordSet(ctx.designTokens)
-      const fem = foreignAudienceHits(phrase, LEAN_FEM_RE_G, designWords).length > 0
-      const masc = foreignAudienceHits(phrase, LEAN_MASC_RE_G, designWords).length > 0
+      const fem = foreignAudienceHits(phrase, LEAN_FEM_RE_G, ctx.designTokens).length > 0
+      const masc = foreignAudienceHits(phrase, LEAN_MASC_RE_G, ctx.designTokens).length > 0
       if (fem !== masc) return { ok: false, reason: 'audience-lean-lie' }
     } else {
       const fem = LEAN_FEM_RE.test(phrase)
@@ -1039,11 +1071,13 @@ function scrubMoneyPhrase(
   if (ctx.audience === 'kids' || ctx.audience === 'adult') {
     const reason: PhraseTruthReason = ctx.audience === 'kids' ? 'audience-adult-on-kids' : 'audience-kids-on-adult'
     if (titleNetActsOn(reason, ctx)) {
-      const designWords = designWordSet(ctx.designTokens)
       const re = ctx.audience === 'kids' ? ADULT_AUDIENCE_RE : KIDS_AUDIENCE_RE
       const clauseRe = new RegExp(`(?:\\bfor\\s+)?${re.source}(?:\\s*(?:,|&|\\band\\b)\\s*${re.source})*`, 'gi')
       s = s.replace(clauseRe, (m) => {
-        if (foreignAudienceHits(m, re, designWords).length === 0) return m
+        // `s` (the enclosing SEGMENT, not the narrower matched clause `m`) is the wide-text
+        // context — a design's OTHER word ("dad") may sit outside `m` ("for Girls") but still
+        // inside the same segment ("Girl Dad Tee for Girls"). See `isDesignOwnWord`'s doc.
+        if (foreignAudienceHits(m, re, ctx.designTokens, s).length === 0) return m
         return isProtected(m) ? m : ''
       })
     }
@@ -1421,6 +1455,42 @@ export function applyTitleTruthNet(
   return collapseRedundantGarmentMention(enforceSingleGarmentClass(swept, ctx, protectHay, seg0.primaryClass), protectHay)
 }
 
+/**
+ * RULING (fix round 2, I-3/R1) — cross-clause composition binding, the recombination escape the
+ * reviewer proved: on a 52/48 blend blank, `Cozy Crewneck Sweatshirt, Made With 100%, Combed
+ * Cotton Feel, Classic Fit` returned `{ok:true}` because rule (g) above judges ONE comma clause at
+ * a time, by design (same doctrine as weight-class-lie/fit-claim-lie), and NEITHER clause alone is
+ * a claim: "Made With 100%" has no fibre word beside it, "Combed Cotton Feel" has no marker beside
+ * it. Split across a comma, the identical lie a single clause would already catch survives.
+ *
+ * THE FIX judges the WHOLE LINE, reusing the EXACT same `isCompositionClaim`/`fiberSetIn`/
+ * `clauseAssertsBlend` helpers rule (g) already gates on — never a second detector. Rule (g)'s own
+ * "%"/"blend"/two-distinct-fibres branches already have NO adjacency requirement even within one
+ * clause (only the ordinary-English purity WORDS — pure/all/solid/genuine/real — need
+ * `PURITY_ADJACENT_RE`'s adjacency, to keep "All Season Cotton"/"Real Deal Cotton" passing); running
+ * the identical, unchanged predicate over the FULL LINE simply widens that no-adjacency-needed
+ * marker set from clause-scope to line-scope, closing the split without touching what the ambiguous
+ * purity words are allowed to mean (a literal comma is not in `PURITY_ADJACENT_RE`'s `[\s-]`, so
+ * "Pure Joy, Cotton Feel" still cannot bind — only the unambiguous "%"/"blend"/multi-fibre signals
+ * cross a clause boundary). Redundant with rule (g) on a SAME-clause claim (harmless: identical
+ * `material-lie` reason either way) — this function exists ONLY for the cross-clause case rule (g)
+ * cannot see. ITEM HIGHLIGHTS ONLY, same field gate as rule (g).
+ */
+function lineCompositionVerdict(line: string, ctx: PhraseTruthCtx): PhraseTruthVerdict {
+  if (ctx.field !== 'highlights') return { ok: true }
+  const fibers = fiberSetIn(line)
+  if (!isCompositionClaim(line, fibers)) return { ok: true }
+  const trueMaterial = ctx.spec?.material
+  if (!trueMaterial) return { ok: false, reason: 'material-lie' }
+  const trueFibers = fiberSetIn(trueMaterial)
+  if (trueFibers.size === 0) return { ok: false, reason: 'material-lie' }
+  const subset = [...fibers].every((f) => trueFibers.has(f))
+  if (!subset || clauseAssertsBlend(line, fibers) !== clauseAssertsBlend(trueMaterial, trueFibers)) {
+    return { ok: false, reason: 'material-lie' }
+  }
+  return { ok: true }
+}
+
 /* ─── THE ITEM HIGHLIGHT LINE-LEVEL TRUTH NET ─────────────────────────────────────────────────── */
 
 /**
@@ -1449,6 +1519,8 @@ export function applyTitleTruthNet(
  * different field gets a strict SUBSET of the highlights rules, never a wrong one.
  */
 export function ihLineTruthVerdict(line: string, ctx: PhraseTruthCtx): PhraseTruthVerdict {
+  const composition = lineCompositionVerdict(line, ctx)
+  if (!composition.ok) return composition
   for (const clause of line.split(',').map((s) => s.trim()).filter(Boolean)) {
     const verdict = phraseTruthVerdict(clause, ctx)
     if (!verdict.ok) return verdict
