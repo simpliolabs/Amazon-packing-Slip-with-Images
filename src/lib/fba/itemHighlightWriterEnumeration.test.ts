@@ -26,6 +26,8 @@
 import { describe, it, expect } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
+import ts from 'typescript'
 
 const SRC_ROOT = path.join(process.cwd(), 'src')
 const LISTING_PIPELINE_REL = 'src/lib/fba/listingPipeline.ts'
@@ -496,4 +498,428 @@ describe('Item Highlights writer (B4): sync builders are called ONLY through the
     expect(route).toMatch(/await produceItemHighlightsPerDesign\(\{/)
     expect(route).toMatch(/await produceItemHighlights\(\{/)
   })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// RULING K8 (fix round B4, wire B1): "The enumeration test detects REFERENCES, not spellings."
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Review B3's wire lens (phase-b3-review-wire.md §2) proved the spelling-based scanners above miss
+// 8 compiling bypass shapes — namespace destructuring/bracket access, a `.then`/`require` dynamic
+// import, and four shapes INSIDE listingPipeline.ts/itemHighlightComposer.ts itself (a new branch
+// or alias that reaches a restricted name with no builder/wrapper call spelled anywhere). The cure
+// (per the ruling) is the TypeScript compiler's own symbol resolution: build a `ts.Program` over
+// `src/`, take the declaration SYMBOL of each of the five restricted names, and require every
+// REFERENCE to that symbol (however it is spelled — an alias, a destructure, a namespace property,
+// a bracket-string access, a dynamic import) to sit inside a sanctioned enclosing function. This
+// keeps the scanners above (they still run, per the ruling's "keep the existing import scanner") —
+// K8 adds a second, independent net that reasons about REFERENCES instead of TEXT.
+
+/** The five names the ruling names, and each one's HOME file (declaration site). */
+const RESTRICTED_NAMES = ['buildItemHighlights', 'buildItemHighlightsPerDesign', 'composeItemHighlightDetailed', 'composeItemHighlight', 'runIhTail'] as const
+type RestrictedName = typeof RESTRICTED_NAMES[number]
+
+/** Every function name whose BODY may legitimately reference a restricted name: the three
+ *  produce-prefixed wrappers (spec's own "the produce* wrappers, or the builders' own internals"),
+ *  PLUS `buildItemHighlights` itself (it calls `composeItemHighlightDetailed`/`runIhTail` — the
+ *  canonical composer/tail call site) and `composeItemHighlight` (the composer's own thin wrapper
+ *  around `composeItemHighlightDetailed`). Every OTHER function, or module top level (an import
+ *  binding is not itself a reference — see `isImportBindingDecl` below — but an ALIAS assignment,
+ *  a re-export, or a call outside these six is), is unsanctioned. */
+const SANCTIONED_ENCLOSING_FN_NAMES = new Set<string>([
+  'buildItemHighlights', 'buildItemHighlightsPerDesign', 'produceItemHighlights', 'produceItemHighlightsPerDesign', 'composeItemHighlight',
+])
+
+interface EnumerationProgramInputs {
+  rootNames: string[]
+  options: ts.CompilerOptions
+  /** Absolute path to `listingPipeline.ts` and `itemHighlightComposer.ts` WITHIN this program's own
+   *  root (a scratch copy has its own absolute paths, distinct from the real tree's). */
+  listingPipelineAbs: string
+  composerAbs: string
+}
+
+const BASE_COMPILER_OPTIONS: ts.CompilerOptions = {
+  target: ts.ScriptTarget.ES2017,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  jsx: ts.JsxEmit.ReactJSX,
+  esModuleInterop: true,
+  allowJs: true,
+  skipLibCheck: true,
+  noEmit: true,
+  strict: false,
+}
+
+function listTsFilesFlat(dir: string): string[] {
+  const out: string[] = []
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) { out.push(...listTsFilesFlat(full)); continue }
+    if (!/\.(ts|tsx)$/.test(entry.name)) continue
+    if (/\.test\.tsx?$/.test(entry.name)) continue
+    out.push(full)
+  }
+  return out
+}
+
+/** The REAL tree's program inputs — used by the "real tree" completeness test below. */
+function realTreeInputs(): EnumerationProgramInputs {
+  return {
+    rootNames: listTsFilesFlat(SRC_ROOT),
+    options: { ...BASE_COMPILER_OPTIONS, baseUrl: process.cwd(), paths: { '@/*': ['./src/*'] } },
+    listingPipelineAbs: path.join(SRC_ROOT, 'lib/fba/listingPipeline.ts'),
+    composerAbs: path.join(SRC_ROOT, 'lib/fba/itemHighlightComposer.ts'),
+  }
+}
+
+/**
+ * THE K8 scanner. Builds a `ts.Program`, finds the declaration SYMBOL of each restricted name
+ * inside its home file, then walks every root file looking for a reference to that symbol:
+ * - Inside the TWO home files (`listingPipeline.ts`/`itemHighlightComposer.ts`): a reference is
+ *   fine when it is the declaration itself, an IMPORT binding (bringing the OTHER home's two names
+ *   into scope — that binding itself is not a "use"), or a genuine use whose nearest enclosing
+ *   top-level function is one of `SANCTIONED_ENCLOSING_FN_NAMES`. Anything else — a new function, a
+ *   module-level alias/const, a re-export — is a violation.
+ * - In every OTHER file: ANY reference to a restricted name is unconditionally a violation — such a
+ *   file should never need to reach these five names directly; it must call `produce*` instead.
+ * `require(...)`/dynamic `import(...)` destructuring is walked STRUCTURALLY as well (their return
+ * type is untyped/`any`, so the checker's own symbol resolution goes dark for that one shape) —
+ * still a compiler-API/AST answer, never a spelling regex over source text.
+ */
+function findEnumerationViolations(inputs: EnumerationProgramInputs): { violations: string[]; ms: number } {
+  const t0 = Date.now()
+  const { rootNames, options, listingPipelineAbs, composerAbs } = inputs
+  const homeAbsOf: Record<RestrictedName, string> = {
+    buildItemHighlights: listingPipelineAbs, buildItemHighlightsPerDesign: listingPipelineAbs, runIhTail: listingPipelineAbs,
+    composeItemHighlightDetailed: composerAbs, composeItemHighlight: composerAbs,
+  }
+  const homeFiles = new Set<string>([listingPipelineAbs, composerAbs])
+  const program = ts.createProgram({ rootNames, options })
+  const checker = program.getTypeChecker()
+
+  function findDeclSymbol(name: RestrictedName): ts.Symbol | null {
+    const sf = program.getSourceFile(homeAbsOf[name])
+    if (!sf) return null
+    let found: ts.Symbol | null = null
+    const visit = (node: ts.Node): void => {
+      if (found) return
+      if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
+        const sym = checker.getSymbolAtLocation(node.name)
+        if (sym) found = sym
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sf)
+    return found
+  }
+  const declSymbols: Record<string, ts.Symbol | null> = {}
+  for (const name of RESTRICTED_NAMES) declSymbols[name] = findDeclSymbol(name)
+
+  function resolvesToTarget(node: ts.Node, target: ts.Symbol): boolean {
+    let sym: ts.Symbol | undefined = checker.getSymbolAtLocation(node)
+    if (!sym) return false
+    const seen = new Set<ts.Symbol>()
+    while (sym && (sym.flags & ts.SymbolFlags.Alias) && !seen.has(sym)) {
+      seen.add(sym)
+      try { sym = checker.getAliasedSymbol(sym) } catch { break }
+    }
+    if (sym === target) return true
+    const targetDecls = target.declarations ?? []
+    const symDecls = sym?.declarations ?? []
+    return symDecls.some((d) => targetDecls.includes(d))
+  }
+  function enclosingFunctionName(node: ts.Node): string | null {
+    let cur: ts.Node | undefined = node
+    while (cur) {
+      if (ts.isFunctionDeclaration(cur) && cur.name) return cur.name.text
+      cur = cur.parent
+    }
+    return null
+  }
+  function isTypeOnlyPosition(node: ts.Node): boolean {
+    let cur: ts.Node | undefined = node
+    while (cur) {
+      if (ts.isTypeReferenceNode(cur) || ts.isTypeQueryNode(cur)) return true
+      if (ts.isImportSpecifier(cur) && cur.isTypeOnly) return true
+      if (ts.isImportClause(cur) && cur.isTypeOnly) return true
+      if (ts.isTypeAliasDeclaration(cur)) return true
+      cur = cur.parent
+    }
+    return false
+  }
+  function isImportBindingDecl(node: ts.Node): boolean {
+    const p = node.parent
+    return !!p && ts.isImportSpecifier(p) && (p.name === node || p.propertyName === node)
+  }
+  function specifierTargetsHome(spec: string): string | null {
+    if (/listingPipeline/.test(spec)) return listingPipelineAbs
+    if (/itemHighlightComposer/.test(spec)) return composerAbs
+    return null
+  }
+  function isRequireCall(node: ts.Node): node is ts.CallExpression {
+    return ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require'
+      && node.arguments.length === 1 && ts.isStringLiteralLike(node.arguments[0])
+  }
+  /** `require(...)`/dynamic `import(...)` destructuring — untyped, so `resolvesToTarget` goes dark;
+   *  read the AST structurally instead (still the compiler API, never a source-text regex). */
+  function structuralDynamicViolations(sf: ts.SourceFile, rel: string): string[] {
+    const out: string[] = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isVariableDeclaration(node) && node.initializer && ts.isObjectBindingPattern(node.name)) {
+        let spec: string | null = null
+        const init = node.initializer
+        if (isRequireCall(init)) spec = (init.arguments[0] as ts.StringLiteralLike).text
+        else if (ts.isAwaitExpression(init) && ts.isCallExpression(init.expression)
+          && init.expression.expression.kind === ts.SyntaxKind.ImportKeyword
+          && init.expression.arguments.length === 1 && ts.isStringLiteralLike(init.expression.arguments[0])) {
+          spec = (init.expression.arguments[0] as ts.StringLiteralLike).text
+        }
+        const home = spec ? specifierTargetsHome(spec) : null
+        if (home && home !== sf.fileName) {
+          for (const el of (node.name as ts.ObjectBindingPattern).elements) {
+            const propName = el.propertyName ?? el.name
+            if (ts.isIdentifier(propName) && (RESTRICTED_NAMES as readonly string[]).includes(propName.text)) {
+              out.push(`${rel}: destructures restricted name '${propName.text}' from '${spec}' outside its home module`)
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sf)
+    return out
+  }
+  /** `obj['buildItemHighlights'](...)` — bracket-string element access, traced back through
+   *  `as any` casts and local re-assignment to a namespace import of a restricted home module. */
+  function resolvesToNamespaceOfHome(idNode: ts.Node, depth: number): boolean {
+    if (depth > 5) return false
+    const objSym = checker.getSymbolAtLocation(idNode)
+    for (const d of objSym?.declarations ?? []) {
+      if (ts.isNamespaceImport(d) && specifierTargetsHome((d.parent.parent as ts.ImportDeclaration).moduleSpecifier.getText().replace(/^['"]|['"]$/g, ''))) return true
+      if (ts.isVariableDeclaration(d) && d.initializer) {
+        let init: ts.Expression = d.initializer
+        while (ts.isAsExpression(init) || ts.isParenthesizedExpression(init) || ts.isNonNullExpression(init)) init = init.expression
+        if (ts.isIdentifier(init) && resolvesToNamespaceOfHome(init, depth + 1)) return true
+      }
+    }
+    return false
+  }
+
+  const violations: string[] = []
+  for (const file of rootNames) {
+    const sf = program.getSourceFile(file)
+    if (!sf) continue
+    const rel = path.relative(process.cwd(), file).replace(/\\/g, '/')
+    const isHome = homeFiles.has(file)
+    if (!isHome) violations.push(...structuralDynamicViolations(sf, rel))
+    const visit = (node: ts.Node): void => {
+      if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)
+        && (RESTRICTED_NAMES as readonly string[]).includes(node.argumentExpression.text)) {
+        const text = node.argumentExpression.text
+        const target = declSymbols[text]
+        let matches = false
+        if (target) {
+          const sym = checker.getSymbolAtLocation(node.argumentExpression)
+          matches = !!sym && (sym === target || (sym.declarations ?? []).some((d) => (target.declarations ?? []).includes(d)))
+        }
+        if (!matches) {
+          let obj: ts.Expression = node.expression
+          while (ts.isAsExpression(obj) || ts.isParenthesizedExpression(obj)) obj = obj.expression
+          if (ts.isIdentifier(obj)) matches = resolvesToNamespaceOfHome(obj, 0)
+        }
+        if (matches) {
+          violations.push(isHome
+            ? `${rel}: bracket-access reference to '${text}' outside sanctioned function`
+            : `${rel}: bracket-access reference to '${text}' outside its home module`)
+        }
+      }
+      if (ts.isIdentifier(node) && (RESTRICTED_NAMES as readonly string[]).includes(node.text)) {
+        const parent = node.parent
+        if (ts.isFunctionDeclaration(parent) && parent.name === node) { ts.forEachChild(node, visit); return }
+        if (isTypeOnlyPosition(node)) { ts.forEachChild(node, visit); return }
+        const target = declSymbols[node.text]
+        if (target && resolvesToTarget(node, target)) {
+          if (isHome && isImportBindingDecl(node)) { ts.forEachChild(node, visit); return }
+          if (isHome) {
+            const enc = enclosingFunctionName(node)
+            if (!enc || !SANCTIONED_ENCLOSING_FN_NAMES.has(enc)) {
+              violations.push(`${rel}: reference to '${node.text}' outside sanctioned function (found inside ${enc ?? 'top-level'})`)
+            }
+          } else {
+            violations.push(`${rel}: reference to '${node.text}' outside its home module`)
+          }
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sf)
+  }
+  return { violations, ms: Date.now() - t0 }
+}
+
+/** Copies `SRC_ROOT` into a fresh scratch temp dir (never inside the repo — RULING K8's own
+ *  "scratch COPY" instruction), optionally appending `homeAppend` text to one home file (to prove a
+ *  new in-home bypass function goes RED) and/or adding one synthetic file at `extraRelPath`
+ *  (relative to `src/`) with `extraContent` (to prove an outside-file bypass goes RED). Returns
+ *  program inputs pointed at the COPY, and a cleanup function. The real tree is NEVER written. */
+function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: string }; extra?: { relPath: string; content: string } }): { inputs: EnumerationProgramInputs; cleanup: () => void } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ihw-enum-k8-'))
+  const copyRoot = path.join(dir, 'src')
+  fs.cpSync(SRC_ROOT, copyRoot, { recursive: true })
+  if (opts.homeAppend) {
+    const target = path.join(copyRoot, opts.homeAppend.rel === 'pipeline' ? 'lib/fba/listingPipeline.ts' : 'lib/fba/itemHighlightComposer.ts')
+    fs.appendFileSync(target, '\n' + opts.homeAppend.text)
+  }
+  const rootNames = listTsFilesFlat(copyRoot)
+  if (opts.extra) {
+    const full = path.join(copyRoot, opts.extra.relPath)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, opts.extra.content)
+    rootNames.push(full)
+  }
+  const inputs: EnumerationProgramInputs = {
+    rootNames,
+    options: { ...BASE_COMPILER_OPTIONS, baseUrl: dir, paths: { '@/*': ['./src/*'] } },
+    listingPipelineAbs: path.join(copyRoot, 'lib/fba/listingPipeline.ts'),
+    composerAbs: path.join(copyRoot, 'lib/fba/itemHighlightComposer.ts'),
+  }
+  return { inputs, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) }
+}
+
+describe('RULING K8: the enumeration test detects REFERENCES, not spellings (TypeScript compiler API)', () => {
+  // ─── The 7 shapes the OLD (spelling-based) scanners already caught — proven RED again through
+  // the NEW reference-resolution scanner, so K8 is additive, not a regression. ───────────────────
+  const OUTSIDE_FILE_SHAPES: Record<string, string> = {
+    plain: `
+      import { buildItemHighlights } from '@/lib/fba/listingPipeline'
+      export async function POST() { return buildItemHighlights({} as never) }
+    `,
+    alias: `
+      import { buildItemHighlights as composeIh } from '@/lib/fba/listingPipeline'
+      export async function POST() { return composeIh({} as never) }
+    `,
+    namespace: `
+      import * as lp from '@/lib/fba/listingPipeline'
+      export async function POST() { return lp.buildItemHighlights({} as never) }
+    `,
+    lower: `
+      import { runIhTail } from '@/lib/fba/listingPipeline'
+      import { composeItemHighlightDetailed } from '@/lib/fba/itemHighlightComposer'
+      export async function POST() {
+        const res = composeItemHighlightDetailed([], [], {} as never)
+        return runIhTail(res.line ?? '', {} as never)
+      }
+    `,
+    'lower-ns': `
+      import * as pipeline from '@/lib/fba/listingPipeline'
+      import * as composer from '@/lib/fba/itemHighlightComposer'
+      export async function POST() {
+        const res = composer.composeItemHighlightDetailed([], [], {} as never)
+        return pipeline.runIhTail(res.line ?? '', {} as never)
+      }
+    `,
+    dynamic: `
+      export async function POST() {
+        const { buildItemHighlights } = await import('@/lib/fba/listingPipeline')
+        return buildItemHighlights({} as never)
+      }
+    `,
+    // 8 MORE bypass shapes review B3 measured GREEN under the OLD scanners:
+    nsdestructure: `
+      import * as lp from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        const { buildItemHighlights: b } = lp
+        return b({} as never)
+      }
+    `,
+    nsbracket: `
+      import * as lp from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        const lpAny = lp as any
+        return lpAny['buildItemHighlights']({})
+      }
+    `,
+    dynthen: `
+      export async function POST() {
+        const r1 = await import('@/lib/fba/itemHighlightComposer').then(({ composeItemHighlightDetailed: c }) => c)
+        const r2 = await import('@/lib/fba/listingPipeline').then(({ runIhTail: t }) => t)
+        return { r1, r2 }
+      }
+    `,
+    requirecjs: `
+      export function POST() {
+        const { buildItemHighlights: b } = require('@/lib/fba/listingPipeline')
+        return b({} as never)
+      }
+    `,
+  }
+  for (const [name, content] of Object.entries(OUTSIDE_FILE_SHAPES)) {
+    it(`sensitivity ("${name}") — an outside-file bypass goes RED in a scratch copy`, () => {
+      const { inputs, cleanup } = scratchCopy({ extra: { relPath: `app/api/fba/probe-k8-${name}/route.ts`, content } })
+      try {
+        const { violations } = findEnumerationViolations(inputs)
+        expect(violations.length, `"${name}" must be flagged`).toBeGreaterThan(0)
+      } finally { cleanup() }
+    })
+  }
+
+  // "barrel" (a re-export in a helper, then consumed by a real filename): the restricted name is
+  // written once, at the re-export site — that is where the NEW scanner (an Identifier reference,
+  // exactly like any other) flags it, matching the existing `findReExportBypass` scanner's own
+  // documented behaviour.
+  it('sensitivity ("barrel") — a re-export of a restricted name in a helper file goes RED at the re-export site', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: { relPath: 'app/api/fba/probe-k8-barrel/helper.ts', content: `export { buildItemHighlights as buildIh } from '@/lib/fba/listingPipeline'` },
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.some((v) => v.includes('buildItemHighlights')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+
+  // ─── The 4 IN-HOME shapes (a new branch/alias inside listingPipeline.ts/itemHighlightComposer.ts
+  // itself) the OLD scanners missed entirely, because their import/namespace/re-export/dynamic
+  // scanners blanket-exempt "the whole file is listingPipeline.ts" and the OLD call scanner only
+  // ever tracked the two BUILDER names, never the composer's two names or `runIhTail`. ───────────
+  const HOME_SHAPES: Record<string, { rel: 'pipeline' | 'composer'; text: string }> = {
+    'pipeline-lower': {
+      rel: 'pipeline',
+      text: `
+export function k8BypassPipelineLower(input: unknown) {
+  const res = composeItemHighlightDetailed([], [], {} as never)
+  return runIhTail(res.line ?? '', {} as never)
+}
+`,
+    },
+    'pipeline-ref': {
+      rel: 'pipeline',
+      text: `
+export function k8BypassPipelineRef(input: never) {
+  const build = buildItemHighlights
+  return build(input)
+}
+`,
+    },
+    'pipeline-alias': { rel: 'pipeline', text: `export const k8BypassPipelineAlias = buildItemHighlights\n` },
+    'composer-alias': { rel: 'composer', text: `export const k8BypassComposerAlias = composeItemHighlightDetailed\n` },
+  }
+  for (const [name, shape] of Object.entries(HOME_SHAPES)) {
+    it(`sensitivity ("${name}") — a new bypass inside the HOME file itself goes RED`, () => {
+      const { inputs, cleanup } = scratchCopy({ homeAppend: shape })
+      try {
+        const { violations } = findEnumerationViolations(inputs)
+        expect(violations.length, `"${name}" must be flagged`).toBeGreaterThan(0)
+      } finally { cleanup() }
+    })
+  }
+
+  // ─── The REAL tree: zero violations, real functions only, runtime reported (never silently
+  // raised if it exceeds 60s — RULING K8's own instruction). ───────────────────────────────────
+  it('the REAL tree has ZERO reference-level violations (report the runtime)', () => {
+    const { violations, ms } = findEnumerationViolations(realTreeInputs())
+    // eslint-disable-next-line no-console
+    console.log(`[K8] findEnumerationViolations over the real tree: ${ms}ms${ms > 60_000 ? ' — EXCEEDS 60s' : ''}`)
+    expect(violations, JSON.stringify(violations)).toEqual([])
+  }, 120_000)
 })

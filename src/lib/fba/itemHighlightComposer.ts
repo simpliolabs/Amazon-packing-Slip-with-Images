@@ -103,6 +103,19 @@ export function ihTruthVerdict(phrase: string, ctx: IhTruthCtx): { ok: true } | 
   return phraseTruthVerdict(phrase, { ...ctx, field: 'highlights' })
 }
 
+/** RULING K2 (fix round B4, compliance B2 defense-in-depth): the composer's OWN "does this text
+ *  carry the brand" test, extracted so the writer's judge can run the IDENTICAL check on its final
+ *  rendered/tailed bytes — never a second, hand-rolled brand regex. Byte-identical to the composer's
+ *  own pre-extraction `carriesBrand` closure (word-boundary regex OR a flattened-substring match). */
+export function brandCarrierRegex(allowedBrand: string): RegExp {
+  return new RegExp('\\b' + allowedBrand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*') + '\\b', 'i')
+}
+const flattenForBrandMatch = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+export function lineCarriesBrand(s: string, allowedBrand: string): boolean {
+  const re = brandCarrierRegex(allowedBrand)
+  return re.test(s) || flattenForBrandMatch(s).includes(flattenForBrandMatch(allowedBrand))
+}
+
 /** The deterministic brand phrase when no pool candidate carries the brand: "<Brand> <garment noun>". */
 const brandSpecPhrase = (brand: string, gf: ComposerGarmentFamily | undefined): string => {
   const noun = gf === 'long_sleeve_tee' ? 'Long Sleeve Shirt'
@@ -283,6 +296,22 @@ export interface ComposerResult {
   /** The reserved brand phrase this family needed composed (pool-sourced or the deterministic spec
    *  phrase) — `null` when no brand was due, or filtering never reached the point of resolving one. */
   brandPick?: string | null
+  /** RULING K2 (fix round B4, compliance B1/B2): `brandPick`'s ORIGIN — `'pool'` when it is the best
+   *  pool candidate carrying the brand, `'spec'` when it is the deterministic `brandSpecPhrase`
+   *  fallback, `null` when `brandPick` itself is null. The writer's admission (`buildAdmittedUnits`)
+   *  keys the brand unit's grammar CLASS on this, never on the unit's text: a pool-sourced brand
+   *  phrase is ordinary pool prose (list-join only — never after "with"/"in"/an article), while the
+   *  fixed spec phrase is a true fact of the product (relation-joinable). Computed unconditionally
+   *  alongside `brandPick` (moved up ahead of the `too-few-candidates` early return — see below) so
+   *  it rides on every exit that also carries `brandPick`. */
+  brandOrigin?: 'pool' | 'spec' | null
+  /** RULING K2: whether THIS family's brand is mandatory (`needBrand`, computed unconditionally
+   *  before any early return) — exposed on EVERY exit, including `unrated-pool` (where `brandPick`
+   *  itself is still absent, since candidates were never filtered) and `too-few-candidates` (where
+   *  `brandPick` IS now populated — see below). The writer keys its brand requirement on THIS field,
+   *  never on whether `brandPick` happens to be exposed, so a family whose composer HOLDS on
+   *  `too-few-candidates` still gets a writer line that is rejected or branded, never unbranded. */
+  needBrand: boolean
   /** The PO-sanctioned "Can be worn as Oversized" fact when this family is eligible for it — `null`
    *  otherwise, or when filtering never reached the point of resolving eligibility. */
   wearFact?: string | null
@@ -372,12 +401,8 @@ export function composeItemHighlightDetailed(
   // (pure, cheap) so it rides on EVERY return below, not only the padding-loop path that consumes a
   // second, independently-built copy of it further down. Never read by any pre-existing branch.
   const specFactsForWriter = opts?.spec ? ihSpecFactFillers(opts.spec).map(titleCasePhrase) : []
-  const flatten = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-  const brandRe = opts?.allowedBrand
-    ? new RegExp('\\b' + opts.allowedBrand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*') + '\\b', 'i')
-    : null
-  const carriesBrand = (s: string): boolean =>
-    !!brandRe && !!opts?.allowedBrand && (brandRe.test(s) || flatten(s).includes(flatten(opts.allowedBrand)))
+  const brandRe = opts?.allowedBrand ? brandCarrierRegex(opts.allowedBrand) : null
+  const carriesBrand = (s: string): boolean => !!opts?.allowedBrand && lineCarriesBrand(s, opts.allowedBrand)
 
   // The PO wear-style fact reserves its budget UP FRONT when eligible — otherwise the greedy fill
   // reaches the band first and the fact never fits (test-caught design gap).
@@ -415,9 +440,12 @@ export function composeItemHighlightDetailed(
   // B1 (writer spec Part 2): `extra` carries whatever admitted-set fields are already in scope at
   // the call site — `undefined` (the 'unrated-pool' call, before `candidates` exists) leaves
   // `candidates` absent, which is exactly the ONE stage B8's eligibility rule reads as "never call".
-  const nullOut = (stage: ComposerNullStage, extra?: Pick<ComposerResult, 'candidates' | 'brandPick' | 'wearFact'>): ComposerResult => {
+  // RULING K2 (fix round B4): `needBrand`/`brandPick`/`brandOrigin` ride on EVERY exit from this
+  // point on (`nullOut`'s own return always spreads them) — additive, and flag-off bytes do not
+  // move, because `line` stays null on every exit `nullOut` produces.
+  const nullOut = (stage: ComposerNullStage, extra?: Pick<ComposerResult, 'candidates' | 'brandPick' | 'brandOrigin' | 'wearFact'>): ComposerResult => {
     console.log(JSON.stringify({ tag: 'IH_COMPOSER_NULL', stage, ...why }))
-    return { line: null, stage, specFacts: specFactsForWriter, ...extra }
+    return { line: null, stage, specFacts: specFactsForWriter, needBrand, ...extra }
   }
   if (!requireFit) return nullOut('unrated-pool')
   const candidates = pool
@@ -447,7 +475,6 @@ export function composeItemHighlightDetailed(
   // computed once here so every return from this point on exposes the SAME array, never a re-derived
   // copy.
   const candidatePhrasesForWriter = candidates.map((c) => titleCasePhrase(c.keyword))
-  if (candidates.length < MIN_CANDIDATES) return nullOut('too-few-candidates', { candidates: candidatePhrasesForWriter })
 
   // THE brand phrase (waterfall): prefer the best pool candidate carrying the brand (themeFit >= 2,
   // already truth-clean and not title-covered — candidates are sorted fit DESC / volume DESC), else
@@ -455,12 +482,28 @@ export function composeItemHighlightDetailed(
   // counts toward budget, novelty and the repeat cap from the start, so the line always has room
   // for it and the brand-once rule holds by construction (every other brand-bearing candidate is
   // excluded from the pick loop while the waterfall is live).
+  // RULING K2 (fix round B4, compliance B2): MOVED UP ahead of the `too-few-candidates` early
+  // return below (was computed only once `candidates.length >= MIN_CANDIDATES`) — a
+  // `too-few-candidates` family with `needBrand` true still needs a brand unit exposed to the
+  // writer, or the writer has no way to satisfy the mandatory-brand rule and the tail's
+  // `ensureBlankBrandInHighlights` floor-aborts silently (compliance review B3's Blocking #2). Using
+  // the ALREADY-COMPUTED `candidates` array here changes no byte of the eventual shipped `line` —
+  // this is pure hoisting of a pure computation.
   const brandFromPool = needBrand
     ? candidates.find((c) => typeof c.themeFit === 'number' && c.themeFit >= MIN_THEME_FIT && carriesBrand(c.keyword))?.keyword ?? null
     : null
   const brandPick: string | null = needBrand
     ? titleCasePhrase(brandFromPool ?? brandSpecPhrase(opts!.allowedBrand!, opts?.garmentFamily))
     : null
+  // RULING K2 (compliance B1/Minor): the brand unit's writer-facing CLASS follows its ORIGIN, never
+  // its text — a pool-sourced brand phrase is ordinary pool prose (list-join only downstream), the
+  // fixed spec phrase is a true fact of the product (relation-joinable). `null` when no brand is due.
+  const brandOrigin: 'pool' | 'spec' | null = !needBrand ? null : brandFromPool ? 'pool' : 'spec'
+
+  if (candidates.length < MIN_CANDIDATES) {
+    return nullOut('too-few-candidates', { candidates: candidatePhrasesForWriter, brandPick, brandOrigin })
+  }
+
   const RESERVE = (factEligible ? OVERSIZED_FACT!.length + 2 : 0) + (brandPick ? brandPick.length + 2 : 0)
   const MAX = CONTENT_CONTRACT.itemHighlights.max - RESERVE
   // TWO NUMBERS, TWO JOBS (controller correction to #677, 2026-09-08 — see the "PO RULING 2+3"
@@ -529,7 +572,7 @@ export function composeItemHighlightDetailed(
       shadowRepeatReachesFloor(candidates, withBrand(picked), usedFolded, opts?.spec, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max, brandRe, brandPick)
     why.repeatBlocked = repeatBlocked
     return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'too-few-picked', {
-      candidates: candidatePhrasesForWriter, brandPick, wearFact: factEligible ? OVERSIZED_FACT : null,
+      candidates: candidatePhrasesForWriter, brandPick, brandOrigin, wearFact: factEligible ? OVERSIZED_FACT : null,
     })
   }
   if (brandPick) picked.push(brandPick)
@@ -621,7 +664,7 @@ export function composeItemHighlightDetailed(
       shadowRepeatReachesFloor(candidates, picked, usedFolded, opts?.spec, MIN, CONTENT_CONTRACT.itemHighlights.max, brandRe, brandPick)
     why.repeatBlocked = repeatBlocked
     return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'under-floor-after-pad', {
-      candidates: candidatePhrasesForWriter, brandPick, wearFact: factEligible ? OVERSIZED_FACT : null,
+      candidates: candidatePhrasesForWriter, brandPick, brandOrigin, wearFact: factEligible ? OVERSIZED_FACT : null,
     })
   }
 
@@ -634,6 +677,6 @@ export function composeItemHighlightDetailed(
     // accepted line through the identical `judgeWriterArrangement` (idempotence, B4 point 3 / G10)
     // and needs the same admitted set to do it. (`judgeWriterLine`, the free-text judge this comment
     // used to name, was deleted with the free-text parser in fix round B2 — W1/§2b.)
-    candidates: candidatePhrasesForWriter, specFacts: specFactsForWriter, brandPick, wearFact: factEligible ? OVERSIZED_FACT : null,
+    candidates: candidatePhrasesForWriter, specFacts: specFactsForWriter, brandPick, brandOrigin, needBrand, wearFact: factEligible ? OVERSIZED_FACT : null,
   }
 }

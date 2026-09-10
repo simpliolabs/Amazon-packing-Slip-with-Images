@@ -97,6 +97,30 @@ describe('RULING G1 (spec §2c): the closed arrangement grammar — must-reject 
     })
   }
 
+  // RULING K11 (fix round B4, truth Minor m4): the X1/X3/X4 CASES above do NOT isolate the rule
+  // they name — each also carries a LATER `'with', 'Brushed Fleece Lining'` relation-to-pool
+  // violation, and `validateGrammar`'s glue-role walk runs (and returns) BEFORE its separate
+  // abutment pass, so all three fire on the relation, never the abutment, they were built to pin.
+  // These list-joined variants remove every OTHER violation, so the ONLY thing that can reject them
+  // is rule 1 (abutment) — and assert the NAMED abutment violation, not merely `ok === false`.
+  it('X1/X3/X4, ISOLATED (list joins only): the identity-pool ABUTMENT itself is the named violation', () => {
+    const ISOLATED: { id: string; o: Parameters<typeof setup>[0]; spec: (string | { u: string; number: 'plural' | 'singular' })[] }[] = [
+      { id: 'X1-isolated', o: { name: 'Keep It Pure', pool: SWEAT_POOL, blank: BLEND_SWEAT }, spec: ['Keep It Pure', 'Soft Cotton Feel', 'and', 'Cozy Crewneck Sweatshirt', 'and', 'Brushed Fleece Lining', ',', 'Made For Chilly Fall Weekends'] },
+      { id: 'X3-isolated', o: { name: 'Give It All', pool: SWEAT_POOL, blank: BLEND_SWEAT }, spec: ['Give It All', 'Soft Cotton Feel', 'and', 'Cozy Crewneck Sweatshirt', 'and', 'Brushed Fleece Lining', ',', 'Made For Chilly Fall Weekends'] },
+      { id: 'X4-isolated', o: { name: 'Just Say No', pool: SWEAT_POOL, blank: BLEND_SWEAT }, spec: ['Just Say No', 'Polyester Blend Comfort', 'and', 'Cozy Crewneck Sweatshirt', 'and', 'Brushed Fleece Lining', ',', 'Made For Chilly Fall Weekends'] },
+    ]
+    for (const c of ISOLATED) {
+      const s = setup(c.o)
+      const r = resolve(c.spec, s.units)
+      if ('missing' in r) continue // acceptable — the lying clause has no admitted unit any more
+      // The FIRST two units abut with no glue between them (identity + a POOL unit) — this must be
+      // the ONLY grammar problem here (every other join is a plain list join).
+      const v = validateArrangement({ parts: r.parts }, s.units)
+      expect(v.ok, `${c.id} must be rejected`).toBe(false)
+      if (!v.ok) expect(v.violation, `${c.id}: ${v.violation}`).toMatch(/abut with no join/)
+    }
+  })
+
   it('X15 (true, control): the exact original spec array — abutting identity + pool with "with" — is now grammar-illegal (relation must introduce a spec unit), proving the fix generalizes; the NEAREST TRUE grammatical line (list joins only) still ships', () => {
     const s = setup({ name: 'Retro Sunset', pool: TEE_POOL, blank: PURE_TEE })
     const original = resolve(['Retro Sunset', { u: 'Tee', number: 'plural' }, 'with', 'Vintage Beach Vibes', ',', 'Soft Cotton Feel', 'and', 'Relaxed Everyday Style', ',', 'Made For Lazy Summer Days'], s.units)
@@ -105,10 +129,12 @@ describe('RULING G1 (spec §2c): the closed arrangement grammar — must-reject 
       const v = judgeWriterArrangement({ parts: original.parts }, s.units, { truthCtx: s.truthCtx, runTail: s.runTail })
       expect(v.ok, 'the ORIGINAL X15 spec now correctly fails grammar ("with" onto a pool unit)').toBe(false)
     }
-    // Nearest TRUE grammatical line: abutment before the garment-head unit, then LIST joins —
-    // "and" (not a bare ",") keeps at least two clauses non-keyword-shaped, same readability
-    // constraint `buildAcceptableArrangement` (itemHighlightWriterRunAcceptance.test.ts) satisfies.
-    const nearest = resolve(['Retro Sunset', { u: 'Tee', number: 'plural' }, 'and', 'Vintage Beach Vibes', ',', 'Soft Cotton Feel', 'and', 'Relaxed Everyday Style', ',', 'Made For Lazy Summer Days'], s.units)
+    // Nearest TRUE grammatical line: abutment before the garment-head unit, a RELATION join to a
+    // spec-fact unit (so the FIRST clause reads as a sentence fragment, not a keyword list — RULING
+    // K7, fix round B4, narrowed readability's "has a connecting word" test to RELATION words
+    // "with"/"in" only; a list join like "and" no longer counts), then LIST joins for the rest,
+    // gathered into ONE trailing clause so at most one clause is keyword-shaped.
+    const nearest = resolve(['Retro Sunset', { u: 'Tee', number: 'plural' }, 'with', 'Classic Fit', ',', 'Vintage Beach Vibes', 'and', 'Soft Cotton Feel', 'and', 'Made For Lazy Summer Days'], s.units)
     expect('missing' in nearest).toBe(false)
     if (!('missing' in nearest)) {
       const v = judgeWriterArrangement({ parts: nearest.parts }, s.units, { truthCtx: s.truthCtx, runTail: s.runTail })
@@ -129,7 +155,11 @@ describe('RULING G4 (F3): brand required — X17 end to end through produceItemH
       expect(v.ok, 'X17: an arrangement without the brand unit must be rejected now').toBe(false)
       if (!v.ok) expect(v.violations.join(' ')).toMatch(/missing required brand unit/)
     }
-    const withBrand = resolve(['Retro Sunset', 'and', 'Soft Graphic Tee', ',', 'Comfort Colors Tee', 'and', 'Vintage Beach Vibes', ',', 'Made For Lazy Summer Days'], s.units)
+    // RULING K7 (fix round B4): readability now counts only RELATION words ("with"/"in") as a
+    // clause's connecting word, so a chain of "and"s alone still reads as a keyword dump. Add a
+    // relation to a real spec-fact unit ("100% Ring-Spun Cotton") so exactly ONE clause is not
+    // keyword-shaped, and gather everything else into one trailing clause.
+    const withBrand = resolve(['Retro Sunset', 'with', '100% Ring-Spun Cotton', ',', 'Soft Graphic Tee', 'and', 'Comfort Colors Tee', 'and', 'Made For Lazy Summer Days'], s.units)
     expect('missing' in withBrand).toBe(false)
     if (!('missing' in withBrand)) {
       const v = judgeWriterArrangement({ parts: withBrand.parts }, s.units, { truthCtx: s.truthCtx, runTail: s.runTail })
@@ -172,16 +202,18 @@ describe('RULING G5 (F4): defensive fail-closed — X19/X20 rejected even if an 
   })
 })
 
-describe('RULING G2: identity admission requires 2+ word vision phrases (no single-word seeds) — closes X10\'s mechanism at the door', () => {
-  it('a single-word vision phrase is never admitted as an identity unit; a 2+ word one still is', () => {
+// RULING K3 (fix round B4, truth Important "the vision channel") supersedes this describe block's
+// original premise: vision phrases (`identityPhrases`) are no longer admitted as identity units AT
+// ALL, single-word or not — identity is the design name ONLY. Kept as a regression pin: neither a
+// single-word NOR a multi-word vision phrase ever becomes a second identity unit any more.
+describe('RULING K3 (supersedes G2\'s vision-phrase half): identity is the design name ONLY — no vision phrase, single-word or not, is ever admitted', () => {
+  it('neither a single-word nor a 2+ word vision phrase is admitted as an identity unit', () => {
     const units = buildAdmittedUnits(
       { candidates: [], specFacts: [], brandPick: null, wearFact: null },
       { designName: 'Girl Dad', identityPhrases: ['Girls', 'Girl Dad Life'], truthCtx: { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' } },
     )
     const identityTexts = units.filter((u) => u.kind === 'identity').map((u) => u.text)
-    expect(identityTexts).toContain('Girl Dad')
-    expect(identityTexts).toContain('Girl Dad Life')
-    expect(identityTexts).not.toContain('Girls')
+    expect(identityTexts).toEqual(['Girl Dad'])
   })
 })
 

@@ -137,11 +137,11 @@ describe('W1: validateArrangement', () => {
     if (!v.ok) expect(v.violation).toMatch(/outside the closed/)
   })
 
-  it('(c)/(f) accepts every closed glue token in a grammatically LEGAL position (spec §2c) — a relation/article must introduce a spec-fact unit, a list join may introduce any unit', () => {
+  it('(c)/(f) accepts every closed glue token in a grammatically LEGAL position (spec §2c) — a relation must introduce a spec-fact unit, a list join may introduce any unit; "a"/"an" is tested separately (RULING K6: never legal standing alone, only riding a join)', () => {
     const specUnit = units.find((u) => u.kind === 'spec-fact')!.id // 'Classic Fit'
     const poolUnit = units.find((u) => u.kind === 'pool')!.id // 'Cozy Graphic Sweatshirt' — not u0
-    for (const g of [...GLUE_WORDS, ...GLUE_PUNCTUATION]) {
-      const rightUnit = g === 'with' || g === 'in' || g === 'a' || g === 'an' ? specUnit : poolUnit
+    for (const g of [...GLUE_WORDS, ...GLUE_PUNCTUATION].filter((w) => w !== 'a' && w !== 'an')) {
+      const rightUnit = g === 'with' || g === 'in' ? specUnit : poolUnit
       const v = validateArrangement({ parts: [{ unit: u0 }, { glue: g }, { unit: rightUnit }] }, units)
       expect(v.ok, `glue "${g}" should validate: ${!v.ok ? v.violation : ''}`).toBe(true)
     }
@@ -177,7 +177,13 @@ describe('W1: validateArrangement', () => {
     // "with a <pool unit>" — the article precedes a NON-spec unit: illegal.
     const v = validateArrangement({ parts: [{ unit: u0 }, { glue: 'with' }, { glue: 'a' }, { unit: poolUnit }] }, units)
     expect(v.ok).toBe(false)
-    if (!v.ok) expect(v.violation).toMatch(/must introduce a spec fact/)
+    // RULING K6: narrowed message — an article may only introduce a "Fit"/"Neck" spec fact.
+    if (!v.ok) expect(v.violation).toMatch(/"Fit" or "Neck"/)
+    // RULING K6: a BARE article with no preceding join is never legal, regardless of the
+    // right-hand unit's kind (was silently accepted whenever that unit happened to be spec-class).
+    const bare = validateArrangement({ parts: [{ unit: u0 }, { glue: 'a' }, { unit: specUnit }] }, units)
+    expect(bare.ok).toBe(false)
+    if (!bare.ok) expect(bare.violation).toMatch(/bare article/)
   })
 
   it('(g) [RULING G4] when the admitted units carry a brand unit, an arrangement omitting it is a named violation', () => {
@@ -296,12 +302,17 @@ describe('W1: buildAdmittedUnits', () => {
     expect(units.filter((u) => u.kind === 'garment-head')).toHaveLength(0)
   })
 
-  it('deduplicates identity text case-insensitively (design name === an identity phrase)', () => {
+  // RULING K3 (fix round B4, truth Important "the vision channel"): identity units are the design
+  // name ONLY — vision phrases (`identityPhrases`) are no longer admitted as identity units at all,
+  // superseding this test's prior "dedupes design name vs. a vision phrase" scenario. A vision
+  // phrase can still reach the line, but only as a truth-filtered composer POOL candidate.
+  it('identity is the design name ONLY — identityPhrases never produces a second identity unit, even a 2+ word one', () => {
     const ctx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }
     const units = buildAdmittedUnits({ candidates: [], specFacts: [], brandPick: null, wearFact: null }, {
       designName: 'Girl Dad', identityPhrases: ['girl dad', 'Girl Dad Life'], truthCtx: ctx,
     })
-    expect(units.filter((u) => u.kind === 'identity')).toHaveLength(2) // 'Girl Dad' + 'Girl Dad Life', NOT the duplicate 'girl dad'
+    const identityTexts = units.filter((u) => u.kind === 'identity').map((u) => u.text)
+    expect(identityTexts).toEqual(['Girl Dad'])
   })
 })
 
@@ -404,7 +415,7 @@ describe('W2: picker-bounded rows (A4-class) — the writer\'s admission verdict
 
 describe('judgeWriterArrangement (validate -> render -> tail -> readability)', () => {
   const units: AdmittedUnit[] = buildAdmittedUnits(
-    { candidates: ['Cozy Graphic Sweatshirt', 'Pullover Comfort', 'Extra Cozy Weekend Layer'], specFacts: ['Classic Fit', 'Unisex Fit'], brandPick: null, wearFact: null },
+    { candidates: ['Cozy Graphic Sweatshirt', 'Pullover Comfort', 'Extra Long Weekend Layer'], specFacts: ['Classic Fit', 'Unisex Fit'], brandPick: null, wearFact: null },
     { designName: "Don't Quit", truthCtx: { garmentFamily: 'sweatshirt', spec: { material: 'Cotton/Poly', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' } },
   )
   const passthroughTail = (line: string) => ({ value: line, hold: null as string | null, reason: null as string | null })
@@ -417,22 +428,42 @@ describe('judgeWriterArrangement (validate -> render -> tail -> readability)', (
 
   it('a valid arrangement that the tail refuses reports the TAIL\'s reason (not the arrangement layer)', () => {
     const rejectingTail = (_line: string) => ({ value: '', hold: 'under-floor' as string | null, reason: 'material-lie' })
-    const idA = units[0].id
-    const v = judgeWriterArrangement({ parts: [{ unit: idA }] }, units, { truthCtx: { garmentFamily: 'sweatshirt', spec: null, allowedBrand: null, audience: 'adult', field: 'highlights' }, runTail: rejectingTail })
+    // RULING K1 (fix round B4): the judge's OWN band/repeat pre-checks now run BEFORE the tail is
+    // ever called, so this arrangement must itself clear the 97-125 band and carry no significant
+    // repeat — otherwise the pre-check's OWN message would fire first, never reaching the stub tail.
+    const designId = units.find((u) => u.kind === 'identity')!.id
+    const poolA = units.find((u) => u.text === 'Cozy Graphic Sweatshirt')!.id
+    const poolB = units.find((u) => u.text === 'Pullover Comfort')!.id
+    const poolC = units.find((u) => u.text === 'Extra Long Weekend Layer')!.id
+    const specA = units.find((u) => u.text === 'Classic Fit')!.id
+    const specB = units.find((u) => u.text === 'Unisex Fit')!.id
+    const parts = [
+      { unit: designId }, { glue: ',' }, { unit: poolA }, { glue: ',' }, { unit: poolB }, { glue: ',' }, { unit: poolC },
+      { glue: ',' }, { unit: specA }, { glue: 'and' }, { unit: specB },
+    ]
+    const v = judgeWriterArrangement({ parts }, units, { truthCtx: { garmentFamily: 'sweatshirt', spec: { material: 'Cotton/Poly', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }, runTail: rejectingTail })
     expect(v.ok).toBe(false)
     if (!v.ok) expect(v.violations.join(' ')).toMatch(/tail: refused \(material-lie\)/)
   })
 
   it('a valid, tail-accepted, readable arrangement passes end to end', () => {
-    // Grammar-legal (spec §2c): a LIST join (',') between the identity and the pool unit, then a
-    // RELATION join ('with') introducing a SPEC-fact unit — never a bare identity-pool abutment or
-    // a relation onto a non-spec unit (both now named grammar violations, see the describe block
-    // above).
+    // Grammar-legal (spec §2c): LIST joins ('and'/',') between the identity and two pool units,
+    // then a RELATION join ('with') introducing a SPEC-fact unit — never a bare identity-pool
+    // abutment or a relation onto a non-spec unit (both now named grammar violations, see the
+    // describe block above). RULING K1: also clears the 97-125 band and carries no repeat, since
+    // the judge checks those itself before ever calling the (here, pass-through) tail. RULING K7:
+    // only ONE comma-clause lacks a relation word ("Don't Quit and Cozy Graphic Sweatshirt and
+    // Pullover Comfort"), so it reads as one sentence, not a keyword dump.
     const designId = units.find((u) => u.kind === 'identity')!.id
-    const poolId = units.find((u) => u.text === 'Cozy Graphic Sweatshirt')!.id
-    const factId = units.find((u) => u.text === 'Unisex Fit')!.id
-    const parts = [{ unit: designId }, { glue: ',' }, { unit: poolId }, { glue: 'with' }, { unit: factId }]
-    const v = judgeWriterArrangement({ parts }, units, { truthCtx: { garmentFamily: 'sweatshirt', spec: null, allowedBrand: null, audience: 'adult', field: 'highlights' }, runTail: passthroughTail })
+    const poolA = units.find((u) => u.text === 'Cozy Graphic Sweatshirt')!.id
+    const poolB = units.find((u) => u.text === 'Pullover Comfort')!.id
+    const poolC = units.find((u) => u.text === 'Extra Long Weekend Layer')!.id
+    const factId = units.find((u) => u.text === 'Classic Fit')!.id
+    const parts = [
+      { unit: designId }, { glue: 'and' }, { unit: poolA }, { glue: 'and' }, { unit: poolB },
+      { glue: ',' }, { unit: poolC }, { glue: 'with' }, { unit: factId },
+    ]
+    const v = judgeWriterArrangement({ parts }, units, { truthCtx: { garmentFamily: 'sweatshirt', spec: { material: 'Cotton/Poly', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }, runTail: passthroughTail })
     expect(v.ok, JSON.stringify(!v.ok && v.violations)).toBe(true)
   })
 })

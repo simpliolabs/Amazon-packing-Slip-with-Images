@@ -102,3 +102,31 @@ describe('regenerate-item-highlight route: ONE writer for the per-design detail 
     expect(ROUTE).toMatch(/import \{[^}]*\bIH_REASON\b[^}]*\} from '@\/lib\/fba\/listingPipeline'/)
   })
 })
+
+// RULING K10 (fix round B4, wire Important I1): the writer's per-design shadow block must reach the
+// PO on EVERY 422 hold response, not only the 200 ship response — the spec's own target case is
+// exactly an all-held family. Source-level assertions, same methodology this file already uses for
+// every other route-body pin (the route's DB dependency chain — Supabase, the pool, the blank
+// resolver, vision identity — makes a full behavioral mock a rewrite orthogonal to this round).
+describe('regenerate-item-highlight route: the writer shadow block reaches every 422 hold response (RULING K10)', () => {
+  it('the all-held MULTI-design 422 body spreads built.writerLog as "writer"', () => {
+    const heldMessageIdx = ROUTE.indexOf('Item Highlight HELD for every design')
+    expect(heldMessageIdx).toBeGreaterThan(-1)
+    const block = ROUTE.slice(heldMessageIdx, ROUTE.indexOf('}, { status: 422 })', heldMessageIdx))
+    expect(block).toMatch(/\.\.\.\(built\.writerLog \? \{ writer: built\.writerLog \} : \{\}\)/)
+  })
+
+  it('the SINGLE-design 422 body (capResult refusal) spreads built.writerLog as "writer": [built.writerLog]', () => {
+    const idx = ROUTE.indexOf('if (!capResult.ok) {')
+    expect(idx).toBeGreaterThan(-1)
+    const block = ROUTE.slice(idx, ROUTE.indexOf('}, { status: 422 })', idx))
+    expect(block).toMatch(/\.\.\.\(built\.writerLog \? \{ writer: \[built\.writerLog\] \} : \{\}\)/)
+  })
+
+  it('the SINGLE-design 422 body (empty hl / built.hold) spreads built.writerLog as "writer": [built.writerLog]', () => {
+    const idx = ROUTE.indexOf('if (!hl) {')
+    expect(idx).toBeGreaterThan(-1)
+    const block = ROUTE.slice(idx, ROUTE.indexOf('}, { status: 422 })', idx))
+    expect(block).toMatch(/\.\.\.\(built\.writerLog \? \{ writer: \[built\.writerLog\] \} : \{\}\)/)
+  })
+})

@@ -270,6 +270,11 @@ export async function POST(req: NextRequest) {
           error: `Item Highlight HELD for every design (${built.perDesign.length}): ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')}${missing.length ? ` (unrated designs: ${missing.join(', ')})` : ''} — the held state has been saved (card shows Held; a stale/pre-ruling stored line can no longer be pushed).`,
           hold: reasons[0] ?? 'under-floor', missing_designs: missing,
           per_design: built.perDesign.map((d) => ({ designKey: d.designKey, designName: d.designName, hold: d.hold })),
+          // RULING K10 (fix round B4, wire Important I1): the SAME per-design shadow block the 200
+          // response carries — the spec's own target case is exactly this all-held family
+          // ("B0DSCDZC6K, where 5 of 6 designs hold"). Absent when IH_WRITER=off (`built.writerLog`
+          // is undefined there).
+          ...(built.writerLog ? { writer: built.writerLog } : {}),
         }, { status: 422 })
       }
       return NextResponse.json({
@@ -331,13 +336,16 @@ export async function POST(req: NextRequest) {
     const capResult = capItemHighlightRepeats((built.value || '').trim(), { contentCtx: { designSeasons, capacityFamily, brandName } })
     if (!capResult.ok) {
       const reason: IhHoldReason = built.hold ?? (capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor')
-      return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason }, { status: 422 })
+      // RULING K10 (fix round B4, wire Important I1): the single-design shadow readout, same as the
+      // 200 response and the multi-design 422 above.
+      return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason, ...(built.writerLog ? { writer: [built.writerLog] } : {}) }, { status: 422 })
     }
     const hl = capResult.value
     if (!hl) {
       // HOLD (PO 2026-08-21): name the reason — the PO's next action — never a generic "empty".
       const reason = built.hold ?? 'under-floor'
-      return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason }, { status: 422 })
+      // RULING K10: same shadow readout as the other 422 branches above.
+      return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason, ...(built.writerLog ? { writer: [built.writerLog] } : {}) }, { status: 422 })
     }
 
     // Single-design: the broadcast row carries the line; any stale per-design marker/array is cleared

@@ -25,6 +25,7 @@ import {
   type AdmittedUnit,
 } from './itemHighlightWriter'
 import { CONTENT_CONTRACT } from './contentContract'
+import { lineHasSignificantRepeat } from './productDetailAttrs'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
 import type { PhraseTruthCtx } from './contentTruth'
@@ -40,6 +41,11 @@ const kwPD = (keyword: string, searchVolume: number, themeFit: number, designKey
     themeFitByDesign: Object.fromEntries(designKeys.map((k) => [k, { fit: themeFit, about: keyword }])),
   } as unknown as AnalyzedKeyword)
 const CC = DEFAULT_BLANK_SPECS[0]
+// Gildan (brandInCopy: false -> allowedBrand null, no mandatory-brand insertion) — used where a
+// fixture needs REAL spec facts (material/fit, for RULING K7's relation-join requirement) without
+// the brand-net side effects `blankBrand: null` (an unresolved blank, zero spec facts at all) or
+// `CC` (a mandatory brand) would introduce.
+const GILDAN = DEFAULT_BLANK_SPECS[1]
 
 // ─── test-only helper: turns a JS arrangement of {unit|glue} into the JSON the model would return ─
 
@@ -60,37 +66,51 @@ function stubArrangementClient(responses: unknown[]) {
  *  renders within [min, max] — deterministic, order-preserving over `units`. Returns null if no
  *  such assembly exists from this exact unit list. Test-only: exercises the SAME `renderArrangement`
  *  production code renders with, never a parallel re-implementation of it. RULING G1 (spec §2c):
- *  joins are "and"/"," ONLY (both LIST joins, legal between ANY two units regardless of kind) — the
- *  prior "with" alternation is no longer grammar-legal between two arbitrary units (a RELATION join
- *  may only introduce a spec-fact/brand/wear-fact unit); "and" (not a bare ",") for every join but
- *  the last keeps at least one clause containing a real connecting word, so the readability check's
- *  "reads as 2+ phrases" rule (at most one keyword-shaped clause) still has something to pass on. */
+ *  joins are "and"/","/"with" — "and"/"," are LIST joins (legal between ANY two units); "with" is
+ *  used whenever the RIGHT-hand piece is a spec-fact/brand/wear-fact unit (the only class a
+ *  RELATION join may introduce). RULING K7 (fix round B4): readability now counts ONLY a relation
+ *  word ("with"/"in") as a clause's connecting word — a chain of "and"s alone reads as a keyword
+ *  dump — so at least one "with" (when the chosen pieces include a spec-kind unit, as every REAL
+ *  admitted set with a resolved blank does) keeps that one clause non-keyword-shaped, while the
+ *  trailing "," still gives the tail's sentence-shape rule its required 2nd phrase. */
+function partsFor(pieces: readonly AdmittedUnit[]): (string | { glue: string })[] {
+  const parts: (string | { glue: string })[] = []
+  const SPEC_KIND = new Set(['spec-fact', 'brand', 'wear-fact'])
+  pieces.forEach((u, i) => {
+    parts.push(u.id)
+    if (i < pieces.length - 1) {
+      const isLast = i === pieces.length - 2
+      // The LAST join is ALWAYS ',' — guarantees the tail's own sentence-shape rule (>=1 comma) —
+      // even when the final piece happens to be spec-kind too.
+      const nextIsSpec = !isLast && SPEC_KIND.has(pieces[i + 1].kind)
+      parts.push({ glue: nextIsSpec ? 'with' : (isLast ? ',' : 'and') })
+    }
+  })
+  return parts
+}
 function buildAcceptableArrangement(units: readonly AdmittedUnit[], min: number, max: number): { json: unknown; expected: string } | null {
   const chosen: AdmittedUnit[] = []
   for (const u of units) {
     const trial = [...chosen, u]
     const text = renderTrial(trial)
     if (text.length > max) continue
+    // RULING K1 (fix round B4): skip a candidate that would trip the ABSOLUTE no-repeat rule
+    // (`lineHasSignificantRepeat`, imported — never a copy) — e.g. an identity unit ("Later
+    // Gator") and a pool phrase that happens to echo it ("See You Later Alligator") both carry
+    // "later". A real composer's own Tier-A selection never admits this either; this helper stays
+    // parity-bounded with production instead of accidentally building an arrangement the judge's
+    // own pre-tail check (K1) must reject on its first attempt.
+    if (lineHasSignificantRepeat(text)) continue
     chosen.push(u)
     if (text.length >= min) break
   }
   if (chosen.length < 2) return null
   const text = renderTrial(chosen)
   if (text.length < min || text.length > max) return null
-  const parts: (string | { glue: string })[] = []
-  chosen.forEach((u, i) => {
-    parts.push(u.id)
-    if (i < chosen.length - 1) parts.push({ glue: i === chosen.length - 2 ? ',' : 'and' })
-  })
-  return { json: arrangementJson(parts), expected: text }
+  return { json: arrangementJson(partsFor(chosen)), expected: text }
 }
 function renderTrial(pieces: readonly AdmittedUnit[]): string {
-  const parts: (string | { glue: string })[] = []
-  pieces.forEach((u, i) => {
-    parts.push(u.id)
-    if (i < pieces.length - 1) parts.push({ glue: i === pieces.length - 2 ? ',' : 'and' })
-  })
-  const arr = arrangementJson(parts) as { parts: { unit?: string; glue?: string }[] }
+  const arr = arrangementJson(partsFor(pieces)) as { parts: { unit?: string; glue?: string }[] }
   return renderArrangement(arr.parts.map((p) => (p.unit ? { unit: p.unit } : { glue: p.glue as string })), pieces)
 }
 
@@ -214,21 +234,25 @@ describe('W7: readability that fails the PO\'s own line', () => {
     expect(v.ok).toBe(true)
   })
 
+  // RULING K7 (fix round B4, value Important I1): readability's "has a connecting word" test now
+  // counts only RELATION words ("with"/"in") — "for" (a list-adjacent function word inside a unit's
+  // OWN text, not inter-unit glue any more) no longer saves a clause from reading as a keyword
+  // dump. These lines use "with" where the pre-K7 fixture used "for".
   it('B6.1 boundary: exactly ONE keyword-shaped clause passes; a SECOND one fails', () => {
-    expect(writerReadabilityVerdict('Retro Sunset Tee for Everyday Wear, Classic Fit', units).ok).toBe(true)
-    expect(writerReadabilityVerdict('Retro Sunset Tee for Everyday Wear, Classic Fit, Crew Neck', units).ok).toBe(false)
+    expect(writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit', units).ok).toBe(true)
+    expect(writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit, Crew Neck', units).ok).toBe(false)
   })
   it('B6.2: a gendered audience word beside "Unisex" fails', () => {
     expect(writerReadabilityVerdict('Retro Sunset Tee with Womens Everyday Fit, Unisex Sizing', units).ok).toBe(false)
   })
   it('B6.2: "Unisex" alone (no gendered word) passes', () => {
-    expect(writerReadabilityVerdict('Retro Sunset Tee for Everyday Wear, Unisex Sizing', units).ok).toBe(true)
+    expect(writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Unisex Sizing', units).ok).toBe(true)
   })
   it('B6.3: when an identity unit exists, the line must name or evoke it', () => {
-    expect(writerReadabilityVerdict('Graphic Tee for Everyday Wear, Classic Fit', units).ok).toBe(false)
+    expect(writerReadabilityVerdict('Graphic Tee with Everyday Wear, Classic Fit', units).ok).toBe(false)
   })
   it('B6.3: no identity unit at all -> this rule is a no-op', () => {
-    expect(writerReadabilityVerdict('Graphic Tee for Everyday Wear, Classic Fit', []).ok).toBe(true)
+    expect(writerReadabilityVerdict('Graphic Tee with Everyday Wear, Classic Fit', []).ok).toBe(true)
   })
 })
 
@@ -300,16 +324,27 @@ describe('mechanics: a malformed/hallucinating arrangement is rejected on every 
     console.log('malformed-id stub — rejected every attempt:', JSON.stringify(r.reasons))
   })
 
-  it('a stub that arranges REAL admitted unit ids (identity + a pool unit) is accepted on the first attempt', async () => {
-    const units = buildAdmittedUnits(COMPOSED, { designName: 'Retro Sunset', truthCtx: TEE_CTX })
+  it('a stub that arranges REAL admitted unit ids (identity + pool units + a spec fact) is accepted on the first attempt', async () => {
+    // RULING K1 (fix round B4): the judge's own band/repeat pre-checks now run even under a
+    // pass-through stub tail, so — unlike the pre-K1 fixture, which relied on the stub tail's
+    // total silence about length — this arrangement must ITSELF clear the 97-125 band. RULING K7:
+    // a RELATION join ("with", not "and") to the spec-fact unit keeps the whole line as ONE
+        // non-keyword-shaped clause (no comma at all, so there is nothing to split it into more).
+    const bigComposed = {
+      candidates: ['Soft Everyday Cotton Comfort Feel', 'Made For Weekend Adventures'],
+      specFacts: ['Classic Fit'],
+      brandPick: null as string | null, wearFact: null as string | null,
+    }
+    const units = buildAdmittedUnits(bigComposed, { designName: 'Retro Sunset', truthCtx: TEE_CTX })
     const identityId = units.find((u) => u.kind === 'identity')!.id
-    const poolId = units.find((u) => u.text === 'Soft Everyday Cotton Feel')!.id
-    // Grammar-legal (spec §2c): "and" is a LIST join and may join ANY two units — a RELATION join
-    // ("with"/"in") could not join an identity unit to a pool unit (rule 3: relations only introduce
-    // a spec-fact/brand/wear-fact unit).
-    const { client, create: c } = stubArrangementClient([arrangementJson([identityId, { glue: 'and' }, poolId])])
-    const r = await runWriterForDesign({ composed: COMPOSED, fallbackHold: 'thin-candidates', designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
-    expect(r.accepted).toBe(true)
+    const poolA = units.find((u) => u.text === 'Soft Everyday Cotton Comfort Feel')!.id
+    const poolB = units.find((u) => u.text === 'Made For Weekend Adventures')!.id
+    const factId = units.find((u) => u.text === 'Classic Fit')!.id
+    const { client, create: c } = stubArrangementClient([arrangementJson([
+      identityId, { glue: 'and' }, poolA, { glue: 'and' }, poolB, { glue: 'with' }, factId,
+    ])])
+    const r = await runWriterForDesign({ composed: bigComposed, fallbackHold: 'thin-candidates', designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
+    expect(r.accepted, JSON.stringify(r.reasons)).toBe(true)
     expect(c).toHaveBeenCalledTimes(1)
     console.log('honest-arrangement stub — accepted:', r.value)
   })
@@ -355,7 +390,7 @@ describe('W3: end-to-end through the REAL tail (produceItemHighlights / produceI
       // carry the brand itself, which is a REAL, correct byte change but would make this test's
       // "value equals the rendered arrangement" assertion depend on brand-net internals unrelated
       // to what this test is proving (that the entry point ships the ACCEPTED WRITER line verbatim).
-      const input = { finalTitle: GATOR_TITLE, pool: GATOR_POOL, apparelProduct: true, blankBrand: null, netTitles: [GATOR_TITLE], identityDesignName: 'Later Gator' }
+      const input = { finalTitle: GATOR_TITLE, pool: GATOR_POOL, apparelProduct: true, blankBrand: GILDAN, netTitles: [GATOR_TITLE], identityDesignName: 'Later Gator' }
       const preview = buildItemHighlights(input)
       expect(preview.composed, 'fixture must compose for this test to mean anything').toBeTruthy()
       const units = buildAdmittedUnits(preview.composed!, { designName: 'Later Gator', truthCtx: preview.truthCtx! })
@@ -376,7 +411,7 @@ describe('W3: end-to-end through the REAL tail (produceItemHighlights / produceI
   it('the SAME stub arrangement, in SHADOW mode: the composer line ships, and the writer\'s accepted line appears in the shadow block', async () => {
     process.env.IH_WRITER = 'shadow'
     try {
-      const input = { finalTitle: GATOR_TITLE, pool: GATOR_POOL, apparelProduct: true, blankBrand: null, netTitles: [GATOR_TITLE], identityDesignName: 'Later Gator' }
+      const input = { finalTitle: GATOR_TITLE, pool: GATOR_POOL, apparelProduct: true, blankBrand: GILDAN, netTitles: [GATOR_TITLE], identityDesignName: 'Later Gator' }
       const sync = buildItemHighlights(input)
       const units = buildAdmittedUnits(sync.composed!, { designName: 'Later Gator', truthCtx: sync.truthCtx! })
       const arrangement = buildAcceptableArrangement(units, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max)
@@ -410,7 +445,7 @@ describe('W3: end-to-end through the REAL tail (produceItemHighlights / produceI
         kwPD('cozy everyday casual wear', 250, 3, ['A', 'B']), kwPD('bold bright colorful design', 200, 2, ['A', 'B']), kwPD('soft comfortable cotton feel', 5000, 2, ['A', 'B']),
         kwPD('playful humor apparel gift', 150, 2, ['A', 'B']), kwPD('trendy modern weekend outfit', 5000, 3, ['A', 'B']), kwPD('unique custom art print top', 5000, 3, ['A', 'B']),
       ]
-      const input = { groups, pool, apparelProduct: true, blankBrand: null, familyTitleText: 'Beach Family' }
+      const input = { groups, pool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: 'Beach Family' }
       const sync = buildItemHighlightsPerDesign(input)
       const designA = sync.perDesign.find((d) => d.designKey === 'A')!
       expect(designA.composed, 'fixture must compose design A for this test to mean anything').toBeTruthy()
@@ -543,8 +578,13 @@ describe('Part 2 acceptance item 5: six B0DSCDZC6K-shaped designs — REAL runIh
     allowedBrand: null, audience: 'adult', audienceLean: 'unisex', field: 'highlights',
   }
   const DESIGNS = ['Don\'t Quit', 'Boss Definition', 'Real King', 'Self Made', 'Beast Mode', 'Relax I\'m a CEO']
-  const composedByDesign = (name: string) => ({
-    candidates: [`${name} Graphic Sweatshirt`, 'Cozy Pullover Comfort', 'Perfect for Layering Season'],
+  // RULING K1 (fix round B4): the pool candidate template used to echo the design NAME itself
+  // (`${name} Graphic Sweatshirt`) — harmless under the OLD flat Amazon cap (up to 2), but a real
+  // significant-word repeat with the identity unit under the STRICTER absolute rule
+  // (`lineHasSignificantRepeat`) K1 now checks pre-tail. Kept design-agnostic so an honest
+  // arrangement naming the design via its OWN identity unit, once, never trips it.
+  const composedByDesign = (_name: string) => ({
+    candidates: ['Graphic Crewneck Sweatshirt', 'Cozy Pullover Comfort', 'Perfect for Layering Season'],
     specFacts: ['Classic Fit', 'Unisex Fit', 'Cotton Polyester Blend'],
     brandPick: null as string | null,
     wearFact: null as string | null,

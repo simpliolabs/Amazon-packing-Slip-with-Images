@@ -77,7 +77,7 @@ import { loadBlankSpecRows, loadBlankAssignments, resolveFamilyBlank, familyBlan
 import { composeItemHighlightDetailed, ihAudienceOf, type ComposerResult } from '@/lib/fba/itemHighlightComposer'
 // WRITER SPEC PART 2 (2026-09-10, B4) — the writer is a LEAF (see its own header for why); this file
 // is a CONSUMER, never the other way, so the dependency graph stays acyclic.
-import { ihWriterMode, ihWriterMaxCallsBudget, runWriterForDesign, IH_WRITER_RETRY_CAP, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
+import { ihWriterMode, ihWriterMaxCallsBudget, ihWriterDeadlineMs, runWriterForDesign, IH_WRITER_RETRY_CAP, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
 /* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
  * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
  * highlights. Blank-grounded (resolveFamilyBlank), never title-derived: a title cannot vouch for
@@ -2776,9 +2776,20 @@ export async function produceItemHighlightsPerDesign(
   const budget = ihWriterMaxCallsBudget()
   let callsReserved = 0
   const writerLogByIndex: (IhWriterLogRow | null)[] = new Array(built.perDesign.length).fill(null)
+  // RULING K10 (fix round B4, wire Important I2): a REGEN-LEVEL wall-time deadline, checked before
+  // EACH design's reservation — once it passes, every design still pending gets the composer's own
+  // result (a budget-shaped skip, never a partial writer run), bounding the worst case to roughly
+  // `deadline + one call's timeout` rather than every design's own 3x20s retry loop stacking up.
+  const deadlineAt = Date.now() + ihWriterDeadlineMs()
 
   const nextPerDesign = await mapWithConcurrency(built.perDesign, 3, async (d, i): Promise<PerDesignItemHighlight> => {
     if (!d.composed || !d.truthCtx) return d
+    if (Date.now() >= deadlineAt) {
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_DEADLINE_EXCEEDED', design: d.designKey }))
+      const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: ['skip: regen-level writer deadline exceeded'], calls: 0 }
+      writerLogByIndex[i] = row
+      return d
+    }
     if (callsReserved + IH_WRITER_RETRY_CAP > budget) {
       console.warn(JSON.stringify({ tag: 'IH_WRITER_BUDGET_EXHAUSTED', design: d.designKey, budget }))
       const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [`skip: per-regen call budget (${budget}) exhausted`], calls: 0 }
@@ -2789,19 +2800,40 @@ export async function produceItemHighlightsPerDesign(
     const g = groupsByKey.get(d.designKey)
     const titles = g?.titles ?? []
     const truthCtx = d.truthCtx
-    const outcome = await runWriterForDesign({
-      composed: d.composed,
-      fallbackHold: d.hold,
-      designName: d.designName,
-      identityPhrases: g?.identityPhrases,
-      truthCtx,
-      runTail: (line) => runIhTail(line, {
-        titles, blankBrand: input.blankBrand, designSeasons: input.designSeasons,
-        capacityFamily: input.capacityFamily, brandName: input.brandName, truthCtx,
-        site: 'produceItemHighlightsPerDesign',
-      }),
-      deps,
-    })
+    // RULING K10 (fix round B4, wire Minor m2): wrap the writer call — a non-client throw (a bad
+    // `designName`, a malformed `identityPhrases`, any future writer-side bug) must fall back to
+    // the composer's OWN result exactly like every other failure mode, never escape `produce*` and
+    // change the route's response. Logged so the class is visible without silencing it.
+    let outcome: Awaited<ReturnType<typeof runWriterForDesign>>
+    try {
+      outcome = await runWriterForDesign({
+        composed: d.composed,
+        fallbackHold: d.hold,
+        designName: d.designName,
+        identityPhrases: g?.identityPhrases,
+        truthCtx,
+        runTail: (line) => runIhTail(line, {
+          titles, blankBrand: input.blankBrand, designSeasons: input.designSeasons,
+          capacityFamily: input.capacityFamily, brandName: input.brandName, truthCtx,
+          site: 'produceItemHighlightsPerDesign',
+        }),
+        deps,
+      })
+    } catch (e) {
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_ERROR', design: d.designKey, error: e instanceof Error ? e.message : String(e) }))
+      // RULING K10: refund the FULL reservation — this design never spent a call.
+      callsReserved -= IH_WRITER_RETRY_CAP
+      const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [`error: ${e instanceof Error ? e.message : String(e)}`], calls: 0 }
+      writerLogByIndex[i] = row
+      return d
+    }
+    // RULING K10 (fix round B4, value Important I4): refund the UNUSED part of this design's
+    // reservation the instant it finishes — a design accepted on call 1 only ever spent 1 of its
+    // reserved `IH_WRITER_RETRY_CAP`, so the other 2 go back to the shared budget for a later
+    // design. "Never exceed budget" still holds (the reservation was already taken before this
+    // design started; refunding only ever gives MORE room to later designs, never less to already-
+    // reserved ones). Pinned: 8 designs each accepted on call 1 -> 8 written lines for 8 calls.
+    callsReserved -= (IH_WRITER_RETRY_CAP - outcome.calls)
     const row: IhWriterLogRow = {
       design: d.designKey, composer: d.value, writer: outcome.accepted ? outcome.value : null,
       accepted: outcome.accepted, reasons: outcome.reasons, calls: outcome.calls,
