@@ -149,6 +149,47 @@ job.
 It cannot re-word inside a phrase. Shadow mode shows the PO whether that is readable enough before
 anything ships.
 
+## 2c. AMENDMENT 2026-09-10 (review B2) — a closed arrangement GRAMMAR: relations attach only TRUE spec facts
+
+*Why.* Review B2 (`.superpowers/sdd/2026-09-10-ih-writer/phase-b2-review.md`) showed that
+arrangements of admitted units still compose lies, because the GLUE and the ADJACENCY between
+units create relations that no unit carries:
+- "Keep It Pure" abutting "Soft Cotton Feel" reads as a purity claim on a blend;
+- "with Deep Pockets" invents a feature;
+- "in Pink Lemonade" invents a colour;
+- "for Little Man" and "for Girls" invent an audience.
+
+§2b's Bound ("a lie reaches the line only if it is itself an admitted unit") was false. Meaning is
+compositional.
+
+*The rule. These are the only legal joins:*
+1. **Abutment** (no glue) is allowed only when the RIGHT-hand unit is a garment-noun unit:
+   "<design name> Sweatshirt", "<pool phrase> Tee".
+2. **List joins** between any two units: `,` `and` `&` `—` `|`. A list asserts nothing between its
+   items; it is the picker's own shape.
+3. **Relation joins** `with` / `in` (optionally followed by `a`/`an`) may introduce ONLY a
+   spec-class unit: a blank spec fact, the brand phrase, or the sanctioned wear fact. A relation
+   therefore only ever attaches a TRUE fact of this product.
+4. No other glue exists between units (for/of/from/to/on/the/your/that/this are removed), and there
+   is no glue at the start or end of the line.
+5. Identity units are the design name as stored, plus vision phrases of 2+ words. Each must pass the
+   truth oracle, the trademark door and the celebrity door at admission.
+6. When the composer's line needs the brand (`brandPick`), the arrangement must carry the brand
+   unit.
+
+*Bound, restated, and now true by construction.* Every clause of a writer line is one of:
+- one admitted unit;
+- a list of admitted units (the picker's shape);
+- a design name or pool phrase followed by a garment noun;
+- a unit with true spec facts attached.
+
+The writer's residual risk equals the picker's: the FILED admission gaps.
+
+*Readability ceiling.* Lines such as "Don't Quit Sweatshirt with Long Sleeve and a Classic Fit —
+Fall Sweatshirts for Women, Cute Crewnecks & Graphic Crewneck". Review B3's value lens measures,
+before merge, whether 97-125 characters is reachable for each design. After merge, shadow mode shows
+the PO real model output.
+
 ## 3. ADVERSARY
 
 - **"The writer will hallucinate a spec."** Provenance makes that a rejection, not a hope: a token
