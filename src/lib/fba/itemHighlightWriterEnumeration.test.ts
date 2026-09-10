@@ -551,13 +551,19 @@ const BASE_COMPILER_OPTIONS: ts.CompilerOptions = {
   strict: false,
 }
 
+// RULING P8 (fix round B5, wire Blocking 1, W1): scan every extension the BUILD actually compiles —
+// `tsconfig.json` sets `allowJs: true` and `"**/*.mts"` in `include`, and Next's App Router routes
+// as plain `route.js` — so a `.ts`/`.tsx`-only scan left `route.js` (N10) and a `.mts` helper (N11)
+// production-reachable and unscanned. `.jsx`/`.cjs`/`.cts` complete the set the compiler recognizes.
+const COMPILED_EXT_RE = /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/
+const COMPILED_TEST_RE = /\.test\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/
 function listTsFilesFlat(dir: string): string[] {
   const out: string[] = []
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) { out.push(...listTsFilesFlat(full)); continue }
-    if (!/\.(ts|tsx)$/.test(entry.name)) continue
-    if (/\.test\.tsx?$/.test(entry.name)) continue
+    if (!COMPILED_EXT_RE.test(entry.name)) continue
+    if (COMPILED_TEST_RE.test(entry.name)) continue
     out.push(full)
   }
   return out
@@ -598,23 +604,44 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
   const program = ts.createProgram({ rootNames, options })
   const checker = program.getTypeChecker()
 
+  // RULING P8 (fix round B5, wire Blocking 1, W1 hole 1: "the enclosure test is still a SPELLING
+  // test"): resolve a NAME to its TOP-LEVEL declaration ONLY — a nested declaration (N1, "a nested
+  // `function produceItemHighlights()`") or a second local declaration with the same NAME but a
+  // DIFFERENT symbol (N2) must never be mistaken for the sanctioned/restricted one just because a
+  // depth-first walk over the whole file happened to visit it. `sf.statements` is the file's own
+  // TOP-LEVEL statement list — never recursed into.
+  function findTopLevelFnDecl(sf: ts.SourceFile, name: string): ts.FunctionDeclaration | null {
+    for (const stmt of sf.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === name) return stmt
+    }
+    return null
+  }
   function findDeclSymbol(name: RestrictedName): ts.Symbol | null {
     const sf = program.getSourceFile(homeAbsOf[name])
     if (!sf) return null
-    let found: ts.Symbol | null = null
-    const visit = (node: ts.Node): void => {
-      if (found) return
-      if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
-        const sym = checker.getSymbolAtLocation(node.name)
-        if (sym) found = sym
-      }
-      ts.forEachChild(node, visit)
-    }
-    visit(sf)
-    return found
+    const decl = findTopLevelFnDecl(sf, name)
+    return decl?.name ? (checker.getSymbolAtLocation(decl.name) ?? null) : null
   }
   const declSymbols: Record<string, ts.Symbol | null> = {}
   for (const name of RESTRICTED_NAMES) declSymbols[name] = findDeclSymbol(name)
+
+  // RULING P8: the SANCTIONED enclosing functions, resolved the SAME declaration-identity way —
+  // each by its OWN top-level declaration SYMBOL in its OWN home file (`composeItemHighlight` in
+  // the composer; the other four in `listingPipeline.ts`), never by name alone.
+  const SANCTIONED_ENCLOSING_FN_HOME: Readonly<Record<string, string>> = {
+    buildItemHighlights: listingPipelineAbs, buildItemHighlightsPerDesign: listingPipelineAbs,
+    produceItemHighlights: listingPipelineAbs, produceItemHighlightsPerDesign: listingPipelineAbs,
+    composeItemHighlight: composerAbs,
+  }
+  const sanctionedDeclSymbols = new Set<ts.Symbol>()
+  for (const [name, home] of Object.entries(SANCTIONED_ENCLOSING_FN_HOME)) {
+    const sf = program.getSourceFile(home)
+    const decl = sf && findTopLevelFnDecl(sf, name)
+    if (decl?.name) {
+      const sym = checker.getSymbolAtLocation(decl.name)
+      if (sym) sanctionedDeclSymbols.add(sym)
+    }
+  }
 
   function resolvesToTarget(node: ts.Node, target: ts.Symbol): boolean {
     let sym: ts.Symbol | undefined = checker.getSymbolAtLocation(node)
@@ -629,13 +656,21 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
     const symDecls = sym?.declarations ?? []
     return symDecls.some((d) => targetDecls.includes(d))
   }
-  function enclosingFunctionName(node: ts.Node): string | null {
+  /** RULING P8: the nearest enclosing `FunctionDeclaration` NODE is sanctioned only when ITS OWN
+   *  declared symbol IS one of `sanctionedDeclSymbols` — never by comparing names. A nested
+   *  `function produceItemHighlights(){...}` (N1) or a second local `function
+   *  composeItemHighlight(){...}` (N2) declares a DIFFERENT symbol (different declaration node),
+   *  even though `.name.text` matches, so this now correctly rejects both. */
+  function enclosingFunctionIsSanctioned(node: ts.Node): { sanctioned: boolean; name: string | null } {
     let cur: ts.Node | undefined = node
     while (cur) {
-      if (ts.isFunctionDeclaration(cur) && cur.name) return cur.name.text
+      if (ts.isFunctionDeclaration(cur)) {
+        const sym = cur.name ? checker.getSymbolAtLocation(cur.name) : undefined
+        return { sanctioned: !!sym && sanctionedDeclSymbols.has(sym), name: cur.name?.text ?? null }
+      }
       cur = cur.parent
     }
-    return null
+    return { sanctioned: false, name: null }
   }
   function isTypeOnlyPosition(node: ts.Node): boolean {
     let cur: ts.Node | undefined = node
@@ -691,19 +726,105 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
     return out
   }
   /** `obj['buildItemHighlights'](...)` — bracket-string element access, traced back through
-   *  `as any` casts and local re-assignment to a namespace import of a restricted home module. */
+   *  `as any` casts, local re-assignment, and OBJECT CAPTURE ("const holder = { mod: lp }" then
+   *  "holder.mod[...]" — RULING P8, N5/N5b) to a namespace import of a restricted home module.
+   *  `idNode` may itself be a `PropertyAccessExpression` ("holder.mod"), not only a bare
+   *  identifier — every recursive call unwraps `as`/paren/non-null wrappers first. */
   function resolvesToNamespaceOfHome(idNode: ts.Node, depth: number): boolean {
     if (depth > 5) return false
-    const objSym = checker.getSymbolAtLocation(idNode)
-    for (const d of objSym?.declarations ?? []) {
-      if (ts.isNamespaceImport(d) && specifierTargetsHome((d.parent.parent as ts.ImportDeclaration).moduleSpecifier.getText().replace(/^['"]|['"]$/g, ''))) return true
+    let node: ts.Node = idNode
+    while (ts.isAsExpression(node) || ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) node = node.expression
+    const origSym = checker.getSymbolAtLocation(node)
+    /** Checks ONE symbol's own declarations for a namespace-of-home shape — never the fully
+     *  alias-unwrapped TARGET, which for a plain `import * as X from home` skips PAST the
+     *  `NamespaceImport` node straight to the module symbol (whose declaration is the SourceFile,
+     *  not a NamespaceImport) and would wrongly report false. */
+    const declaresNamespaceOfHome = (sym: ts.Symbol | undefined): boolean => {
+      for (const d of sym?.declarations ?? []) {
+        if (ts.isNamespaceImport(d) && specifierTargetsHome((d.parent.parent as ts.ImportDeclaration).moduleSpecifier.getText().replace(/^['"]|['"]$/g, ''))) return true
+        // `export * as X from '<home>'` — the barrel's OWN re-export declaration (N3b).
+        if (ts.isNamespaceExport(d) && ts.isExportDeclaration(d.parent) && d.parent.moduleSpecifier
+          && specifierTargetsHome(d.parent.moduleSpecifier.getText().replace(/^['"]|['"]$/g, ''))) return true
+      }
+      return false
+    }
+    if (declaresNamespaceOfHome(origSym)) return true
+    // RULING P8 (N3b "exportStarAs"): walk the ALIAS chain ONE HOP AT A TIME, checking EACH
+    // intermediate symbol — an import specifier bound through a barrel's `export * as X from
+    // '<home>'` is an alias whose FIRST unwrap lands on the barrel's re-export symbol (a
+    // NamespaceExport declaration); unwrapping ALL THE WAY to the final module symbol (as a
+    // single `while` loop before any check would do) skips past that node entirely.
+    let aliasSym = origSym
+    const seenAlias = new Set<ts.Symbol>()
+    while (aliasSym && (aliasSym.flags & ts.SymbolFlags.Alias) && !seenAlias.has(aliasSym)) {
+      seenAlias.add(aliasSym)
+      try { aliasSym = checker.getAliasedSymbol(aliasSym) } catch { break }
+      if (declaresNamespaceOfHome(aliasSym)) return true
+    }
+    for (const d of origSym?.declarations ?? []) {
       if (ts.isVariableDeclaration(d) && d.initializer) {
         let init: ts.Expression = d.initializer
         while (ts.isAsExpression(init) || ts.isParenthesizedExpression(init) || ts.isNonNullExpression(init)) init = init.expression
-        if (ts.isIdentifier(init) && resolvesToNamespaceOfHome(init, depth + 1)) return true
+        if ((ts.isIdentifier(init) || ts.isPropertyAccessExpression(init)) && resolvesToNamespaceOfHome(init, depth + 1)) return true
+      }
+      // RULING P8 (object capture, N5/N5b): a property inside an object LITERAL whose own value
+      // (or shorthand binding) is a namespace-of-home identifier/property-access.
+      if (ts.isPropertyAssignment(d) && resolvesToNamespaceOfHome(d.initializer, depth + 1)) return true
+      if (ts.isShorthandPropertyAssignment(d) && resolvesToNamespaceOfHome(d.name, depth + 1)) return true
+    }
+    // The OBJECT half of a property access ("holder.mod") — one more hop outward, in case the
+    // PROPERTY's own symbol resolution above did not resolve it but the base expression would.
+    if (ts.isPropertyAccessExpression(node)) {
+      if (resolvesToNamespaceOfHome(node.expression, depth + 1)) return true
+      // RULING P8 (object capture through an `any` cast, N5b: "const holderAny = holder as any;
+      // holderAny.mod[...]"): once the BASE is cast to `any`, `holderAny.mod` has no resolvable
+      // symbol at all (an `any`-typed property access), so neither the direct check above NOR the
+      // base-hop above can ever see the object literal's OWN "mod: lp" property. Strip the base
+      // back through its variable-declaration chain to the underlying (pre-cast, still literally-
+      // typed) expression, and if THAT is the object literal, look up the SAME property name on
+      // it directly — the property's own initializer is unaffected by a cast applied downstream.
+      const strippedBase = stripCastChain(node.expression, 0)
+      if (ts.isObjectLiteralExpression(strippedBase)) {
+        for (const p of strippedBase.properties) {
+          if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === node.name.text) {
+            if (resolvesToNamespaceOfHome(p.initializer, depth + 1)) return true
+          }
+          if (ts.isShorthandPropertyAssignment(p) && p.name.text === node.name.text) {
+            if (resolvesToNamespaceOfHome(p.name, depth + 1)) return true
+          }
+        }
       }
     }
     return false
+  }
+  /** Follows an identifier through its OWN variable-declaration initializer, one hop at a time
+   *  (unwrapping `as`/paren/non-null at each step), stopping at whatever is NOT a further
+   *  re-assignable identifier — used only to see PAST an `any` cast down to the original,
+   *  still-precisely-typed expression it was cast FROM. */
+  function stripCastChain(expr: ts.Expression, depth: number): ts.Expression {
+    if (depth > 5) return expr
+    let e: ts.Expression = expr
+    while (ts.isAsExpression(e) || ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e)) e = e.expression
+    if (ts.isIdentifier(e)) {
+      const sym = checker.getSymbolAtLocation(e)
+      for (const d of sym?.declarations ?? []) {
+        if (ts.isVariableDeclaration(d) && d.initializer) return stripCastChain(d.initializer, depth + 1)
+      }
+    }
+    return e
+  }
+  /** RULING P8 (fix round B5, wire Blocking 1, W1 hole 2): "a string-literal-typed key is not
+   *  treated as a reference unless it is an ElementAccessExpression whose object is a direct
+   *  namespace identifier." Reads the expression's OWN TYPE via the checker — not only its
+   *  syntax — so a `const K = 'buildItemHighlights' as const` used later as `lp[K]` (N13), or a
+   *  literal argument whose generic parameter infers the SAME literal type (`Reflect.get(lp,
+   *  'buildItemHighlights')`, N8/N8b; a `pick<M,K extends keyof M>(lp, 'buildItemHighlights')`
+   *  helper, N4), is caught by what the COMPILER itself resolved the value to, never a syntax
+   *  shape written for one probe string. */
+  function stringLiteralTypeValue(node: ts.Node): string | null {
+    if (ts.isStringLiteralLike(node)) return node.text
+    const t = checker.getTypeAtLocation(node)
+    return t.flags & ts.TypeFlags.StringLiteral ? (t as ts.StringLiteralType).value : null
   }
 
   const violations: string[] = []
@@ -714,24 +835,48 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
     const isHome = homeFiles.has(file)
     if (!isHome) violations.push(...structuralDynamicViolations(sf, rel))
     const visit = (node: ts.Node): void => {
-      if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)
-        && (RESTRICTED_NAMES as readonly string[]).includes(node.argumentExpression.text)) {
-        const text = node.argumentExpression.text
-        const target = declSymbols[text]
-        let matches = false
-        if (target) {
-          const sym = checker.getSymbolAtLocation(node.argumentExpression)
-          matches = !!sym && (sym === target || (sym.declarations ?? []).some((d) => (target.declarations ?? []).includes(d)))
+      // RULING P8: the KEY need not be a literal NODE — a `const K = '...' as const` used later
+      // as `lp[K]` (N13) has an IDENTIFIER argument whose TYPE is the string-literal type.
+      if (ts.isElementAccessExpression(node)) {
+        const text = stringLiteralTypeValue(node.argumentExpression)
+        if (text && (RESTRICTED_NAMES as readonly string[]).includes(text)) {
+          const target = declSymbols[text]
+          let matches = false
+          if (target && ts.isStringLiteralLike(node.argumentExpression)) {
+            const sym = checker.getSymbolAtLocation(node.argumentExpression)
+            matches = !!sym && (sym === target || (sym.declarations ?? []).some((d) => (target.declarations ?? []).includes(d)))
+          }
+          if (!matches) {
+            let obj: ts.Expression = node.expression
+            while (ts.isAsExpression(obj) || ts.isParenthesizedExpression(obj)) obj = obj.expression
+            if (ts.isIdentifier(obj) || ts.isPropertyAccessExpression(obj)) matches = resolvesToNamespaceOfHome(obj, 0)
+          }
+          if (matches) {
+            violations.push(isHome
+              ? `${rel}: bracket-access reference to '${text}' outside sanctioned function`
+              : `${rel}: bracket-access reference to '${text}' outside its home module`)
+          }
         }
-        if (!matches) {
-          let obj: ts.Expression = node.expression
-          while (ts.isAsExpression(obj) || ts.isParenthesizedExpression(obj)) obj = obj.expression
-          if (ts.isIdentifier(obj)) matches = resolvesToNamespaceOfHome(obj, 0)
-        }
-        if (matches) {
-          violations.push(isHome
-            ? `${rel}: bracket-access reference to '${text}' outside sanctioned function`
-            : `${rel}: bracket-access reference to '${text}' outside its home module`)
+      }
+      // RULING P8: `Reflect.get(obj, 'name')` and any similarly-shaped generic helper call
+      // (`pick(lp, 'buildItemHighlights')`) — a CALL whose arguments include BOTH a restricted
+      // name (literal text OR string-literal TYPE, e.g. inferred through a `K extends keyof M`
+      // generic parameter) AND a namespace/object of that name's home module. Parametrized over
+      // every `RESTRICTED_NAMES` entry, not a case written for one probe string.
+      if (ts.isCallExpression(node)) {
+        for (const arg of node.arguments) {
+          const text = stringLiteralTypeValue(arg)
+          if (!text || !(RESTRICTED_NAMES as readonly string[]).includes(text)) continue
+          const homeOfName = homeAbsOf[text as RestrictedName]
+          const otherArgIsHomeNamespace = node.arguments.some((other) => {
+            if (other === arg) return false
+            let o: ts.Expression = other
+            while (ts.isAsExpression(o) || ts.isParenthesizedExpression(o)) o = o.expression
+            return (ts.isIdentifier(o) || ts.isPropertyAccessExpression(o)) && resolvesToNamespaceOfHome(o, 0)
+          })
+          if (otherArgIsHomeNamespace) {
+            violations.push(`${rel}: call passes restricted name '${text}' as a key argument alongside a namespace/object of its home module (${homeOfName}) — outside its home module`)
+          }
         }
       }
       if (ts.isIdentifier(node) && (RESTRICTED_NAMES as readonly string[]).includes(node.text)) {
@@ -742,9 +887,9 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
         if (target && resolvesToTarget(node, target)) {
           if (isHome && isImportBindingDecl(node)) { ts.forEachChild(node, visit); return }
           if (isHome) {
-            const enc = enclosingFunctionName(node)
-            if (!enc || !SANCTIONED_ENCLOSING_FN_NAMES.has(enc)) {
-              violations.push(`${rel}: reference to '${node.text}' outside sanctioned function (found inside ${enc ?? 'top-level'})`)
+            const { sanctioned, name: encName } = enclosingFunctionIsSanctioned(node)
+            if (!sanctioned) {
+              violations.push(`${rel}: reference to '${node.text}' outside sanctioned function (found inside ${encName ?? 'top-level'})`)
             }
           } else {
             violations.push(`${rel}: reference to '${node.text}' outside its home module`)
@@ -853,6 +998,46 @@ describe('RULING K8: the enumeration test detects REFERENCES, not spellings (Typ
         return b({} as never)
       }
     `,
+    // RULING P8 (fix round B5, wire Blocking 1): the 9 shapes review B4 measured GREEN under K8
+    // itself — an `as any` bracket through a namespace import, a typed generic "pick" helper, an
+    // object-capture bracket, `Reflect.get` (typed and untyped), and a constkey element access.
+    'exportStarAs-anyBracket': `
+      import * as lpR7 from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        const lpAny = lpR7 as any
+        return lpAny['buildItemHighlights']({})
+      }
+    `,
+    'typed-pick': `
+      import * as lp from '@/lib/fba/listingPipeline'
+      function pick<M, K extends keyof M>(m: M, k: K): M[K] { return m[k] }
+      export async function POST() {
+        const fn = pick(lp, 'buildItemHighlights')
+        return (fn as never)
+      }
+    `,
+    'objcapture-anyBracket': `
+      import * as lp from '@/lib/fba/listingPipeline'
+      const holder = { mod: lp }
+      export async function POST() {
+        const holderAny = holder as any
+        return holderAny.mod['buildItemHighlights']({})
+      }
+    `,
+    'reflect-get': `
+      import * as lp from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        const fn = Reflect.get(lp, 'buildItemHighlights')
+        return (fn as never)
+      }
+    `,
+    'constkey-elementaccess': `
+      import * as lp from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        const K = 'buildItemHighlights' as const
+        return (lp as never)[K]({} as never)
+      }
+    `,
   }
   for (const [name, content] of Object.entries(OUTSIDE_FILE_SHAPES)) {
     it(`sensitivity ("${name}") — an outside-file bypass goes RED in a scratch copy`, () => {
@@ -863,6 +1048,50 @@ describe('RULING K8: the enumeration test detects REFERENCES, not spellings (Typ
       } finally { cleanup() }
     })
   }
+
+  // RULING P8 (fix round B5, wire Blocking 1, "reflect-typed"/N8b): the SAME Reflect.get mechanism
+  // with NO cast at all — TS types `Reflect.get`'s return precisely, so this is the "fully typed,
+  // no `any`" variant of the shape above.
+  it('sensitivity ("reflect-typed") — Reflect.get with no cast at all goes RED in a scratch copy', () => {
+    const content = `
+      import * as lp from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        return Reflect.get(lp, 'buildItemHighlights')
+      }
+    `
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'app/api/fba/probe-k8-reflect-typed/route.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, 'reflect-typed must be flagged').toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  // RULING P8 ("js-route"/N10): a plain-JS App Router route — `tsconfig.json` has `allowJs: true`
+  // and Next compiles `.js` routes, so a `.ts`/`.tsx`-only scan never opened this file at all.
+  it('sensitivity ("js-route") — a plain .js route file goes RED (extension scan, N10)', () => {
+    const content = `
+      import { buildItemHighlights } from '@/lib/fba/listingPipeline'
+      export async function POST() { return buildItemHighlights({}) }
+    `
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'app/api/fba/probe-k8-js-route/route.js', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, 'js-route must be flagged').toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  // RULING P8 ("mts-helper"/N11): `tsconfig.json`'s own `include` has `"**/*.mts"`.
+  it('sensitivity ("mts-helper") — a .mts helper wrapping the builder goes RED (extension scan, N11)', () => {
+    const content = `
+      import { buildItemHighlights } from '@/lib/fba/listingPipeline'
+      export function wrap(input: never) { return buildItemHighlights(input) }
+    `
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'lib/fba/probeK8Helper.mts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, 'mts-helper must be flagged').toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
 
   // "barrel" (a re-export in a helper, then consumed by a real filename): the restricted name is
   // written once, at the re-export site — that is where the NEW scanner (an Identifier reference,
@@ -903,6 +1132,33 @@ export function k8BypassPipelineRef(input: never) {
     },
     'pipeline-alias': { rel: 'pipeline', text: `export const k8BypassPipelineAlias = buildItemHighlights\n` },
     'composer-alias': { rel: 'composer', text: `export const k8BypassComposerAlias = composeItemHighlightDetailed\n` },
+    // RULING P8 (fix round B5, wire Blocking 1, N1 "nested-shadow"): a NESTED declaration merely
+    // BEARING a sanctioned name — `enclosingFunctionIsSanctioned` must resolve by DECLARATION
+    // IDENTITY (this nested function's own distinct symbol), never by `.name.text`.
+    'nested-shadow': {
+      rel: 'pipeline',
+      text: `
+export function k8BypassN1Outer(input: unknown) {
+  function produceItemHighlights() {
+    const res = composeItemHighlightDetailed([], [], {} as never)
+    return runIhTail(res.line ?? '', {} as never)
+  }
+  return produceItemHighlights()
+}
+`,
+    },
+    // RULING P8 (N2 "local-sanctioned-name"): a NEW top-level declaration bearing a sanctioned
+    // NAME but living in the WRONG home file — a different symbol from the real
+    // `composeItemHighlight` (declared in the composer), even though the name is identical.
+    'local-sanctioned-name': {
+      rel: 'pipeline',
+      text: `
+export function composeItemHighlight(pool: unknown, titles: string[]) {
+  const res = composeItemHighlightDetailed(pool as never, titles, {} as never)
+  return runIhTail(res.line ?? '', {} as never)
+}
+`,
+    },
   }
   for (const [name, shape] of Object.entries(HOME_SHAPES)) {
     it(`sensitivity ("${name}") — a new bypass inside the HOME file itself goes RED`, () => {

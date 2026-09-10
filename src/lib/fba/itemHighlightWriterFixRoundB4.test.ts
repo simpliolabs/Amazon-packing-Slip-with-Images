@@ -55,7 +55,9 @@ describe('RULING K1: the writer judge enforces the push seam\'s OWN band/repeat/
     expect(line).toMatch(/soft/i) // sanity: the rendered line really does carry "soft" twice
     const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail: runTailFor(title, blank, truthCtx) })
     expect(v.ok, JSON.stringify(v)).toBe(false)
-    if (!v.ok) expect(v.violations.join(' ')).toMatch(/soft.*(twice|more than)/i)
+    // RULING P7 (fix round B5, value Important I2): the message names the SURFACE word, the ACTUAL
+    // count and the budget — never a hardcoded "twice", which lies for a word used three times.
+    if (!v.ok) expect(v.violations.join(' ')).toMatch(/soft.*appears 2 times/i)
   })
 
   it('a line the tail would EDIT (not merely refuse) is rejected as "the tail changed the line" — never a silent amputation/brand-insertion the model never chose', () => {
@@ -130,7 +132,9 @@ describe('RULING K2: the brand unit\'s class follows its ORIGIN; needBrand is ex
     // "Retro Sunset Tee in Comfort Colors Pepper, ..." — T26's exact mechanism.
     const inRelation = validateArrangement({ parts: [{ unit: id('Retro Sunset') }, { unit: units.find((u) => u.kind === 'garment-head')!.id }, { glue: 'in' }, { unit: brandUnit.id }] }, units)
     expect(inRelation.ok).toBe(false)
-    if (!inRelation.ok) expect(inRelation.violation).toMatch(/spec fact/)
+    // RULING P2 (fix round B5): the brand unit is excluded from relation joins by its OWN named
+    // rule now, regardless of grammar kind — the message names the brand unit directly.
+    if (!inRelation.ok) expect(inRelation.violation).toMatch(/brand unit/)
     // List-joined (the picker's own shape) still ships the brand text.
     const listJoined = validateArrangement({ parts: [{ unit: id('Retro Sunset') }, { glue: ',' }, { unit: brandUnit.id }] }, units)
     expect(listJoined.ok).toBe(true)
@@ -291,13 +295,82 @@ describe('RULING K7: readability splits on "&" too, and only a RELATION word ("w
   })
 })
 
+// ─── RULING P5 (fix round B5, value Blocking 1): ONE readability shape, superseding K7's "at most
+// one keyword-shaped clause" — review B4 measured K7 wrongly rejecting a legitimate trailing list
+// (R4, R5) while a genuine keyword dump (N1b: zero relation clauses) is correctly still rejected. ──
+
+describe('RULING P5: at least one relation clause, at most one list section (superseding K7)', () => {
+  const units: AdmittedUnit[] = [{ id: 'u0', text: "Don't Quit", kind: 'identity', numberable: false }]
+  it('R4: one relation clause, then a 3-item trailing list across two comma clauses — PASSES (was wrongly rejected under K7)', async () => {
+    const { writerReadabilityVerdict } = await import('./itemHighlightWriter')
+    const v = writerReadabilityVerdict("Don't Quit Sweatshirt with Long Sleeve and a Classic Fit, Never Give Up Sweatshirt, Graphic Crewneck and Cute Crewnecks", units)
+    expect(v.ok).toBe(true)
+  })
+  it('R5: the same shape using "&" before the article — PASSES', async () => {
+    const { writerReadabilityVerdict } = await import('./itemHighlightWriter')
+    const v = writerReadabilityVerdict("Don't Quit Sweatshirt with Long Sleeve & a Classic Fit, Never Give Up Sweatshirt and Graphic Crewneck", units)
+    expect(v.ok).toBe(true)
+  })
+  it('N1b: zero relation clauses at all (an "and"-chained keyword dump with spec facts as list items) — FAILS', async () => {
+    const { writerReadabilityVerdict } = await import('./itemHighlightWriter')
+    const v = writerReadabilityVerdict("Don't Quit Sweatshirt and Graphic Crewneck, Long Sleeve and Classic Fit and Piece-Dyed Fabric and Cute Crewnecks", units)
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.reason).toMatch(/at least one relation clause/)
+  })
+  it('the PO\'s own line and the DQG per-child line both still FAIL (0 relation clauses)', async () => {
+    const { writerReadabilityVerdict } = await import('./itemHighlightWriter')
+    expect(writerReadabilityVerdict('Crewneck Sweatshirts Women, Fall Sweatshirts for Women, Graphic Crewneck, 50% Cotton / 50% Polyester, Classic Fit', []).ok).toBe(false)
+    expect(writerReadabilityVerdict('Fall Sweatshirts for Women, Cute Crewnecks, Graphic Crewneck, Classic Fit, Unisex Fit, Long Sleeve, Piece-Dyed Fabric', []).ok).toBe(false)
+  })
+})
+
+// ─── RULING P7 (fix round B5, value Important I1): the tail's `sentence-shape` reason code is
+// mapped to the plain sentence the model was actually TAUGHT — T1/T1b pin ─────────────────────────
+
+describe('RULING P7: a tail sentence-shape refusal names the taught rule, not the bare reason code', () => {
+  const truthCtx: PhraseTruthCtx = { garmentFamily: 'sweatshirt', spec: { material: '52% Cotton / 48% Polyester', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }
+  const composed = {
+    candidates: ['Graphic Crewneck', 'Fall Sweatshirts for Women'], specFacts: ['Classic Fit'], brandPick: null, wearFact: null,
+  } as unknown as ComposerResult
+  const units = buildAdmittedUnits(composed, { designName: "Don't Quit", truthCtx })
+  const id = (text: string) => units.find((u) => u.text === text)!.id
+  const runTail = runTailFor('THE CEO Never Give Up Crewneck', GILDAN, truthCtx)
+
+  it('T1: a comma-less arrangement ("—"/"&" only) is refused for "needs at least one \',\' between phrases", not "sentence-shape"', () => {
+    const parts: ArrangementPart[] = [
+      { unit: id("Don't Quit") }, { unit: id('Sweatshirt') }, { glue: 'with' }, { unit: id('Classic Fit') },
+      { glue: '—' }, { unit: id('Graphic Crewneck') }, { glue: '&' }, { unit: id('Fall Sweatshirts for Women') },
+      { glue: '&' }, { unit: id('Crewneck') },
+    ]
+    const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail })
+    expect(v.ok).toBe(false)
+    if (!v.ok) {
+      expect(v.violations[0]).toContain("needs at least one ',' between phrases")
+      expect(v.violations[0]).not.toContain('(sentence-shape)')
+    }
+  })
+  it('T1b: a comma-less "and"-only arrangement gets the SAME taught message', () => {
+    const parts: ArrangementPart[] = [
+      { unit: id("Don't Quit") }, { unit: id('Sweatshirt') }, { glue: 'with' }, { unit: id('Classic Fit') },
+      { glue: 'and' }, { unit: id('Graphic Crewneck') }, { glue: 'and' }, { unit: id('Fall Sweatshirts for Women') },
+      { glue: 'and' }, { unit: id('Crewneck') },
+    ]
+    const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail })
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.violations[0]).toContain("needs at least one ',' between phrases")
+  })
+})
+
 // ─── K4: the prompt is GENERATED from the rule registry — a rule can never be taught without an id ─
 
 describe('RULING K4: the prompt is rendered from WRITER_RULE_REGISTRY — every applicable rule id\'s sentence appears', () => {
-  it('every UNCONDITIONAL rule\'s sentence appears in the rendered system prompt', () => {
-    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic' }, allowedBrand: 'Comfort Colors', audience: 'adult', field: 'highlights' }
+  it('every UNCONDITIONAL-OR-APPLICABLE rule\'s sentence appears in the rendered system prompt', () => {
+    // RULING P7 (fix round B5): a "Unisex Fit" spec-fact unit must be present for the (now
+    // conditional, per M1) unisex-gender rule to render at all — include one so this fixture
+    // exercises every rule id, brand included.
+    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic', unisex: true } as never, allowedBrand: 'Comfort Colors', audience: 'adult', field: 'highlights' }
     const units = buildAdmittedUnits(
-      { candidates: ['Cozy Graphic Tee'], specFacts: ['Classic Fit'], brandPick: 'Comfort Colors Tee', brandOrigin: 'spec', wearFact: null },
+      { candidates: ['Cozy Graphic Tee'], specFacts: ['Classic Fit', 'Unisex Fit'], brandPick: 'Comfort Colors Tee', brandOrigin: 'spec', wearFact: null },
       { designName: 'Retro Sunset', truthCtx },
     )
     const { system } = buildWriterPrompt(units, 'Retro Sunset', [])
@@ -306,8 +379,8 @@ describe('RULING K4: the prompt is rendered from WRITER_RULE_REGISTRY — every 
     }
   })
   it('the sentence-shape (>=1 comma) and unisex-beside-gender rules specifically are taught — value review B1/B2\'s exact gap', () => {
-    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }
-    const units = buildAdmittedUnits({ candidates: [], specFacts: [], brandPick: null, brandOrigin: null, wearFact: null }, { designName: 'X', truthCtx })
+    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic', unisex: true } as never, allowedBrand: null, audience: 'adult', field: 'highlights' }
+    const units = buildAdmittedUnits({ candidates: [], specFacts: ['Unisex Fit'], brandPick: null, brandOrigin: null, wearFact: null }, { designName: 'X', truthCtx })
     const { system } = buildWriterPrompt(units, 'X', [])
     expect(system).toMatch(/AT LEAST ONE ","/)
     expect(system).toMatch(/gendered audience word/)

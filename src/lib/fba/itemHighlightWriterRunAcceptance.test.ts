@@ -20,7 +20,7 @@ import {
   buildItemHighlights, buildItemHighlightsPerDesign, produceItemHighlights, produceItemHighlightsPerDesign,
 } from './listingPipeline'
 import {
-  runWriterForDesign, writerReadabilityVerdict, ihWriterMode, ihWriterModel, ihWriterMaxCallsBudget,
+  runWriterForDesign, writerReadabilityVerdict, ihWriterMode, ihWriterModel, ihWriterMaxCallsBudget, ihWriterDeadlineMs,
   buildAdmittedUnits, renderArrangement, IH_WRITER_RETRY_CAP,
   type AdmittedUnit,
 } from './itemHighlightWriter'
@@ -142,6 +142,19 @@ describe('B9: IH_WRITER mode resolution', () => {
   it('IH_WRITER_RETRY_CAP (the PER-DESIGN retry cap) is 3 — distinct constant from the per-regen budget', () => {
     expect(IH_WRITER_RETRY_CAP).toBe(3)
   })
+  // RULING P11 (fix round B5, minor 1, wire m1): `ihWriterDeadlineMs` must reject anything that
+  // does not parse CLEANLY as a positive integer, not merely "parses a leading digit run" —
+  // `Number.parseInt` alone silently turns '1e3' into 1 and '45000ms' into 45000.
+  it('IH_WRITER_DEADLINE_MS defaults to 45000, parses a clean positive int, falls back on anything else', () => {
+    expect(ihWriterDeadlineMs(undefined)).toBe(45_000)
+    expect(ihWriterDeadlineMs('30000')).toBe(30_000)
+    expect(ihWriterDeadlineMs('0')).toBe(45_000)
+    expect(ihWriterDeadlineMs('-5')).toBe(45_000)
+    expect(ihWriterDeadlineMs('1e3')).toBe(45_000)
+    expect(ihWriterDeadlineMs('45000ms')).toBe(45_000)
+    expect(ihWriterDeadlineMs('  30000  ')).toBe(30_000)
+    expect(ihWriterDeadlineMs('bogus')).toBe(45_000)
+  })
 })
 
 // ─── Acceptance item 4: flag OFF is byte-identical and makes ZERO writer calls ───────────────────
@@ -238,9 +251,20 @@ describe('W7: readability that fails the PO\'s own line', () => {
   // counts only RELATION words ("with"/"in") — "for" (a list-adjacent function word inside a unit's
   // OWN text, not inter-unit glue any more) no longer saves a clause from reading as a keyword
   // dump. These lines use "with" where the pre-K7 fixture used "for".
-  it('B6.1 boundary: exactly ONE keyword-shaped clause passes; a SECOND one fails', () => {
+  // RULING P5 (fix round B5, value Blocking 1, SUPERSEDING K7's "at most one keyword-shaped
+  // clause"): a trailing list of keyword-shaped clauses AFTER the required relation clause is now
+  // ONE list section, not a per-clause count — "Classic Fit, Crew Neck" is a single 2-item trailing
+  // list, the exact shape review B4 measured K7 wrongly rejecting (Dino Squad, Spreadsheet Queen).
+  it('P5: one relation clause plus a trailing list of any length is ONE list section — passes', () => {
     expect(writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit', units).ok).toBe(true)
-    expect(writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit, Crew Neck', units).ok).toBe(false)
+    expect(writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit, Crew Neck', units).ok).toBe(true)
+  })
+  it('P5: a SECOND list section — split from the first by another relation clause — fails', () => {
+    const v = writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit, Crew Neck in Ring-Spun Cotton, Long Sleeve', units)
+    expect(v.ok).toBe(false)
+  })
+  it('P5: zero relation clauses at all (a bare keyword list) fails, regardless of clause count', () => {
+    expect(writerReadabilityVerdict('Retro Sunset Tee, Classic Fit, Crew Neck', units).ok).toBe(false)
   })
   it('B6.2: a gendered audience word beside "Unisex" fails', () => {
     expect(writerReadabilityVerdict('Retro Sunset Tee with Womens Everyday Fit, Unisex Sizing', units).ok).toBe(false)

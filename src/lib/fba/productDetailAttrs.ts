@@ -595,10 +595,45 @@ export function ihRepeatViolations(value: string): string[] {
  *  folding drift between "what composition calls a repeat" and "what the push seam calls a repeat"
  *  (the class `coverage-token-folding-shirt-hub-trap` names) cannot happen. */
 export const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
+
+/** RULING P6 (fix round B5, value Important P6a/b): a token that is PURELY numeric/percentage
+ *  (after `ihFoldWord` strips punctuation — "50%" folds to "50") is a COMPOSITION FACT, not a
+ *  repeated significant word. Before this rule, a true 50/50 (or any N/N) material split — the
+ *  composer's own pad bank writes "50% Cotton / 50% Polyester" verbatim — folded to the SAME word
+ *  "50" twice and was refused as `repeat-in-stored-line` by `classifyStoredIhLine`/
+ *  `lineHasSignificantRepeat`, on every 50/50 family (B0DSCDZC6K included), at the PUSH SEAM — not
+ *  only inside the writer. Reproduced live (unmodified HEAD `7a05570`): `classifyStoredIhLine('50%
+ *  Cotton / 50% Polyester')` returned `'repeat-in-stored-line'`. A bare digit string is never a
+ *  customer-facing "word" a shopper would read as repeating — it is part of the RATIO notation
+ *  ("50/50", "52/48") — so it is excluded from the significant-word count entirely, the same way
+ *  punctuation and stopwords already are. */
+const isPureNumericToken = (folded: string): boolean => /^[0-9]+$/.test(folded)
+
 export const significantFolded = (phrase: string): string[] =>
   phrase.toLowerCase().split(/\s+/)
     .map((w) => { const f = ihFoldWord(w); return GENDER_FOLDS[f] ?? f })
-    .filter((w) => w && !IH_INSIGNIFICANT.has(w))
+    .filter((w) => w && !IH_INSIGNIFICANT.has(w) && !isPureNumericToken(w))
+
+/** RULING P7 (fix round B5, value Important I2): the SURFACE word(s) behind a folded significant
+ *  word, aligned one-to-one with `significantFolded`'s own fold+filter (never a second copy of that
+ *  logic) — so a retry/refusal message can name what the LINE actually SAYS ("Women"/"Woman") rather
+ *  than the internal folded stem ("woman"), and can quote every distinct SPELLING that folded to the
+ *  same word (plural/gender forms fold together, so a mixed-case line like "…Women…Woman…" reports
+ *  both surface spellings under the one folded key). */
+export interface SignificantWordOccurrence { folded: string; surface: string }
+export const significantWordsWithSurface = (phrase: string): SignificantWordOccurrence[] => {
+  const out: SignificantWordOccurrence[] = []
+  for (const raw of (phrase || '').split(/\s+/)) {
+    if (!raw) continue
+    const f0 = ihFoldWord(raw)
+    const f = GENDER_FOLDS[f0] ?? f0
+    if (!f || IH_INSIGNIFICANT.has(f) || isPureNumericToken(f)) continue
+    const surface = raw.replace(/[^A-Za-z0-9'-]/g, '')
+    if (!surface) continue
+    out.push({ folded: f, surface })
+  }
+  return out
+}
 
 /** TRUE when `line` (the composer's own comma-joined shipped bytes, or any candidate stored line)
  *  repeats a folded significant word — the ABSOLUTE rule (PO ruling 2026-09-06, "2. No Repeat as

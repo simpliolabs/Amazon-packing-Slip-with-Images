@@ -77,7 +77,7 @@ import { loadBlankSpecRows, loadBlankAssignments, resolveFamilyBlank, familyBlan
 import { composeItemHighlightDetailed, ihAudienceOf, type ComposerResult } from '@/lib/fba/itemHighlightComposer'
 // WRITER SPEC PART 2 (2026-09-10, B4) — the writer is a LEAF (see its own header for why); this file
 // is a CONSUMER, never the other way, so the dependency graph stays acyclic.
-import { ihWriterMode, ihWriterMaxCallsBudget, ihWriterDeadlineMs, runWriterForDesign, IH_WRITER_RETRY_CAP, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
+import { ihWriterMode, ihWriterMaxCallsBudget, ihWriterDeadlineMs, runWriterForDesign, IH_WRITER_RETRY_CAP, WriterPartialCallsError, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
 /* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
  * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
  * highlights. Blank-grounded (resolveFamilyBlank), never title-derived: a title cannot vouch for
@@ -2703,19 +2703,39 @@ export async function produceItemHighlights(
   // (see `ItemHighlightsInput.identityDesignName`'s own doc for why they must stay separate).
   const designName = input.identityDesignName ?? input.designTokens?.[0] ?? null
   if (!designName) console.warn(JSON.stringify({ tag: 'IH_WRITER_NO_IDENTITY', site: 'produceItemHighlights' }))
-  const outcome = await runWriterForDesign({
-    composed: built.composed,
-    fallbackHold: built.hold,
-    designName,
-    identityPhrases: input.identityPhrases,
-    truthCtx,
-    runTail: (line) => runIhTail(line, {
-      titles, blankBrand: input.blankBrand, designSeasons: input.designSeasons,
-      capacityFamily: input.capacityFamily, brandName: input.brandName, truthCtx,
-      site: 'produceItemHighlights',
-    }),
-    deps,
-  })
+  // RULING P9 (fix round B5, wire Blocking 2): the single-design path never carried a deadline at
+  // all — give it the SAME regen-level bound the per-design path uses.
+  const deadlineAt = Date.now() + ihWriterDeadlineMs()
+  // RULING P10 (fix round B5, wire Important W4/W5): wrap the call the SAME way the per-design path
+  // does — a writer-side throw (from `runIhTail` via `runTail`, never from `askWriter`'s own client
+  // call, which swallows its own errors) must fall back to the composer's own value/hold, never
+  // escape to the route as a 500 in `shadow` mode where flag-off would have returned 200.
+  let outcome: Awaited<ReturnType<typeof runWriterForDesign>>
+  try {
+    outcome = await runWriterForDesign({
+      composed: built.composed,
+      fallbackHold: built.hold,
+      designName,
+      identityPhrases: input.identityPhrases,
+      truthCtx,
+      runTail: (line) => runIhTail(line, {
+        titles, blankBrand: input.blankBrand, designSeasons: input.designSeasons,
+        capacityFamily: input.capacityFamily, brandName: input.brandName, truthCtx,
+        site: 'produceItemHighlights',
+      }),
+      deps,
+      deadlineAt,
+    })
+  } catch (e) {
+    const callsMade = e instanceof WriterPartialCallsError ? e.callsMade : 0
+    const reasons = e instanceof WriterPartialCallsError ? [...e.reasonsSoFar, e.message] : [e instanceof Error ? e.message : String(e)]
+    console.warn(JSON.stringify({ tag: 'IH_WRITER_ERROR', error: e instanceof Error ? e.message : String(e) }))
+    const writerLog: IhWriterLogRow = {
+      design: designName, composer: built.value, writer: null, accepted: false,
+      reasons, calls: callsMade, ...(designName ? {} : { noIdentity: true }),
+    }
+    return { value: built.value, hold: built.hold, writerLog }
+  }
   const writerLog: IhWriterLogRow = {
     design: designName, composer: built.value,
     writer: outcome.accepted ? outcome.value : null, accepted: outcome.accepted,
@@ -2818,12 +2838,23 @@ export async function produceItemHighlightsPerDesign(
           site: 'produceItemHighlightsPerDesign',
         }),
         deps,
+        // RULING P9 (fix round B5, wire Blocking 2): the SAME `deadlineAt` every design in this
+        // family is judged against — carried INTO the per-design retry loop now, not only checked
+        // here before reservation, so an in-flight design's own 3x20s loop also stops at the bound.
+        deadlineAt,
       })
     } catch (e) {
-      console.warn(JSON.stringify({ tag: 'IH_WRITER_ERROR', design: d.designKey, error: e instanceof Error ? e.message : String(e) }))
-      // RULING K10: refund the FULL reservation — this design never spent a call.
-      callsReserved -= IH_WRITER_RETRY_CAP
-      const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [`error: ${e instanceof Error ? e.message : String(e)}`], calls: 0 }
+      // RULING P10 (fix round B5, wire Blocking 3): refund only the UNSPENT part of the
+      // reservation — `WriterPartialCallsError` carries the number of calls ACTUALLY made before
+      // the throw (0 when the throw happened before any call, e.g. a bad `designName` reaching
+      // `buildAdmittedUnits`). The wire lens measured this catch refunding the FULL cap even when
+      // every one of a design's 3 calls had already been billed (30 calls spent against an 18
+      // budget), with `writerLog.calls` reporting 0 — both are fixed by reading `callsMade`.
+      const callsMade = e instanceof WriterPartialCallsError ? e.callsMade : 0
+      const priorReasons = e instanceof WriterPartialCallsError ? e.reasonsSoFar : []
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_ERROR', design: d.designKey, error: e instanceof Error ? e.message : String(e), callsMade }))
+      callsReserved -= (IH_WRITER_RETRY_CAP - callsMade)
+      const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [...priorReasons, `error: ${e instanceof Error ? e.message : String(e)}`], calls: callsMade }
       writerLogByIndex[i] = row
       return d
     }

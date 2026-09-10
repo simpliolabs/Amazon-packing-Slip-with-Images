@@ -225,6 +225,16 @@ const classifyTier = (folded: readonly string[], usedFolded: ReadonlyMap<string,
  *  `picked`/`len` describe the running selection the caller is about to extend; `repeatCheckBase` is
  *  the array `ihRepeatViolations` must see the draft against — the pool loop passes `withBrand(picked)`
  *  because the reserved brand phrase counts toward the repeat cap before it is literally pushed. */
+/** RULING P1 (fix round B5, compliance Blocking): the brand-once test is now the ONE brand-carrier
+ *  predicate `lineCarriesBrand` (itemHighlightComposer.ts's own export, already used by the writer's
+ *  `buildAdmittedUnits`/`judgeWriterArrangement`) — never the narrower `brandRe` (a bare
+ *  word-boundary regex on `allowedBrand`, imported from this same module). `brandRe` missed a
+ *  flattened/hyphenated spelling ("Comfort-colors Shirt") that `lineCarriesBrand`'s OWN flattened
+ *  match already catches, so the composer's own line could ship the brand twice
+ *  ("Comfort-colors Shirt, …, Comfort Colors Tee"). DELIBERATE flag-off change: reported as its own
+ *  differential vs `974cb1a` in the B5 report — every changed compose row is a duplicate-brand
+ *  phrase now correctly excluded (or the family HOLDs when the floor can no longer be met without
+ *  it), never a row that used to ship cleanly. */
 function admitCandidate(
   phrase: string,
   folded: readonly string[],
@@ -234,7 +244,7 @@ function admitCandidate(
   len: number,
   max: number,
   repeatCheckBase: readonly string[],
-  brandRe: RegExp | null,
+  allowedBrand: string | null,
   brandPick: string | null,
 ): boolean {
   const tier = classifyTier(folded, tierBasis)
@@ -244,7 +254,7 @@ function admitCandidate(
   const nextLen = len + (picked.length ? 2 : 0) + phrase.length
   if (nextLen > max) return false
   if (ihRepeatViolations([...repeatCheckBase, phrase].join(', ')).length > 0) return false
-  if (brandRe && brandRe.test(phrase) && (brandPick || repeatCheckBase.some((p) => brandRe.test(p)))) return false
+  if (allowedBrand && lineCarriesBrand(phrase, allowedBrand) && (brandPick || repeatCheckBase.some((p) => lineCarriesBrand(p, allowedBrand)))) return false
   return true
 }
 
@@ -347,7 +357,7 @@ function shadowRepeatReachesFloor(
   spec: ComposerOpts['spec'],
   min: number,
   max: number,
-  brandRe: RegExp | null,
+  allowedBrand: string | null,
   brandPick: string | null,
 ): boolean {
   const picked = [...basePicked]
@@ -355,7 +365,7 @@ function shadowRepeatReachesFloor(
   let len = picked.reduce((n, p, i) => n + p.length + (i ? 2 : 0), 0)
   const tryAdd = (phrase: string, folded: readonly string[]) => {
     if (len >= min) return
-    if (!admitCandidate(phrase, folded, used, true, picked, len, max, picked, brandRe, brandPick)) return
+    if (!admitCandidate(phrase, folded, used, true, picked, len, max, picked, allowedBrand, brandPick)) return
     len += (picked.length ? 2 : 0) + phrase.length
     picked.push(phrase)
     folded.forEach((w) => used.set(w, (used.get(w) ?? 0) + 1))
@@ -401,7 +411,6 @@ export function composeItemHighlightDetailed(
   // (pure, cheap) so it rides on EVERY return below, not only the padding-loop path that consumes a
   // second, independently-built copy of it further down. Never read by any pre-existing branch.
   const specFactsForWriter = opts?.spec ? ihSpecFactFillers(opts.spec).map(titleCasePhrase) : []
-  const brandRe = opts?.allowedBrand ? brandCarrierRegex(opts.allowedBrand) : null
   const carriesBrand = (s: string): boolean => !!opts?.allowedBrand && lineCarriesBrand(s, opts.allowedBrand)
 
   // The PO wear-style fact reserves its budget UP FRONT when eligible — otherwise the greedy fill
@@ -554,7 +563,7 @@ export function composeItemHighlightDetailed(
       // FIX WAVE 2 (I-1): the tier/budget/≤2-cap/brand-once checks below used to be hand-copied here
       // AND (incompletely) in the shadow pass — now ONE `admitCandidate` gate for both, `allowRepeat:
       // false` here so only tier 'A' is ever admitted (the absolute rule, unchanged in effect).
-      if (!admitCandidate(phrase, folded, usedFolded, false, picked, lineLen(), MAX, withBrand(picked), brandRe, brandPick)) continue
+      if (!admitCandidate(phrase, folded, usedFolded, false, picked, lineLen(), MAX, withBrand(picked), opts?.allowedBrand ?? null, brandPick)) continue
       picked.push(phrase)
       folded.forEach(bumpUsed)
       if (gm) usedGarmentSurfaces.add(gm)
@@ -569,7 +578,7 @@ export function composeItemHighlightDetailed(
   if (picked.length + (brandFromPool ? 1 : 0) < MIN_CANDIDATES) {
     why.picked = picked.length
     const repeatBlocked = tierBFitBudgetSeen &&
-      shadowRepeatReachesFloor(candidates, withBrand(picked), usedFolded, opts?.spec, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max, brandRe, brandPick)
+      shadowRepeatReachesFloor(candidates, withBrand(picked), usedFolded, opts?.spec, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max, opts?.allowedBrand ?? null, brandPick)
     why.repeatBlocked = repeatBlocked
     return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'too-few-picked', {
       candidates: candidatePhrasesForWriter, brandPick, brandOrigin, wearFact: factEligible ? OVERSIZED_FACT : null,
@@ -661,7 +670,7 @@ export function composeItemHighlightDetailed(
   // repeat-permitting selection would ACTUALLY have reached MIN (see shadowRepeatReachesFloor).
   if (lineLen() < MIN) {
     const repeatBlocked = tierBFitBudgetSeen &&
-      shadowRepeatReachesFloor(candidates, picked, usedFolded, opts?.spec, MIN, CONTENT_CONTRACT.itemHighlights.max, brandRe, brandPick)
+      shadowRepeatReachesFloor(candidates, picked, usedFolded, opts?.spec, MIN, CONTENT_CONTRACT.itemHighlights.max, opts?.allowedBrand ?? null, brandPick)
     why.repeatBlocked = repeatBlocked
     return nullOut(repeatBlocked ? 'under-floor-no-repeat' : 'under-floor-after-pad', {
       candidates: candidatePhrasesForWriter, brandPick, brandOrigin, wearFact: factEligible ? OVERSIZED_FACT : null,

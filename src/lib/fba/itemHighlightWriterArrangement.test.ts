@@ -188,11 +188,11 @@ describe('W1: validateArrangement', () => {
 
   it('(g) [RULING G4] when the admitted units carry a brand unit, an arrangement omitting it is a named violation', () => {
     const withBrand = buildAdmittedUnits(
-      { candidates: ['Cozy Graphic Sweatshirt'], specFacts: ['Classic Fit'], brandPick: 'Comfort Colors Tee', wearFact: null },
+      { candidates: ['Cozy Graphic Tee'], specFacts: ['Classic Fit'], brandPick: 'Comfort Colors Tee', wearFact: null },
       { designName: 'Retro Sunset', truthCtx: { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic' }, allowedBrand: 'Comfort Colors', audience: 'adult', field: 'highlights' } },
     )
     const id = (t: string) => withBrand.find((u) => u.text === t)!.id
-    const v = validateArrangement({ parts: [{ unit: id('Retro Sunset') }, { glue: ',' }, { unit: id('Cozy Graphic Sweatshirt') }] }, withBrand)
+    const v = validateArrangement({ parts: [{ unit: id('Retro Sunset') }, { glue: ',' }, { unit: id('Cozy Graphic Tee') }] }, withBrand)
     expect(v.ok).toBe(false)
     if (!v.ok) expect(v.violation).toMatch(/missing required brand unit/)
     const withBrandOk = validateArrangement({ parts: [{ unit: id('Retro Sunset') }, { glue: ',' }, { unit: id('Comfort Colors Tee') }] }, withBrand)
