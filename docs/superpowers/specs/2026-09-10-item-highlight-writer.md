@@ -82,6 +82,45 @@ design errors, each of which must be fixed BEFORE the writer is wired, not after
 
 Phase A of this work is redoing that net correctly. Phase B is the writer on top of it.
 
+## 2a. AMENDMENT 2026-09-10 — provenance is judged per SEGMENT, against whole units
+
+*Why.* Review A2 (`.superpowers/sdd/2026-09-10-ih-writer/phase-a-review-2.md`) measured that
+token-level provenance (§2 step 3 as first written) cannot stop recombination. In "Girl Dad Tee for
+Girls" every token folds back to the design name, so token provenance admits it. And the regex net
+behind it misses 26 of 34 lines a fluent writer could plausibly emit. Adding words to that net is
+the lexicon treadmill §2 already rejects.
+
+*The rule, replacing §2 step 3:*
+1. The admitted set is a set of UNITS, not a bag of words: the composer's own pool candidates for
+   this design; the blank's spec-fact renderings; the brand phrase and the sanctioned wear fact when
+   they apply; and the design identity (its name as stored, plus its vision phrases, each passing
+   `phraseTruthVerdict`).
+2. **Atomic units are used whole.** Identity, spec facts, brand, wear fact, and any unit carrying a
+   number or "%" may be reordered or inflected but never split. The writer cannot pull "Girls" out
+   of "Girls Trip" or "100%" out of "100% Machine Washable".
+3. **Pool units may be used in part** (dropping words from a shopper phrase usually weakens it),
+   but every segment is re-judged on its own by `phraseTruthVerdict`, and a PARTIAL segment is
+   judged WITHOUT the design-own-word exemption. The exemption justifies a word only inside the
+   phrase that carried it, which is what rejects "Girls" lifted out of "Dad of Girls Shirt".
+4. Words between segments come from a CLOSED glue list of function words that carry no product
+   claim. Negations, quantifiers, purity words and gendered pronouns are never glue.
+5. The line then goes through the SAME tail as the composer's line (repeat budget, content rules,
+   line truth net, floor door): one function, not a copy.
+
+*Consequence.* The writer can say nothing the picker could not have admitted, re-judged piece by
+piece. That property is what makes it safe, and it is why the net rounds stop chasing spellings.
+
+*Fail-closed, refined.* After the retry cap, the design gets the composer's OWN result: an
+already-vetted line, or its named HOLD. Flag-on is therefore never worse than flag-off, and an
+unvetted line still never ships. Hold semantics are unchanged.
+
+*Cost, refined.* No call for an unrated pool (PO ruling) or zero admitted pool units. Designs the
+picker held for want of a repeat-free fill ARE eligible: joining admitted facts with glue words is
+exactly what a picker cannot do. That is B0DSCDZC6K, where 5 of 6 designs hold.
+
+*Rollout.* `IH_WRITER` = off | shadow | on, default off. Shadow writes and logs but ships the
+composer's result, so the PO reads real lines before anything changes.
+
 ## 3. ADVERSARY
 
 - **"The writer will hallucinate a spec."** Provenance makes that a rejection, not a hope: a token
