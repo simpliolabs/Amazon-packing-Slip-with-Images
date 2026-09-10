@@ -284,11 +284,26 @@ export async function POST(req: NextRequest) {
       })
     }
 
+    // FIX ROUND B2 (RULING W5): the single-design writer's own identity — READ-ONLY, no vision call
+    // (see this file's own header + designGroupIdentity.ts), the SAME resolver the multi-design
+    // branch above already uses, applied to the implicit single group (every `pct` row, or the
+    // resolved child when no per-child rows exist yet). Never fed to the composer (`produceItemHighlights`
+    // threads it only to the writer — see `ItemHighlightsInput.identityDesignName`'s doc).
+    const singleGroupSkus = pct.length
+      ? pct.map((p) => ({ sku: p.sku, asin: p.asin }))
+      : (resolved?.childAsin ? [{ sku: '', asin: resolved.childAsin }] : [])
+    const singleIdentity = singleGroupSkus.length
+      ? await readDesignGroupIdentity({ key: 'single', skus: singleGroupSkus }).catch(() => null)
+      : null
+    const identityDesignName = pct[0]?.designName ?? null
+
     // Path parity (Invariant 1): the SAME inputs the pipeline hands the producer — pool, blank row,
     // the title the IH will sit beside. Deterministic; no client, no LLM (unless IH_WRITER is not
     // 'off' — see produceItemHighlights).
     const built = await produceItemHighlights({
       finalTitle: title, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow, netTitles: [title],
+      identityDesignName,
+      identityPhrases: identityPhrases(singleIdentity?.identity ?? null),
       // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family lean the pipeline's own
       // single-design branch now reads (listingPipeline.ts:11901, fixed above in this same round).
       // NORMALIZED, not raw: `buildItemHighlights`'s `audienceLean` is `TruthAudienceLean`

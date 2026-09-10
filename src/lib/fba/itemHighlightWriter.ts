@@ -1,34 +1,43 @@
 /**
  * itemHighlightWriter.ts — THE Item Highlight WRITER (docs/superpowers/specs/2026-09-10-item-
- * highlight-writer.md, §2 as AMENDED by §2a; rulings
- * .superpowers/sdd/2026-09-10-ih-writer/phase-a3-and-b-rulings.md PART 2, B1-B10).
+ * highlight-writer.md, §2 as amended by §2a and §2b; rulings
+ * .superpowers/sdd/2026-09-10-ih-writer/phase-b-fix-rulings.md, W1-W10).
  *
- * WHY A LEAF, NOT WIRED INTO listingPipeline.ts DIRECTLY. This module owns provenance (B2),
- * readability (B6), the client + prompt (B5/B10) and the bounded retry loop (B7/B8) — everything the
- * writer needs to judge and produce ONE candidate line. It has ZERO import of `listingPipeline.ts`:
- * every place this module would otherwise need that file's own logic (the post-compose TAIL —
- * `runIhTail`, repeat budget + line truth net + floor door) is instead handed in as a CALLBACK
- * (`runTail`) by the caller. `listingPipeline.ts` imports FROM this module (the async
- * `produceItemHighlights`/`produceItemHighlightsPerDesign` wrappers live there, next to the sync
- * builders and `runIhTail` they already own) — never the other way — so the dependency graph stays
- * acyclic (this module sits beside `contentTruth.ts`/`productDetailAttrs.ts` as a leaf).
+ * WHY A LEAF, NOT WIRED INTO listingPipeline.ts DIRECTLY. This module owns the admitted set (B1/W1),
+ * the arrangement contract (W1), readability (B6/W7), the client + prompt (B5/B10) and the bounded
+ * retry loop (B7/B8/W8) — everything the writer needs to judge and produce ONE candidate line. It
+ * has ZERO import of `listingPipeline.ts`: the post-compose TAIL (`runIhTail` — repeat budget + line
+ * truth net + floor door) is handed in as a CALLBACK (`runTail`) by the caller. `listingPipeline.ts`
+ * imports FROM this module — never the other way — so the dependency graph stays acyclic (this
+ * module sits beside `contentTruth.ts`/`productDetailAttrs.ts` as a leaf).
  *
- * THE LOAD-BEARING IDEA (spec §2a): admission is a set of UNITS, not a bag of words. A unit is used
- * WHOLE (atomic: design identity, spec facts, the brand phrase, the wear fact, and any unit carrying
- * a digit or "%") or IN PART (a pool phrase only — dropping words from a shopper phrase). A PARTIAL
- * segment is re-judged by `phraseTruthVerdict` WITHOUT the design-own-word exemption, because that
- * exemption justifies a word only inside the phrase that carried it — that is what rejects "Girls"
- * pulled out of "Girl Dad Tee for Girls" (`designTokens: ['Girl Dad']`), the exact case token-level
- * provenance admits (every token folds back to the design name) and §2a exists to close.
+ * THE DESIGN CORRECTION THIS ROUND MAKES (spec §2b, ruling W1). Every new lie the phase-b-review
+ * built (N1, N3-N11, N15, N16) came from ONE place: a parser that read the writer's free TEXT back
+ * into admitted units, and could always be fooled by reordering, inserted/substituted glue, a
+ * partial use that drops a negation/hedge/relation, or a number moved inside a unit. Tightening that
+ * parser rule by rule is the treadmill the spec amendment exists to end.
+ *
+ * So the writer does not return text. It returns an ARRANGEMENT — an ordered list of admitted UNIT
+ * IDS and closed GLUE tokens (`{"parts":[{"unit":"u3"},{"glue":"with"},{"unit":"u7"}]}`). Code
+ * renders it: every unit appears with its OWN stored words, order, numbers and punctuation — the
+ * only permitted change is the singular/plural form of a unit's trailing GARMENT HEAD NOUN. A unit
+ * is used at most once. There is no model TEXT for a provenance parser to read, so the whole class of
+ * recombination defect cannot recur BY CONSTRUCTION — there is nothing left to parse.
+ *
+ * THE BOUND (spec §2b "Bound"). A lie can reach the line only if it is itself an admitted unit — the
+ * identical phrase the picker would ship with the flag off. The writer's safety equals the picker's;
+ * closing the picker's own admission gaps is the separately-FILED admission-oracle programme.
  */
 import type OpenAI from 'openai'
 import {
-  phraseTruthVerdict, LEAN_FEM_CORE, LEAN_MASC_CORE,
+  phraseTruthVerdict, garmentNounConstraint, LEAN_FEM_CORE, LEAN_MASC_CORE,
   KIDS_AUDIENCE_RE, ADULT_AUDIENCE_RE, FIT_CLAIM_RE, PURITY_ADJACENT_RE, FIBER_RE,
-  type PhraseTruthCtx, type PhraseTruthReason,
+  type PhraseTruthCtx,
 } from '@/lib/fba/contentTruth'
 import { PERFORMANCE_CLAIM_RE } from '@/lib/fba/blankSpecs'
-import { ihFoldWord } from '@/lib/fba/productDetailAttrs'
+import { ihFoldWord, IH_GARMENT_HEAD_FOLDED } from '@/lib/fba/productDetailAttrs'
+import { titleCasePhrase } from '@/lib/fba/titleBand'
+import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { type ComposerResult } from '@/lib/fba/itemHighlightComposer'
 import { getLlmClientForRequest } from '@/lib/fba/llmGateway'
 
@@ -51,31 +60,68 @@ export function ihWriterModel(raw: string | undefined = process.env.IH_WRITER_MO
   return (raw && raw.trim()) || 'gpt-4.1'
 }
 
-// ─── B2: ADMITTED UNITS ────────────────────────────────────────────────────────────────────────
-
-export type AdmittedUnitKind = 'identity' | 'spec-fact' | 'brand' | 'wear-fact' | 'pool'
-
-export interface AdmittedUnit {
-  text: string
-  kind: AdmittedUnitKind
-  /** ATOMIC units (identity, spec facts, brand, wear fact, and any unit carrying a digit or "%")
-   *  must be used WHOLE — reordering/inflection allowed, nothing may be dropped. A non-atomic (pool)
-   *  unit may also be used IN PART. */
-  atomic: boolean
+/** RULING W8 (F7, F9): the PER-REGEN call budget, counted ACROSS designs — distinct from
+ *  `IH_WRITER_RETRY_CAP` below (the per-DESIGN retry cap, 1+2). Default 18. Echoed in `/api/health`
+ *  so the bound is readable from outside the container, same convention as every other model/count
+ *  pin in that route. */
+export function ihWriterMaxCallsBudget(raw: string | undefined = process.env.IH_WRITER_MAX_CALLS): number {
+  const n = Number.parseInt((raw ?? '').trim(), 10)
+  return Number.isFinite(n) && n > 0 ? n : 18
 }
 
-/** B1: builds the writer's admitted set FROM the composer's own additively-exposed fields
- *  (`ComposerResult.candidates`/`specFacts`/`brandPick`/`wearFact`) plus the design's own identity —
- *  never re-implements the composer's filtering. Identity units (the design name as stored, plus the
- *  group's vision `identityPhrases`) are admitted only when `phraseTruthVerdict` passes them against
- *  the design's own truthCtx — a design whose own name asserts something the blank does not back
- *  (a garment lie, a capability claim) is not laundered into an admitted fact just because it is the
- *  design's own vocabulary. */
+// ─── W1: ADMITTED UNITS (stable IDs; no atomic/pool split any more — every unit renders WHOLE) ───
+
+export type AdmittedUnitKind = 'identity' | 'spec-fact' | 'brand' | 'wear-fact' | 'pool' | 'garment-head'
+
+export interface AdmittedUnit {
+  /** Stable within ONE writer run (one `buildAdmittedUnits` call, reused across every retry for
+   *  that design) — "u0", "u1", ... in construction order. */
+  id: string
+  /** Stored words, order, numbers and punctuation, exactly as the composer/identity/spec source
+   *  carries them — rendered VERBATIM, never re-worded, never split. */
+  text: string
+  kind: AdmittedUnitKind
+  /** True iff this unit's LAST word folds to a member of `GARMENT_HEAD_WORDS` (garmentNoun.ts) — the
+   *  ONLY unit shape an arrangement's `number` field may target (rule (a), W1). */
+  numberable: boolean
+}
+
+/** Does `text`'s LAST tokenized word fold to a garment head noun? Reuses the SAME derivation
+ *  (`IH_GARMENT_HEAD_FOLDED`, itself derived from `GARMENT_HEAD_WORDS` via `ihFoldWord` —
+ *  productDetailAttrs.ts) every other repeat-budget/garment-noun consumer in this codebase reads —
+ *  never a second hand-written list. */
+function lastWordMatch(text: string): { word: string; index: number } | null {
+  const matches = [...text.matchAll(WORD_RE)]
+  if (!matches.length) return null
+  const last = matches[matches.length - 1]
+  return { word: last[0], index: last.index ?? 0 }
+}
+function isNumberable(text: string): boolean {
+  const last = lastWordMatch(text)
+  return !!last && IH_GARMENT_HEAD_FOLDED.has(ihFoldWord(last.word))
+}
+
+/** W1: builds the writer's admitted set FROM the composer's own additively-exposed fields
+ *  (`ComposerResult.candidates`/`specFacts`/`brandPick`/`wearFact`) plus the design's own identity,
+ *  PLUS the family's own garment head noun(s) (so an arrangement can NAME the garment even when the
+ *  pool carries no bare garment-noun phrase) — never re-implements the composer's filtering. Identity
+ *  units (the design name as stored, plus the group's vision `identityPhrases`) are admitted only
+ *  when `phraseTruthVerdict` passes them against the design's own truthCtx — a design whose own name
+ *  asserts something the blank does not back is not laundered into an admitted fact just because it
+ *  is the design's own vocabulary. Garment-head units are derived from `garmentNounConstraint` (the
+ *  SAME truth-derived allowed-noun table `phraseTruthVerdict`'s own wrong-garment-noun rule gates
+ *  with) — filtered to single-word forms recognized by `GARMENT_HEAD_WORDS`, so every one passes
+ *  rule (a) [numberable] BY CONSTRUCTION (pinned in the test file). */
 export function buildAdmittedUnits(
   composed: Pick<ComposerResult, 'candidates' | 'specFacts' | 'brandPick' | 'wearFact'>,
   opts: { designName?: string | null; identityPhrases?: readonly string[]; truthCtx: PhraseTruthCtx },
 ): AdmittedUnit[] {
   const units: AdmittedUnit[] = []
+  let n = 0
+  const push = (text: string, kind: AdmittedUnitKind) => {
+    units.push({ id: `u${n++}`, text, kind, numberable: isNumberable(text) })
+  }
+
   const identityTexts = [opts.designName, ...(opts.identityPhrases ?? [])]
     .filter((s): s is string => !!s && !!s.trim())
     .map((s) => s.trim())
@@ -84,246 +130,202 @@ export function buildAdmittedUnits(
     const key = text.toLowerCase()
     if (seenIdentity.has(key)) continue
     seenIdentity.add(key)
-    if (phraseTruthVerdict(text, opts.truthCtx).ok) units.push({ text, kind: 'identity', atomic: true })
+    if (phraseTruthVerdict(text, opts.truthCtx).ok) push(text, 'identity')
   }
-  for (const text of composed.specFacts ?? []) units.push({ text, kind: 'spec-fact', atomic: true })
-  if (composed.brandPick) units.push({ text: composed.brandPick, kind: 'brand', atomic: true })
-  if (composed.wearFact) units.push({ text: composed.wearFact, kind: 'wear-fact', atomic: true })
-  for (const text of composed.candidates ?? []) units.push({ text, kind: 'pool', atomic: /[\d%]/.test(text) })
+  for (const text of composed.specFacts ?? []) push(text, 'spec-fact')
+  if (composed.brandPick) push(composed.brandPick, 'brand')
+  if (composed.wearFact) push(composed.wearFact, 'wear-fact')
+  for (const text of composed.candidates ?? []) push(text, 'pool')
+
+  // W1: "Units are as in B1, PLUS the family's garment head noun(s) for this blank as single-word
+  // units, so an arrangement can name the garment. They pass rule (a) by construction."
+  const { allowed } = garmentNounConstraint(opts.truthCtx)
+  const seenHead = new Set<string>()
+  for (const word of allowed) {
+    if (/\s/.test(word)) continue // single-word forms only
+    const folded = ihFoldWord(word)
+    if (!IH_GARMENT_HEAD_FOLDED.has(folded) || seenHead.has(folded)) continue
+    seenHead.add(folded)
+    push(titleCasePhrase(word), 'garment-head')
+  }
   return units
 }
 
-// ─── B2: THE CLOSED GLUE LIST ──────────────────────────────────────────────────────────────────
+// ─── W1: THE CLOSED GLUE + PUNCTUATION SETS ───────────────────────────────────────────────────────
 
-/** Function words that carry no product claim — ruling B2's literal starting list. Splitting on
- *  these (in addition to punctuation) is what turns "Girl Dad Tee **for** Girls" into two
- *  independently-judged runs instead of one, so "Girls" cannot borrow the identity's exemption by
- *  mere adjacency. */
-const GLUE_WORDS_RAW = ['a', 'an', 'the', 'and', 'with', 'in', 'for', 'of', 'to', 'your', 'on', 'from', 'that', 'this']
-export const GLUE_WORDS: ReadonlySet<string> = new Set(GLUE_WORDS_RAW.map(ihFoldWord))
+/** Function words that carry no product claim — ruling B2's literal starting list, unchanged by W1.
+ *  An arrangement's `{"glue": "..."}` part must match one of these EXACTLY (case-sensitive — the
+ *  model is instructed to use these exact lowercase spellings), or one of `GLUE_PUNCTUATION` below. */
+const GLUE_WORDS_RAW = ['a', 'an', 'the', 'and', 'with', 'in', 'for', 'of', 'to', 'your', 'on', 'from', 'that', 'this'] as const
+export const GLUE_WORDS: ReadonlySet<string> = new Set(GLUE_WORDS_RAW)
+/** The FOLDED form of the same list — used only by readability's clause scan (B6.1/W7) on the
+ *  RENDERED line, where casing/inflection may vary; arrangement validation (W1 rule (c)) uses the
+ *  exact-string `GLUE_WORDS` above instead. */
+const GLUE_WORDS_FOLDED: ReadonlySet<string> = new Set(GLUE_WORDS_RAW.map(ihFoldWord))
 
-/** NEVER glue (ruling B2, verbatim): negations, quantifiers, purity words, gendered pronouns. Not
- *  consumed at runtime by the segmenter (they simply are never added to `GLUE_WORDS` above) — kept as
+/** W1's closed punctuation set. Attaches to the word on its LEFT when rendered (no space before;
+ *  the ordinary inter-token space still follows, via the render join). */
+export const GLUE_PUNCTUATION: ReadonlySet<string> = new Set([',', '—', '|', '&'])
+
+/** NEVER glue (ruling B2, verbatim, unchanged by W1): negations, quantifiers, purity words, gendered
+ *  pronouns. Not consumed at runtime (they simply are never added to `GLUE_WORDS` above) — kept as
  *  data so a test can assert `GLUE_WORDS` never grows to include one of these AND that none of them
- *  (nor any glue word) matches an exported truth regex (the build-time collision guard B2 asks for). */
+ *  (nor any glue word) matches an exported truth regex (the build-time collision guard, kept from B2
+ *  per ruling W1: "Keep the glue-vs-lexicon disjointness test."). */
 export const NEVER_GLUE_WORDS: readonly string[] = ['not', 'no', 'without', 'non', 'all', 'only', 'just', 'pure', 'entirely', 'nothing', 'her', 'his', 'him', 'she', 'he']
 
-// ─── B2: TOKENIZE + SEGMENT ────────────────────────────────────────────────────────────────────
-
-const PUNCT_SPLIT_RE = /[,—–|;:&]/
 const WORD_RE = /[A-Za-z0-9]+(?:['’][A-Za-z]+)*/g
 
-/** Splits `line` into RUNS at punctuation only (`, — – | ; : &`) — one run per clause, GLUE WORDS
- *  KEPT IN PLACE. Glue needs no provenance of its own, but it may sit INSIDE a genuine admitted
- *  unit's own wording ("Dad **of** Girls Gift", "Can be worn **as** Oversized") — severing the run at
- *  every glue word BEFORE matching would make such a unit unmatchable as a WHOLE, even when the
- *  writer reproduced it verbatim. `contentFoldedMultiset` below is where glue actually drops out of
- *  the comparison — symmetrically, on both the candidate segment AND every unit it is compared
- *  against — so a segment may legally SPAN a glue word while an isolated glue-only span (no content
- *  word at all) still trivially auto-passes. Tokenizes apostrophe-bearing words ("Girl's", "That's")
- *  as ONE token each — never split into a bare trailing "s" (the A7 defect class the reverted
- *  `wordsOf` helper caused; this tokenizer has no relationship to that code). */
-function splitIntoRuns(line: string): string[][] {
-  return line.split(PUNCT_SPLIT_RE)
-    .map((clause) => clause.match(WORD_RE) ?? [])
-    .filter((words) => words.length > 0)
+// ─── W1: THE SINGULAR/PLURAL TOGGLE (the ONLY permitted change inside a unit) ─────────────────────
+
+/** Explicit singular/plural pairs for the closed `GARMENT_HEAD_WORDS` vocabulary (garmentNoun.ts) —
+ *  hand-paired rather than a generic English inflector, because a generic rule mis-pluralizes
+ *  irregular members of this exact list (e.g. "dress" → "dresss"). Adding a WORD here never adds new
+ *  VOCABULARY (the fold-derivation `IH_GARMENT_HEAD_FOLDED` already gates which units are numberable
+ *  at all) — it only teaches the renderer the other half of a pair already in that closed list. */
+const GARMENT_NUMBER_PAIRS: readonly [string, string][] = [
+  ['shirt', 'shirts'], ['t-shirt', 't-shirts'], ['tshirt', 'tshirts'], ['tee', 'tees'],
+  ['hat', 'hats'], ['cap', 'caps'], ['snapback', 'snapbacks'], ['beanie', 'beanies'], ['visor', 'visors'],
+  ['hoodie', 'hoodies'], ['sweatshirt', 'sweatshirts'], ['crewneck', 'crewnecks'], ['pullover', 'pullovers'],
+  ['polo', 'polos'], ['tank', 'tanks'], ['top', 'tops'], ['jersey', 'jerseys'],
+  ['dress', 'dresses'], ['sundress', 'sundresses'], ['legging', 'leggings'], ['tight', 'tights'], ['sock', 'socks'],
+  ['jacket', 'jackets'], ['coat', 'coats'], ['windbreaker', 'windbreakers'], ['pajama', 'pajamas'], ['apron', 'aprons'],
+]
+const SINGULAR_OF = new Map<string, string>()
+const PLURAL_OF = new Map<string, string>()
+for (const [s, p] of GARMENT_NUMBER_PAIRS) {
+  SINGULAR_OF.set(s, s); SINGULAR_OF.set(p, s)
+  PLURAL_OF.set(s, p); PLURAL_OF.set(p, p)
 }
 
-/** Every word, folded, INCLUDING glue — used to judge admissibility mechanics is wrong on glue;
- *  kept only as the general-purpose fold used elsewhere (readability). */
-function foldedMultiset(text: string): Map<string, number> {
-  const m = new Map<string, number>()
-  for (const w of text.match(WORD_RE) ?? []) {
-    const f = ihFoldWord(w)
-    if (!f) continue
-    m.set(f, (m.get(f) ?? 0) + 1)
-  }
-  return m
+function applyCasingLike(sample: string, word: string): string {
+  if (sample.length > 1 && sample === sample.toUpperCase()) return word.toUpperCase()
+  if (sample[0] && sample[0] === sample[0].toUpperCase()) return word.charAt(0).toUpperCase() + word.slice(1)
+  return word
 }
 
-/** The CONTENT fold — glue words dropped, MULTISET (order lost). Used only for ATOMIC units, which
- *  spec §2a point 2 explicitly allows to be "reordered or inflected" when used whole. */
-function contentFoldedMultiset(text: string): Map<string, number> {
-  const m = new Map<string, number>()
-  for (const w of text.match(WORD_RE) ?? []) {
-    const f = ihFoldWord(w)
-    if (!f || GLUE_WORDS.has(f)) continue
-    m.set(f, (m.get(f) ?? 0) + 1)
-  }
-  return m
-}
-const multisetEquals = (a: ReadonlyMap<string, number>, b: ReadonlyMap<string, number>): boolean => {
-  if (a.size !== b.size) return false
-  for (const [k, v] of a) if (b.get(k) !== v) return false
-  return true
+/** Renders one unit's text with its trailing garment-head word toggled to `number` — every other
+ *  word, every space, every piece of punctuation in `text` is untouched. A word with no known pair
+ *  (should not happen for a `numberable` unit, since the pair table is a superset of
+ *  `GARMENT_HEAD_WORDS`'s toggleable members — but fails SAFE, never invents a form) is a no-op. */
+function applyNumberToLastWord(text: string, number: 'singular' | 'plural'): string {
+  const last = lastWordMatch(text)
+  if (!last) return text
+  const target = number === 'plural' ? PLURAL_OF.get(last.word.toLowerCase()) : SINGULAR_OF.get(last.word.toLowerCase())
+  if (!target) return text
+  const rendered = applyCasingLike(last.word, target)
+  return text.slice(0, last.index) + rendered + text.slice(last.index + last.word.length)
 }
 
-/** The CONTENT fold, ORDER PRESERVED — glue words dropped, sequence kept. Used for POOL units, which
- *  spec §2a point 3 grants no reordering privilege (only "used in part" — dropping words). A pool
- *  unit's WHOLE match therefore requires the segment's content words to appear in the SAME ORDER the
- *  unit itself uses them, not merely the same bag of words — "Girls Graphic Tee" is NOT the same use
- *  as "Graphic Tee For Girls" reordered; it is either the picker's own pre-existing admission (if the
- *  pool ever surfaces that exact phrase) or nothing this segmenter can explain, never a NEW
- *  recombination privilege the writer gains that the picker did not already have. */
-function contentFoldedSequence(text: string): string[] {
-  const seq: string[] = []
-  for (const w of text.match(WORD_RE) ?? []) {
-    const f = ihFoldWord(w)
-    if (!f || GLUE_WORDS.has(f)) continue
-    seq.push(f)
-  }
-  return seq
-}
-const sequencesEqual = (a: readonly string[], b: readonly string[]): boolean =>
-  a.length === b.length && a.every((w, i) => w === b[i])
-/** Does `sub` appear as an IN-ORDER (not necessarily contiguous) subsequence of `sup`? This is what
- *  "used in part" means for a pool unit — the segment may skip words the unit has, never reorder the
- *  ones it keeps. */
-const isOrderedSubsequence = (sub: readonly string[], sup: readonly string[]): boolean => {
-  if (sub.length === 0) return false
-  let i = 0
-  for (const w of sup) { if (i < sub.length && sub[i] === w) i++ }
-  return i === sub.length
-}
+// ─── W1: THE ARRANGEMENT — validate, then render VERBATIM ─────────────────────────────────────────
 
-interface SegmentCheck { admissible: boolean; ok: boolean; reason?: PhraseTruthReason | 'invention'; whole?: boolean }
+export interface ArrangementUnitPart { unit: string; number?: 'singular' | 'plural' }
+export interface ArrangementGluePart { glue: string }
+export type ArrangementPart = ArrangementUnitPart | ArrangementGluePart
 
-/** For ONE candidate segment (a consecutive slice of a run), asks: does SOME admitted unit support
- *  it (whole-exact, or "used in part" for a non-atomic pool unit), and if so does `phraseTruthVerdict`
- *  accept it under the mode that match implies (WHOLE -> the design's own truthCtx; PARTIAL -> the
- *  SAME ctx with `designTokens` stripped, per spec §2a point 3)? Tries every admitting unit and
- *  returns the first PASSING interpretation, else the first FAILING one (so a segment explainable by
- *  several units is judged charitably, exactly as a human reader would resolve the ambiguity —
- *  provenance's job is "can this be honestly attributed", not "which one attribution did the writer
- *  intend"). `admissible: false` means no unit's vocabulary can explain the segment at all — an
- *  invention, the class free text makes possible and a lexicon-based net cannot bound.
- *
- *  WHOLE keeps the design's own truthCtx regardless of unit kind: "the exemption justifies a word
- *  only inside the phrase that carried it" (spec §2a point 3) — a segment that reproduces an admitted
- *  unit VERBATIM (same words, same order for a pool unit; any order for an atomic one) is EXACTLY the
- *  phrase the composer's own admission already judged with this ctx. The spec's own safety property
- *  is "the writer can say nothing the PICKER could not have admitted" (§2a "Consequence") — bounded
- *  by the picker's own admission (a pre-existing, separately-filed picker-level gap included), never
- *  a promise that provenance silently repairs one. PARTIAL (a pool unit with words dropped) strips
- *  it: dropping words is what turns "Dad of Girls Shirt" (a relation, admitted whole) into "Girls"
- *  alone (a bare audience claim). */
-function checkSegment(words: readonly string[], units: readonly AdmittedUnit[], truthCtx: PhraseTruthCtx): SegmentCheck {
-  const segText = words.join(' ')
-  const segSeq = contentFoldedSequence(segText)
-  if (segSeq.length === 0) return { admissible: true, ok: true }
-  const segMultiset = contentFoldedMultiset(segText)
-  let bestFail: SegmentCheck | null = null
-  for (const u of units) {
-    let isWhole: boolean
-    let isPartial: boolean
-    if (u.atomic) {
-      isWhole = multisetEquals(segMultiset, contentFoldedMultiset(u.text))
-      isPartial = false
-    } else {
-      const unitSeq = contentFoldedSequence(u.text)
-      isWhole = sequencesEqual(segSeq, unitSeq)
-      isPartial = !isWhole && isOrderedSubsequence(segSeq, unitSeq)
-    }
-    if (!isWhole && !isPartial) continue
-    const judgeCtx: PhraseTruthCtx = isWhole ? truthCtx : { ...truthCtx, designTokens: [] }
-    const verdict = phraseTruthVerdict(segText, judgeCtx)
-    if (verdict.ok) return { admissible: true, ok: true }
-    if (!bestFail) bestFail = { admissible: true, ok: false, reason: verdict.reason, whole: isWhole }
+/**
+ * W1 validation (pure, exported), rejecting with a NAMED violation for the retry:
+ *   (a) a unit ID that does not exist;
+ *   (b) a unit used twice;
+ *   (c) a glue token outside the closed GLUE set or the closed punctuation set;
+ *   (d) `number` on a unit whose LAST word is not a garment head noun.
+ * Anything else malformed (not `{"parts":[...]}`, an empty array, a part that is neither
+ * `{"unit":...}` nor `{"glue":...}`) is its own named violation.
+ */
+export function validateArrangement(
+  raw: unknown,
+  units: readonly AdmittedUnit[],
+): { ok: true; parts: ArrangementPart[] } | { ok: false; violation: string } {
+  if (!raw || typeof raw !== 'object' || !Array.isArray((raw as { parts?: unknown }).parts)) {
+    return { ok: false, violation: 'malformed: expected {"parts": [...]}' }
   }
-  return bestFail ?? { admissible: false, ok: false, reason: 'invention' }
-}
-
-/** DP word-break over ONE run (spec §2a point 2: "must partition (DP; lines are short)"). Returns
- *  `ok` when SOME full partition into admissible-AND-passing segments exists. On failure, walks a
- *  witness partition (preferring any full admissible coverage, even one with a failing segment, over
- *  none at all) to name the first concrete violation — an invention when no unit even TRACES to the
- *  offending word(s), else the segment-truth reason `phraseTruthVerdict` gave. */
-function judgeRun(words: readonly string[], units: readonly AdmittedUnit[], truthCtx: PhraseTruthCtx): { ok: true } | { ok: false; violation: string } {
-  const n = words.length
-  const cache = new Map<string, SegmentCheck>()
-  const get = (i: number, j: number): SegmentCheck => {
-    const key = `${i}:${j}`
-    let c = cache.get(key)
-    if (!c) { c = checkSegment(words.slice(i, j), units, truthCtx); cache.set(key, c) }
-    return c
-  }
-  const dpOk: boolean[] = new Array(n + 1).fill(false)
-  dpOk[n] = true
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = i + 1; j <= n; j++) {
-      if (get(i, j).admissible && get(i, j).ok && dpOk[j]) { dpOk[i] = true; break }
-    }
-  }
-  if (dpOk[0]) return { ok: true }
-
-  // No fully-passing partition. Find a fully-ADMISSIBLE one (regardless of truth) to name the
-  // specific failing segment, longest-segment-first so the report names the most informative unit.
-  const dpAdm: boolean[] = new Array(n + 1).fill(false)
-  const admNext: number[] = new Array(n + 1).fill(-1)
-  dpAdm[n] = true
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = n; j > i; j--) {
-      if (get(i, j).admissible && dpAdm[j]) { dpAdm[i] = true; admNext[i] = j; break }
-    }
-  }
-  if (dpAdm[0]) {
-    let i = 0
-    while (i < n) {
-      const j = admNext[i]
-      const c = get(i, j)
-      if (!c.ok) {
-        const segText = words.slice(i, j).join(' ')
-        const violation = c.reason === 'invention'
-          ? `'${segText}' traces to no admitted fact`
-          : c.whole
-            ? `whole-unit segment '${segText}' -> ${c.reason}`
-            : `partial segment '${segText}' -> ${c.reason}`
-        return { ok: false, violation }
+  const rawParts = (raw as { parts: unknown[] }).parts
+  if (rawParts.length === 0) return { ok: false, violation: 'empty arrangement: parts must be non-empty' }
+  const byId = new Map(units.map((u) => [u.id, u] as const))
+  const seen = new Set<string>()
+  const out: ArrangementPart[] = []
+  for (const item of rawParts) {
+    if (!item || typeof item !== 'object') return { ok: false, violation: `malformed part: ${JSON.stringify(item)}` }
+    const p = item as Record<string, unknown>
+    if (typeof p.unit === 'string') {
+      const unit = byId.get(p.unit)
+      if (!unit) return { ok: false, violation: `unit id '${p.unit}' does not exist` }
+      if (seen.has(p.unit)) return { ok: false, violation: `unit '${p.unit}' used more than once` }
+      seen.add(p.unit)
+      let number: 'singular' | 'plural' | undefined
+      if (p.number !== undefined) {
+        if (p.number !== 'singular' && p.number !== 'plural') {
+          return { ok: false, violation: `invalid number '${String(p.number)}' on unit '${p.unit}' (must be "singular" or "plural")` }
+        }
+        if (!unit.numberable) {
+          return { ok: false, violation: `unit '${p.unit}' cannot take a number — its last word is not a garment head noun` }
+        }
+        number = p.number
       }
-      i = j
+      out.push(number ? { unit: p.unit, number } : { unit: p.unit })
+    } else if (typeof p.glue === 'string') {
+      if (!GLUE_WORDS.has(p.glue) && !GLUE_PUNCTUATION.has(p.glue)) {
+        return { ok: false, violation: `glue token '${p.glue}' is outside the closed glue/punctuation set` }
+      }
+      out.push({ glue: p.glue })
+    } else {
+      return { ok: false, violation: `part is neither {"unit":...} nor {"glue":...}: ${JSON.stringify(p)}` }
     }
-    return { ok: false, violation: `'${words.join(' ')}' fails provenance` }
   }
-
-  // No admissible partition at all — some word traces to nothing. Report the first uncoverable word.
-  const reachable: boolean[] = new Array(n + 1).fill(false)
-  reachable[0] = true
-  for (let i = 0; i < n; i++) {
-    if (!reachable[i]) continue
-    for (let j = i + 1; j <= n; j++) if (get(i, j).admissible) reachable[j] = true
-  }
-  let firstBad = n
-  for (let k = 1; k <= n; k++) { if (!reachable[k]) { firstBad = k - 1; break } }
-  return { ok: false, violation: `'${words[Math.max(0, firstBad)]}' traces to no admitted fact` }
+  return { ok: true, parts: out }
 }
 
-/** B2. Segment provenance: `{ok:true}` or `{ok:false, violations}`. Pure. */
-export function ihWriterProvenance(line: string, units: readonly AdmittedUnit[], truthCtx: PhraseTruthCtx): { ok: true } | { ok: false; violations: string[] } {
-  const violations: string[] = []
-  for (const run of splitIntoRuns(line)) {
-    const res = judgeRun(run, units, truthCtx)
-    if (!res.ok) violations.push(res.violation)
+/** Renders a VALIDATED arrangement. Units appear verbatim (stored words, order, numbers and
+ *  punctuation), glue joins with single spaces, and punctuation attaches to the word on its left
+ *  (W1). Pure. Assumes `parts` already passed `validateArrangement` against the SAME `units`. */
+export function renderArrangement(parts: readonly ArrangementPart[], units: readonly AdmittedUnit[]): string {
+  const byId = new Map(units.map((u) => [u.id, u] as const))
+  const out: string[] = []
+  for (const p of parts) {
+    let token: string
+    if ('unit' in p) {
+      const u = byId.get(p.unit)
+      if (!u) continue // unreachable once validated against the same `units`
+      token = p.number ? applyNumberToLastWord(u.text, p.number) : u.text
+    } else {
+      token = p.glue
+    }
+    if (GLUE_PUNCTUATION.has(token) && out.length > 0) {
+      out[out.length - 1] = out[out.length - 1] + token
+    } else {
+      out.push(token)
+    }
   }
-  return violations.length ? { ok: false, violations } : { ok: true }
+  return out.join(' ')
 }
 
-// ─── B6: READABILITY ───────────────────────────────────────────────────────────────────────────
+// ─── B6/W7: READABILITY ────────────────────────────────────────────────────────────────────────
 
 const LEAN_FEM_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE})\\b`, 'i')
 const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b`, 'i')
-/** A clause "has glue" when it contains at least one glue word OR is a single word (a one-word
- *  clause reads as a fragment/fact, not a list item needing a connective). */
-function clauseReadsConnected(clause: string): boolean {
+/** W7: "A clause is the text between `,` `—` `|`." — narrower than the old provenance run-splitter
+ *  (which also split on `– ; : &`); this is a rendered-line readability check, not a segmentation. */
+const READABILITY_CLAUSE_SPLIT_RE = /[,—|]/
+/** W7: "A keyword-shaped clause contains no glue word." — no length exemption for a short clause any
+ *  more (the PO's own line's "Classic Fit"/"Graphic Crewneck" 2-word facts are exactly the
+ *  keyword-shaped clauses this rule must count). */
+function clauseIsKeywordShaped(clause: string): boolean {
   const words = clause.match(WORD_RE) ?? []
-  if (words.length <= 1) return true
-  return words.some((w) => GLUE_WORDS.has(ihFoldWord(w)))
+  return !words.some((w) => GLUE_WORDS_FOLDED.has(ihFoldWord(w)))
+}
+function foldedContentWords(text: string): Set<string> {
+  const s = new Set<string>()
+  for (const w of text.match(WORD_RE) ?? []) { const f = ihFoldWord(w); if (f) s.add(f) }
+  return s
 }
 
 export function writerReadabilityVerdict(line: string, units: readonly AdmittedUnit[]): { ok: true } | { ok: false; reason: string } {
-  // B6.1 — not a keyword list: 3+ comma clauses with NO clause containing a glue word.
-  const clauses = line.split(',').map((s) => s.trim()).filter(Boolean)
-  if (clauses.length >= 3 && !clauses.some(clauseReadsConnected)) {
-    return { ok: false, reason: 'reads as a keyword list (3+ comma clauses, no connecting word in any of them)' }
+  // W7 (B6.1 fix): FAIL when MORE THAN ONE clause is keyword-shaped — not only when every clause is
+  // (the bug that let the PO's own "THIS READS AWFUL" line and the DQG line both pass).
+  const clauses = line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean)
+  const keywordShaped = clauses.filter(clauseIsKeywordShaped).length
+  if (keywordShaped > 1) {
+    return { ok: false, reason: `reads as a keyword list (${keywordShaped} of ${clauses.length} clauses have no connecting word — more than one is not allowed)` }
   }
   // B6.2 — no gender-audience word beside "Unisex" (reuse the LEAN cores, no new list).
   if (/\bunisex\b/i.test(line) && (LEAN_FEM_RE.test(line) || LEAN_MASC_RE.test(line))) {
@@ -332,9 +334,9 @@ export function writerReadabilityVerdict(line: string, units: readonly AdmittedU
   // B6.3 — names or evokes the design whenever an identity unit exists.
   const identityUnits = units.filter((u) => u.kind === 'identity')
   if (identityUnits.length > 0) {
-    const lineFold = new Set([...foldedMultiset(line).keys()])
+    const lineFold = foldedContentWords(line)
     const namesDesign = identityUnits.some((u) => {
-      const uWords = [...foldedMultiset(u.text).keys()]
+      const uWords = [...foldedContentWords(u.text)]
       return uWords.length > 0 && uWords.every((w) => lineFold.has(w))
     })
     if (!namesDesign) return { ok: false, reason: 'does not name or evoke the design' }
@@ -342,34 +344,42 @@ export function writerReadabilityVerdict(line: string, units: readonly AdmittedU
   return { ok: true }
 }
 
-// ─── B4 point 2/3, B7: THE ONE JUDGE (provenance -> tail -> readability), idempotent ──────────
+// ─── B4 point 2/3, B7: THE ONE JUDGE (validate -> render -> tail -> readability), idempotent ─────
 
 export interface JudgeWriterLineCtx {
   truthCtx: PhraseTruthCtx
   /** The SAME post-compose tail the composer's own line runs through (`runIhTail` in
-   *  listingPipeline.ts) — injected so this module never imports that file (see the header). */
-  runTail: (line: string) => { value: string; hold: string | null }
+   *  listingPipeline.ts) — injected so this module never imports that file (see the header).
+   *  RULING W4: `reason` additively carries the REAL refusal (e.g. `material-lie`), not only the
+   *  coarser `hold` bucket every non-repeat refusal used to collapse onto (`under-floor`). */
+  runTail: (line: string) => { value: string; hold: string | null; reason?: string | null }
 }
 
 export type JudgeWriterLineResult = { ok: true; value: string } | { ok: false; violations: string[] }
 
-/** THE ONE sync judge (B4 point 2): provenance, then the SAME deterministic tail the composer's own
- *  line runs (repeat budget, moved content rules, line truth net, floor door), then readability.
- *  Idempotent (B4 point 3): re-judging an already-accepted composer line through this same function
- *  passes, because that line already satisfies every one of these gates by construction. */
-export function judgeWriterLine(draft: string, units: readonly AdmittedUnit[], ctx: JudgeWriterLineCtx): JudgeWriterLineResult {
-  const line = (draft || '').trim()
-  if (!line) return { ok: false, violations: ['empty line'] }
-  const prov = ihWriterProvenance(line, units, ctx.truthCtx)
-  if (!prov.ok) return { ok: false, violations: prov.violations.map((v) => `provenance: ${v}`) }
+/** THE ONE sync judge (B4 point 2): validate the arrangement, render it VERBATIM, then the SAME
+ *  deterministic tail the composer's own line runs (repeat budget, moved content rules, line truth
+ *  net, floor door), then readability. Idempotent (B4 point 3): re-judging an arrangement that
+ *  renders to an already-accepted composer line passes, because that line already satisfies every
+ *  one of these gates by construction — nothing here re-parses the RENDERED text, so idempotence
+ *  needs no special case. */
+export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUnit[], ctx: JudgeWriterLineCtx): JudgeWriterLineResult {
+  const v = validateArrangement(raw, units)
+  if (!v.ok) return { ok: false, violations: [`arrangement: ${v.violation}`] }
+  const line = renderArrangement(v.parts, units).trim()
+  if (!line) return { ok: false, violations: ['arrangement: rendered to an empty line'] }
   const tail = ctx.runTail(line)
-  if (!tail.value) return { ok: false, violations: [`tail: refused (${tail.hold ?? 'refused'})`] }
+  if (!tail.value) {
+    // RULING W4: surface the REAL reason (e.g. "material-lie"), never the coarser hold bucket, when
+    // the tail's own gates named one.
+    return { ok: false, violations: [`tail: refused (${tail.reason ?? tail.hold ?? 'refused'})`] }
+  }
   const read = writerReadabilityVerdict(tail.value, units)
   if (!read.ok) return { ok: false, violations: [`readability: ${read.reason}`] }
   return { ok: true, value: tail.value }
 }
 
-// ─── B5/B10: THE CLIENT + PROMPT ───────────────────────────────────────────────────────────────
+// ─── B5/B10: THE CLIENT + PROMPT (arrangement contract) ────────────────────────────────────────
 
 /** Loose JSON extraction — local, tiny copy of this repo's own `parseJsonLoose` idiom
  *  (listingPipeline.ts), not imported: importing FROM listingPipeline.ts would cycle back into it
@@ -381,33 +391,39 @@ function parseJsonLoose<T>(raw: string): T {
   try { return JSON.parse(body) as T } catch { return {} as T }
 }
 
-function unitsByKind(units: readonly AdmittedUnit[]): Record<AdmittedUnitKind, string[]> {
-  const out: Record<AdmittedUnitKind, string[]> = { identity: [], 'spec-fact': [], brand: [], 'wear-fact': [], pool: [] }
-  for (const u of units) out[u.kind].push(u.text)
+function unitsByKind(units: readonly AdmittedUnit[]): Record<AdmittedUnitKind, { id: string; text: string }[]> {
+  const out: Record<AdmittedUnitKind, { id: string; text: string }[]> = {
+    identity: [], 'spec-fact': [], brand: [], 'wear-fact': [], pool: [], 'garment-head': [],
+  }
+  for (const u of units) out[u.kind].push({ id: u.id, text: u.text })
   return out
 }
 
-/** B5: the prompt — the admitted units grouped by kind, the design name EXACTLY as stored (a
- *  misspelled seller name — "Billionare", "Definiton" — is reproduced verbatim; provenance would
- *  reject a corrected spelling as an invention), and the writer's own hard constraints. The literal
- *  word "json" appears (bullet/backend council convention, `bullet-pad-pool-exhaustion` memory) so
- *  `response_format: json_object` never 400s. */
+/** W1: the prompt — the admitted units grouped by kind WITH THEIR IDS, the design name EXACTLY as
+ *  stored (a misspelled seller name — "Billionare", "Definiton" — is reproduced verbatim), the
+ *  closed glue/punctuation sets, and the arrangement contract itself. The literal word "json" appears
+ *  (bullet/backend council convention, `bullet-pad-pool-exhaustion` memory) so `response_format:
+ *  json_object` never 400s. The model NEVER writes prose — only unit IDs and glue tokens survive to
+ *  the render step, so there is nothing for a provenance parser to be fooled by any more. */
 function buildWriterPrompt(units: readonly AdmittedUnit[], designName: string | null, priorViolations: readonly string[]): { system: string; user: string } {
   const grouped = unitsByKind(units)
   const system = [
-    'You write ONE Amazon Item Highlight line for a t-shirt/apparel listing.',
-    'You may ONLY rephrase and reorder the ADMITTED FACTS given to you below. You may NEVER add a new fact, a new claim, or a new word that is not already present in the admitted facts (function words like "and", "with", "for" excepted).',
-    'Return JSON: {"line": "..."} — a single JSON object, one field, "line" is the only key.',
-    'The line must be Title Case, 105-120 characters, one line (no line breaks), human-readable comma-separated phrases (not a bare keyword dump).',
-    'Never state a specific gender audience (Women/Men/Ladies/Guys/etc.) in the same line as the word "Unisex".',
-    'If you cannot honestly build a good line from only the admitted facts, still return your best attempt — do not apologize or explain, only the JSON.',
+    'You arrange ONE Amazon Item Highlight line for a t-shirt/apparel listing out of ADMITTED UNITS — you do NOT write free text.',
+    'Return JSON: {"parts": [...]} — an ORDERED list where each element is EITHER {"unit": "<id>"} (optionally {"unit": "<id>", "number": "singular"|"plural"}) OR {"glue": "<token>"}.',
+    `Every "unit" id must be one of the ids given to you below. Each unit may be used AT MOST ONCE. Units render VERBATIM — their own exact words, order, numbers and punctuation. The ONLY change you may request is "number" (singular/plural), and ONLY on a unit whose id is listed as numberable below.`,
+    `A "glue" token must be exactly one of these words: ${GLUE_WORDS_RAW.join(', ')} — or one of these punctuation marks: , — | &`,
+    'Do not invent a unit id, a glue token, or any text — every word in the final line comes from a unit you chose.',
+    'The rendered line must read as 2+ human phrases joined with a connecting word (not a bare comma-separated keyword dump), and if the design has an identity unit, the line must name or evoke it.',
+    'If you cannot honestly build a good line from only the admitted units, still return your best attempt as {"parts": [...]} — do not apologize or explain, only the JSON.',
   ].join(' ')
+  const numberableIds = units.filter((u) => u.numberable).map((u) => u.id)
   const user = [
     `DESIGN NAME (reproduce spelling EXACTLY, including any typo): ${JSON.stringify(designName ?? '')}`,
-    `ADMITTED FACTS (json), grouped by kind — every word of your line must trace to one of these:`,
+    `ADMITTED UNITS (json), grouped by kind, each {"id":"...","text":"..."} — arrange these ids, never their text:`,
     JSON.stringify(grouped),
+    `Numberable unit ids (the only ones "number" may target): ${JSON.stringify(numberableIds)}`,
     priorViolations.length
-      ? `Your previous attempt was REJECTED for: ${priorViolations.join('; ')}. Fix these specific problems — remove or replace the offending words, do not repeat them.`
+      ? `Your previous attempt was REJECTED for: ${priorViolations.join('; ')}. Fix these specific problems by choosing a DIFFERENT arrangement — do not repeat the same rejected parts.`
       : '',
   ].filter(Boolean).join('\n')
   return { system, user }
@@ -416,8 +432,9 @@ function buildWriterPrompt(units: readonly AdmittedUnit[], designName: string | 
 /** B5/B10: one writer call. `maxRetries: 0` (this repo's LOAD-BEARING gateway policy), per-call
  *  EMPTY + finish_reason + model logging (the #176 lesson). Never reads an env file directly and
  *  never logs the API key — the client comes from `getLlmClientForRequest` (llmGateway.ts), which
- *  resolves it exactly as every other production caller does. */
-async function askWriter(openai: OpenAI, model: string, units: readonly AdmittedUnit[], designName: string | null, priorViolations: readonly string[]): Promise<string> {
+ *  resolves it exactly as every other production caller does. Returns the PARSED JSON (or `{}` on any
+ *  parse/call failure) — never a text `line`; `judgeWriterArrangement` validates the shape. */
+async function askWriter(openai: OpenAI, model: string, units: readonly AdmittedUnit[], designName: string | null, priorViolations: readonly string[]): Promise<unknown> {
   const { system, user } = buildWriterPrompt(units, designName, priorViolations)
   try {
     const isGpt5 = /^(gpt-5|o\d)/.test(model)
@@ -430,18 +447,19 @@ async function askWriter(openai: OpenAI, model: string, units: readonly Admitted
     )
     const content = r.choices[0]?.message?.content || ''
     if (!content.trim()) console.warn(`[ih-writer] ${model} returned EMPTY content — finish_reason=${r.choices[0]?.finish_reason ?? '?'}`)
-    const parsed = parseJsonLoose<{ line?: unknown }>(content || '{}')
-    return typeof parsed.line === 'string' ? parsed.line.trim() : ''
+    return parseJsonLoose<unknown>(content || '{}')
   } catch (e) {
     console.warn(`[ih-writer] ${model} call FAILED: ${e instanceof Error ? e.message : String(e)}`)
-    return ''
+    return {}
   }
 }
 
-// ─── B7/B8: BOUNDED, FAIL-CLOSED RUN FOR ONE DESIGN ────────────────────────────────────────────
+// ─── B7/B8/W8: BOUNDED, FAIL-CLOSED RUN FOR ONE DESIGN ─────────────────────────────────────────
 
-/** B7: 1 + 2 retries. */
-export const IH_WRITER_MAX_CALLS = 3
+/** B7: 1 + 2 retries PER DESIGN. Distinct from `ihWriterMaxCallsBudget()` above (the PER-REGEN
+ *  budget across every design, W8) — renamed from the pre-W8 export `IH_WRITER_MAX_CALLS` to avoid
+ *  colliding with that new, differently-scoped env-var name. */
+export const IH_WRITER_RETRY_CAP = 3
 
 export interface WriterRunResult {
   accepted: boolean
@@ -454,18 +472,19 @@ export interface WriterDeps {
   openai?: OpenAI | null
 }
 
-/** B7/B8: runs the bounded writer loop for ONE design and returns whether an accepted line resulted.
- *  Eligibility (B8): no call for `unrated-pool` or zero admitted pool units — those never make it
- *  past the guards below. Fail-closed (B7): after `IH_WRITER_MAX_CALLS` attempts, `accepted: false` —
- *  the caller falls back to the composer's OWN vetted result, never an empty string over stored
- *  content. */
+/** B7/B8/W8: runs the bounded writer loop for ONE design and returns whether an accepted line
+ *  resulted. Eligibility (B8, extended by W8): no call for `unrated-pool`, zero admitted pool
+ *  candidates, a non-apparel family (`garmentFamily === 'none'`), fewer than 2 admitted units total,
+ *  or an admitted set whose units — each used once, joined with single separators — cannot reach the
+ *  contract's floor. Fail-closed (B7): after `IH_WRITER_RETRY_CAP` attempts, `accepted: false` — the
+ *  caller falls back to the composer's OWN vetted result, never an empty string over stored content. */
 export async function runWriterForDesign(args: {
   composed: Pick<ComposerResult, 'candidates' | 'specFacts' | 'brandPick' | 'wearFact'>
   fallbackHold: string | null
   designName: string | null
   identityPhrases?: readonly string[]
   truthCtx: PhraseTruthCtx
-  runTail: (line: string) => { value: string; hold: string | null }
+  runTail: (line: string) => { value: string; hold: string | null; reason?: string | null }
   deps?: WriterDeps
   model?: string
 }): Promise<WriterRunResult> {
@@ -473,23 +492,32 @@ export async function runWriterForDesign(args: {
   if (args.fallbackHold === 'unrated-pool') return { accepted: false, value: '', reasons: ['skip: unrated-pool'], calls: 0 }
   const pool = args.composed.candidates ?? []
   if (pool.length === 0) return { accepted: false, value: '', reasons: ['skip: zero admitted pool units'], calls: 0 }
+  // W8: non-apparel families never write (the field composes no garment vocabulary for them either).
+  if (args.truthCtx.garmentFamily === 'none') return { accepted: false, value: '', reasons: ['skip: non-apparel family'], calls: 0 }
 
   const units = buildAdmittedUnits(args.composed, { designName: args.designName, identityPhrases: args.identityPhrases, truthCtx: args.truthCtx })
+  // W8: fewer than 2 admitted units, or the best possible join of every unit (no writer could ever
+  // beat the composer's own attempt) cannot reach the floor — skip before spending a call.
+  if (units.length < 2) return { accepted: false, value: '', reasons: ['skip: fewer than 2 admitted units'], calls: 0 }
+  const maxPossibleLine = units.map((u) => u.text).join(', ')
+  if (maxPossibleLine.length < CONTENT_CONTRACT.itemHighlights.min) {
+    return { accepted: false, value: '', reasons: [`skip: admitted units cannot reach the floor (best case ${maxPossibleLine.length}c < ${CONTENT_CONTRACT.itemHighlights.min}c)`], calls: 0 }
+  }
+
   const openai = args.deps?.openai ?? (await getLlmClientForRequest().catch(() => null))
   if (!openai) return { accepted: false, value: '', reasons: ['skip: no LLM client available'], calls: 0 }
 
   const model = args.model ?? ihWriterModel()
   const reasonsAll: string[] = []
   let priorViolations: string[] = []
-  for (let call = 1; call <= IH_WRITER_MAX_CALLS; call++) {
+  for (let call = 1; call <= IH_WRITER_RETRY_CAP; call++) {
     const draft = await askWriter(openai, model, units, args.designName, priorViolations)
-    if (!draft) { reasonsAll.push('empty-draft'); priorViolations = ['you returned an empty line']; continue }
-    const verdict = judgeWriterLine(draft, units, { truthCtx: args.truthCtx, runTail: args.runTail })
+    const verdict = judgeWriterArrangement(draft, units, { truthCtx: args.truthCtx, runTail: args.runTail })
     if (verdict.ok) return { accepted: true, value: verdict.value, reasons: reasonsAll, calls: call }
     reasonsAll.push(...verdict.violations)
     priorViolations = verdict.violations
   }
-  return { accepted: false, value: '', reasons: reasonsAll, calls: IH_WRITER_MAX_CALLS }
+  return { accepted: false, value: '', reasons: reasonsAll, calls: IH_WRITER_RETRY_CAP }
 }
 
 // Re-exported so a caller/test can reference the exact regex set the build-time collision guard

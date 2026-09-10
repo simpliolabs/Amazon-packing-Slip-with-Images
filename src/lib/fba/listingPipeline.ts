@@ -77,7 +77,7 @@ import { loadBlankSpecRows, loadBlankAssignments, resolveFamilyBlank, familyBlan
 import { composeItemHighlightDetailed, ihAudienceOf, type ComposerResult } from '@/lib/fba/itemHighlightComposer'
 // WRITER SPEC PART 2 (2026-09-10, B4) — the writer is a LEAF (see its own header for why); this file
 // is a CONSUMER, never the other way, so the dependency graph stays acyclic.
-import { ihWriterMode, runWriterForDesign, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
+import { ihWriterMode, ihWriterMaxCallsBudget, runWriterForDesign, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
 /* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
  * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
  * highlights. Blank-grounded (resolveFamilyBlank), never title-derived: a title cannot vouch for
@@ -2320,6 +2320,19 @@ export interface ItemHighlightsInput {
    *  default), safe today because this codebase hardcodes exactly one seller; every real call site
    *  now threads `PipelineInput.brandName` instead of relying on that coincidence. */
   brandName?: string
+  /** FIX ROUND B2 (RULING W5): the family's RESOLVED design name, consumed ONLY by
+   *  `produceItemHighlights`'s writer call (`runWriterForDesign`'s `designName`) — NEVER by the
+   *  composer/`buildItemHighlights`, so a flag-off composer's bytes are unaffected by this field.
+   *  Kept deliberately separate from `designTokens` above (which the composer's OWN forced-gender
+   *  exemption already reads, pre-dating the writer) — threading identity through THAT field instead
+   *  would have changed composer output on single-design families that never previously set it,
+   *  breaking the flag-off byte-identity invariant. Falls back to `designTokens?.[0]` when absent
+   *  (back-compat with any caller that only ever set the composer-facing field). */
+  identityDesignName?: string | null
+  /** FIX ROUND B2 (RULING W5): the design's vision identity phrases (designTheme + seedKeywords),
+   *  the SAME shape `identityPhrases()` (designGroupIdentity.ts) already extracts for the per-design
+   *  path — writer-only, additive, never read by the composer. */
+  identityPhrases?: readonly string[]
 }
 
 /**
@@ -2330,6 +2343,13 @@ export interface ItemHighlightsInput {
  * deterministic gates (repeat budget, the moved content rules, the line truth net, the floor door) —
  * never a second, hand-copied tail. `site` names the caller in the refusal log only; it changes no
  * shipped byte and no hold reason.
+ *
+ * FIX ROUND B2 (RULING W4): `reason` is additive — the tail's REAL refusal (`capResult.reason`,
+ * e.g. `material-lie`, `audience-kids-on-adult`), not only the coarser `hold` bucket every
+ * non-repeat refusal collapses onto (`under-floor`). Every existing caller destructures `.value`/
+ * `.hold` only, so this changes no existing byte; the writer's own violation text
+ * (`judgeWriterArrangement`) reads `.reason` so a retry — and the PO's `IH_WRITER_SHADOW` readout —
+ * names the actual lie instead of misreporting it as "too short".
  */
 export function runIhTail(
   line: string,
@@ -2342,7 +2362,7 @@ export function runIhTail(
     truthCtx: PhraseTruthCtx
     site?: string
   },
-): { value: string; hold: IhHoldReason | null } {
+): { value: string; hold: IhHoldReason | null; reason?: string | null } {
   const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(line, opts.titles, opts.blankBrand), {
     contentCtx: { designSeasons: opts.designSeasons, capacityFamily: opts.capacityFamily, brandName: opts.brandName },
     truthCheck: (l) => ihLineTruthVerdict(l, opts.truthCtx),
@@ -2350,10 +2370,10 @@ export function runIhTail(
   if (!capResult.ok) {
     console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: opts.site ?? 'buildItemHighlights', reason: capResult.reason, len: line.length }))
     const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
-    return { value: '', hold }
+    return { value: '', hold, reason: capResult.reason }
   }
   const value = ihFloorDoor(capResult.value)
-  return value ? { value, hold: null } : { value: '', hold: 'under-floor' }
+  return value ? { value, hold: null, reason: null } : { value: '', hold: 'under-floor', reason: 'under-floor' }
 }
 
 /**
@@ -2654,6 +2674,11 @@ export interface IhWriterLogRow {
   accepted: boolean
   reasons: string[]
   calls: number
+  /** RULING W5: true when NO identity resolved for this design (name absent, no vision phrases) —
+   *  the shadow block says so explicitly, alongside the `IH_WRITER_NO_IDENTITY` log line, rather
+   *  than leaving the PO to infer it from a null `design` field. Absent (not `false`) when identity
+   *  DID resolve — additive, never widens an existing row's shape by default. */
+  noIdentity?: boolean
 }
 
 /**
@@ -2674,10 +2699,15 @@ export async function produceItemHighlights(
   if (mode === 'off' || !built.composed || !built.truthCtx) return { value: built.value, hold: built.hold }
   const titles = built.titles ?? []
   const truthCtx = built.truthCtx
+  // RULING W5: the writer's OWN design-name source — never the composer-facing `designTokens`
+  // (see `ItemHighlightsInput.identityDesignName`'s own doc for why they must stay separate).
+  const designName = input.identityDesignName ?? input.designTokens?.[0] ?? null
+  if (!designName) console.warn(JSON.stringify({ tag: 'IH_WRITER_NO_IDENTITY', site: 'produceItemHighlights' }))
   const outcome = await runWriterForDesign({
     composed: built.composed,
     fallbackHold: built.hold,
-    designName: input.designTokens?.[0] ?? null,
+    designName,
+    identityPhrases: input.identityPhrases,
     truthCtx,
     runTail: (line) => runIhTail(line, {
       titles, blankBrand: input.blankBrand, designSeasons: input.designSeasons,
@@ -2687,9 +2717,10 @@ export async function produceItemHighlights(
     deps,
   })
   const writerLog: IhWriterLogRow = {
-    design: input.designTokens?.[0] ?? null, composer: built.value,
+    design: designName, composer: built.value,
     writer: outcome.accepted ? outcome.value : null, accepted: outcome.accepted,
     reasons: outcome.reasons, calls: outcome.calls,
+    ...(designName ? {} : { noIdentity: true }),
   }
   console.log(JSON.stringify({ tag: 'IH_WRITER_SHADOW', ...writerLog }))
   if (mode === 'shadow' || !outcome.accepted) return { value: built.value, hold: built.hold, writerLog }
@@ -2703,6 +2734,24 @@ export async function produceItemHighlights(
  * function) after any accepted writer lines are swapped in, so this returns the SAME shape
  * `buildItemHighlightsPerDesign` does, plus `writerLog` per design.
  */
+/** FIX ROUND B2 (RULING W8): bounded parallelism — at most `limit` of `fn` in flight at once,
+ *  results returned in ORIGINAL `items` order regardless of completion order. Retries stay
+ *  sequential WITHIN one design (`runWriterForDesign`'s own retry loop, untouched); this only bounds
+ *  how many DESIGNS' writer runs overlap. No new dependency — a tiny inline worker pool. */
+async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      results[i] = await fn(items[i], i)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => worker()))
+  return results
+}
+
 export async function produceItemHighlightsPerDesign(
   input: PerDesignItemHighlightsInput,
   deps?: WriterDeps,
@@ -2711,10 +2760,23 @@ export async function produceItemHighlightsPerDesign(
   const mode = ihWriterMode()
   if (mode === 'off') return built
   const groupsByKey = new Map(input.groups.map((g) => [g.key, g]))
-  const writerLog: IhWriterLogRow[] = []
-  const nextPerDesign: PerDesignItemHighlight[] = []
-  for (const d of built.perDesign) {
-    if (!d.composed || !d.truthCtx) { nextPerDesign.push(d); continue }
+  // RULING W8: a per-regen call budget, shared ACROSS every design in this family (distinct from
+  // `IH_WRITER_RETRY_CAP`'s per-design cap). Concurrency 3 means up to 3 designs' retry loops can be
+  // in flight together, so `callsUsed` is a soft/best-effort bound (a design already running is never
+  // aborted mid-loop) — the ruling's own words are "counted across designs", not "enforced
+  // atomically per call".
+  const budget = ihWriterMaxCallsBudget()
+  let callsUsed = 0
+  const writerLogByIndex: (IhWriterLogRow | null)[] = new Array(built.perDesign.length).fill(null)
+
+  const nextPerDesign = await mapWithConcurrency(built.perDesign, 3, async (d, i): Promise<PerDesignItemHighlight> => {
+    if (!d.composed || !d.truthCtx) return d
+    if (callsUsed >= budget) {
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_BUDGET_EXHAUSTED', design: d.designKey, budget }))
+      const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [`skip: per-regen call budget (${budget}) exhausted`], calls: 0 }
+      writerLogByIndex[i] = row
+      return d
+    }
     const g = groupsByKey.get(d.designKey)
     const titles = g?.titles ?? []
     const truthCtx = d.truthCtx
@@ -2731,15 +2793,18 @@ export async function produceItemHighlightsPerDesign(
       }),
       deps,
     })
+    callsUsed += outcome.calls
     const row: IhWriterLogRow = {
       design: d.designKey, composer: d.value, writer: outcome.accepted ? outcome.value : null,
       accepted: outcome.accepted, reasons: outcome.reasons, calls: outcome.calls,
     }
     console.log(JSON.stringify({ tag: 'IH_WRITER_SHADOW', ...row }))
-    writerLog.push(row)
-    if (mode === 'shadow' || !outcome.accepted) { nextPerDesign.push(d); continue }
-    nextPerDesign.push({ ...d, value: outcome.value, hold: null })
-  }
+    writerLogByIndex[i] = row
+    if (mode === 'shadow' || !outcome.accepted) return d
+    return { ...d, value: outcome.value, hold: null }
+  })
+
+  const writerLog = writerLogByIndex.filter((r): r is IhWriterLogRow => !!r)
   if (mode === 'shadow') return { ...built, writerLog }
   const designKeys = input.groups.map((g) => g.key)
   const missingDesigns = built.shared.missingDesigns
@@ -12207,6 +12272,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // threads — never `ihContentRuleViolations`'s coincidental-default fallback.
         capacityFamily: capacityFamilyTokens.length >= 2,
         brandName: input.brandName,
+        // FIX ROUND B2 (RULING W5): the writer's own identity — never fed to the composer (see
+        // `ItemHighlightsInput.identityDesignName`'s doc). Same resolved name the title path already
+        // uses at this point in the function (`effectiveDesignName || designName`), and the SAME
+        // `identityPhrases()` extraction (designGroupIdentity.ts) the multi-design branch above feeds
+        // its own per-design writer calls — never a second resolver.
+        identityDesignName: effectiveDesignName || designName || null,
+        identityPhrases: identityPhrases(input.visionDesign),
       }, { openai: input.openai })
       // SILENT-HOLD CLASS CLOSED (2026-09-04): same fix as the multi-design branch above — a held
       // single-design family (hl === '') used to push NO row at all. Always push; carry `hold` so the

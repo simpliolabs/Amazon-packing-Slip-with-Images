@@ -113,6 +113,107 @@ export function findSyncBuilderBypassCalls(relPath: string, source: string): str
   return violations
 }
 
+// ─── FIX ROUND B2 (RULING W6): IMPORTS, not only call spellings ──────────────────────────────────
+//
+// I4 (phase-b-review.md) proved the CALL-scanner above catches only a BARE-NAME call. It stays green
+// on an ALIASED import (`import { buildItemHighlights as composeIh } from '...'` then `composeIh(...)`)
+// and on a LOWER-LAYER producer combined with the tail (`composeItemHighlightDetailed` +
+// `runIhTail` in a brand-new route, never touching `buildItemHighlights` at all). This scanner reads
+// IMPORT statements instead: any production file importing `buildItemHighlights`,
+// `buildItemHighlightsPerDesign`, `composeItemHighlightDetailed`, `composeItemHighlight`, or
+// `runIhTail` OUTSIDE that name's home module is a violation, regardless of the alias it imports it
+// under or whether it is ever called by its original name again.
+
+const RESTRICTED_IMPORT_NAMES = ['buildItemHighlights', 'buildItemHighlightsPerDesign', 'composeItemHighlightDetailed', 'composeItemHighlight', 'runIhTail'] as const
+const ITEM_HIGHLIGHT_COMPOSER_REL = 'src/lib/fba/itemHighlightComposer.ts'
+const HOME_FILE_OF: Readonly<Record<string, string>> = {
+  buildItemHighlights: LISTING_PIPELINE_REL,
+  buildItemHighlightsPerDesign: LISTING_PIPELINE_REL,
+  runIhTail: LISTING_PIPELINE_REL,
+  composeItemHighlightDetailed: ITEM_HIGHLIGHT_COMPOSER_REL,
+  composeItemHighlight: ITEM_HIGHLIGHT_COMPOSER_REL,
+}
+
+/**
+ * Scans one file's source for `import { ... } from '...'` statements and flags any specifier whose
+ * ORIGINAL (pre-`as`) name is one of `RESTRICTED_IMPORT_NAMES`, unless `relPath` IS that name's home
+ * module. A `type`-only specifier (`type Foo`, or a whole `import type { ... }`) is SKIPPED — it
+ * carries no runtime binding and cannot be called, so it is not a bypass risk (the real tree's
+ * regen route imports `type buildItemHighlightsPerDesign` purely for a parameter's shape).
+ */
+export function findSyncBuilderBypassImports(relPath: string, source: string): string[] {
+  const stripped = stripLineComments(source)
+  const violations: string[] = []
+  const IMPORT_RE = /import\s+(type\s+)?\{([^}]*)\}\s*from\s*['"][^'"]+['"]/g
+  let m: RegExpExecArray | null
+  while ((m = IMPORT_RE.exec(stripped))) {
+    if (m[1]) continue // `import type { ... }` — the whole statement is type-only
+    for (const rawSpec of m[2].split(',')) {
+      const spec = rawSpec.trim()
+      if (!spec || /^type\s/.test(spec)) continue // `{ type Foo }` — no runtime binding
+      const original = spec.split(/\s+as\s+/)[0].trim()
+      if (!(RESTRICTED_IMPORT_NAMES as readonly string[]).includes(original)) continue
+      const home = HOME_FILE_OF[original]
+      // listingPipeline.ts is the ONE sanctioned consumer of every one of these five names — it
+      // declares three of them itself (buildItemHighlights/buildItemHighlightsPerDesign/runIhTail)
+      // and is the composer's own sanctioned caller for the other two
+      // (composeItemHighlightDetailed/composeItemHighlight, imported at its top so
+      // `buildItemHighlights` can call it) — exempt in addition to the literal home file.
+      if (relPath === home || relPath === LISTING_PIPELINE_REL) continue
+      const alias = spec.includes(' as ') ? spec.split(/\s+as\s+/)[1].trim() : null
+      violations.push(`${relPath}: imports '${original}'${alias ? ` (as ${alias})` : ''} — outside its home module (${home}); route through the produce* wrapper instead`)
+    }
+  }
+  return violations
+}
+
+describe('Item Highlights writer (B4/W6): sync builders/composer/tail are called ONLY through the async wrappers', () => {
+  it('sensitivity (W6/I4 shape 1) — an ALIASED import of buildItemHighlights in a new route is flagged even though the call site never spells the real name', () => {
+    const fakeFile = 'src/app/api/fba/some-aliased-route/route.ts'
+    const fakeSource = `
+      import { buildItemHighlights as composeIh } from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        return composeIh({ finalTitle: '', pool: [], apparelProduct: true, blankBrand: null, netTitles: null })
+      }
+    `
+    expect(findSyncBuilderBypassImports(fakeFile, fakeSource)).toEqual([
+      `${fakeFile}: imports 'buildItemHighlights' (as composeIh) — outside its home module (${LISTING_PIPELINE_REL}); route through the produce* wrapper instead`,
+    ])
+  })
+
+  it('sensitivity (W6/I4 shape 2) — a LOWER-LAYER producer combined with the tail, in a new route, is flagged on BOTH imports', () => {
+    const fakeFile = 'src/app/api/fba/some-lower-layer-route/route.ts'
+    const fakeSource = `
+      import { composeItemHighlightDetailed } from '@/lib/fba/itemHighlightComposer'
+      import { runIhTail } from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        const res = composeItemHighlightDetailed([], [], {} as never)
+        return runIhTail(res.line ?? '', {} as never)
+      }
+    `
+    const violations = findSyncBuilderBypassImports(fakeFile, fakeSource)
+    expect(violations).toEqual([
+      expect.stringContaining(`imports 'composeItemHighlightDetailed'`),
+      expect.stringContaining(`imports 'runIhTail'`),
+    ])
+  })
+
+  it('a `type`-only import of a restricted name (the real regen route\'s own shape) is NOT flagged', () => {
+    const fakeSource = `import { produceItemHighlightsPerDesign, type buildItemHighlightsPerDesign } from '@/lib/fba/listingPipeline'`
+    expect(findSyncBuilderBypassImports('src/app/api/fba/regenerate-item-highlight/route.ts', fakeSource)).toEqual([])
+  })
+
+  it('the REAL tree: zero production file imports a restricted name outside its home module', () => {
+    const allViolations: string[] = []
+    for (const abs of listTsFiles(SRC_ROOT)) {
+      const rel = path.relative(process.cwd(), abs).replace(/\\/g, '/')
+      const source = fs.readFileSync(abs, 'utf8')
+      allViolations.push(...findSyncBuilderBypassImports(rel, source))
+    }
+    expect(allViolations).toEqual([])
+  })
+})
+
 describe('Item Highlights writer (B4): sync builders are called ONLY through the async wrappers', () => {
   it('sensitivity — the scanner flags a bare call in a synthetic non-pipeline file (proven to go RED)', () => {
     const fakeFile = 'src/app/api/fba/some-new-route/route.ts'
