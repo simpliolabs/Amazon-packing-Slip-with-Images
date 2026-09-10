@@ -190,6 +190,42 @@ Fall Sweatshirts for Women, Cute Crewnecks & Graphic Crewneck". Review B3's valu
 before merge, whether 97-125 characters is reachable for each design. After merge, shadow mode shows
 the PO real model output.
 
+## 2d. AMENDMENT 2026-09-10 (review B3 panel) — the writer meets every contract through its OWNER's predicate
+
+*Why.* The four-lens panel (`phase-b3-review-{truth,compliance,wire,value}.md`) confirmed the
+design. The grammar reaches 97-125 characters for all 10 designs measured, with thousands of legal
+arrangements, and the lines read as sentences. For example, "Business B*tch Sweatshirt with Long
+Sleeve and a Classic Fit, Girl Boss Crewneck and Funny Work Sweatshirt", where today's line is
+"Crewneck Sweatshirts Women, Graphic Crewneck, Funny Work Sweatshirt, Mind your Business, Classic
+Fit, Unisex Fit".
+
+Every Blocking finding was a SEAM, where the writer checked a copy of a contract instead of the
+contract itself:
+- Amazon's flat cap of 2, instead of the push seam's absolute no-repeat;
+- whether `brandPick` happened to be exposed, instead of the composer's `needBrand`;
+- a prompt that omitted rules the validator enforces.
+
+*The rule.*
+1. **An accepted writer line ships exactly as rendered.** It passes through the tail byte-identical,
+   and it must be pushable by the push seam's OWN classifier (`classifyStoredIhLine`). A line the
+   tail would cut, or the seam would refuse, is rejected before acceptance, with the reason named.
+2. **Brand** is keyed on the composer's `needBrand` on every exit. The brand unit's class follows
+   its ORIGIN: the fixed spec phrase is spec-class, and a pool-sourced brand phrase is a
+   pool-class unit (required, list-joined only).
+3. **Identity is the design name only.** Vision phrases describe the artwork and read as product
+   claims ("100% Organic", "Made in America", "Embroidered Floral Patch"). They reach the line only
+   if they are also composer pool candidates. Claims carried by the design name itself are
+   TITLE-BOUNDED: the PO-approved title already carries the same words.
+4. **Every adjacent pair of units** is also judged by the truth oracle, as rendered.
+5. **The prompt's rules are GENERATED from the validator's rule registry.** A rule cannot be
+   enforced without being taught.
+6. **A regen-level deadline** bounds the writer's wall time. When it passes, the composer's result
+   stands.
+
+Part 1's compose change against `150778c` (96 rows) is intended. "Polyester Blend Comfort" on the
+100% cotton Gildan 64000 is a lie, and an unresolved blank backs no composition claim. From here on,
+the flag-off baseline for writer differentials is `974cb1a`.
+
 ## 3. ADVERSARY
 
 - **"The writer will hallucinate a spec."** Provenance makes that a rejection, not a hope: a token
