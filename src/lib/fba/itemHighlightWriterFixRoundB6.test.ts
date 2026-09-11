@@ -287,7 +287,7 @@ describe('RULING Q5: span truth (pair-truth) is taught in the prompt, and the "j
     expect(system).toMatch(/only true ON THEIR OWN/)
   })
 
-  it('a rejected draft (the wear fact paired with a true spec fact) is REJECTED for a PLAIN-LANGUAGE reason, not a bare code', () => {
+  it('a rejected draft (the wear fact paired with a true spec fact) is REJECTED for a PLAIN-LANGUAGE reason, not a bare code — RULING S2 (fix round B8a) supersedes this exact pairing at the GRAMMAR layer, before span truth ever runs', () => {
     const wearUnit = s.units.find((u) => u.kind === 'wear-fact')
     const specUnit = s.units.find((u) => u.kind === 'spec-fact')
     // RULING R9: NO early-return guard — the 12-keyword pool is REAL and DOES yield both units;
@@ -300,13 +300,18 @@ describe('RULING Q5: span truth (pair-truth) is taught in the prompt, and the "j
     // <spec> and <wear-fact>", the wear fact reached via a list join INSIDE the still-open "with"
     // relation clause) is rejected at the GRAMMAR stage now (Q1's clause-scope pass), never
     // reaching span truth at all — the exact shape R6 exists to forbid, since "with Can be worn as
-    // Oversized" is ungrammatical English by itself. The span-truth ("join:") class this test
-    // isolates needs the pairing reached through LIST glue only, with NO relation open in that
-    // clause: "<spec>, <wear-fact> and <brand>" — a pure list clause where the spec+wear-fact
-    // adjacency itself is the lie.
-    // The mandatory brand unit (`needBrand=true` on this Comfort Colors family) must also be
-    // carried — list-joined, in its OWN trailing clause, so it never disturbs the span-truth pair
-    // this test isolates.
+    // Oversized" is ungrammatical English by itself.
+    // RULING S2 (fix round B8a, spec §2h rule 2, superseding this test's ORIGINAL premise): the
+    // shape this test used to isolate span truth with — "<spec>, <wear-fact> and <brand>", a PURE
+    // list clause where the spec+wear-fact ADJACENCY itself was the lie — is now ITSELF a named
+    // grammar violation: the wear fact must stand ALONE in its own "," comma clause, so being
+    // list-joined to the spec fact via the comma/"and" pair is refused before span truth ever runs.
+    // Measured directly (`buildAdmittedUnits` for this family): EVERY reachable phraseTruthVerdict
+    // pairwise lie among these admitted units involves the wear fact ("Can be worn as Oversized"
+    // paired with anything else is a fit-claim-lie; no OTHER pairing in this family's admitted set
+    // is untrue) — so S2 does not create a narrower truth net here, it makes the writer's OWN
+    // wear-fact "join:" class UNREACHABLE by construction, catching the identical shape one layer
+    // earlier with an equally plain-language reason. This test now asserts THAT.
     const parts = [
       { unit: identity }, { unit: garmentHead }, { glue: ',' }, { unit: specUnit!.id },
       { glue: 'and' }, { unit: wearUnit!.id }, { glue: ',' }, { unit: s.units.find((u) => u.text === 'Comfort Colors Tee')!.id },
@@ -314,12 +319,10 @@ describe('RULING Q5: span truth (pair-truth) is taught in the prompt, and the "j
     const v = judgeWriterArrangement({ parts }, s.units, { truthCtx: s.truthCtx, runTail: s.runTail })
     expect(v.ok, JSON.stringify(v)).toBe(false)
     if (v.ok) return // unreachable given the assertion above; keeps TS's control-flow narrowing happy
-    expect(v.violations.join(' ')).toMatch(/^join:/)
-    // RULING R9 (fix round B6 value Blocking B2, made REAL by this round): the PLAIN-LANGUAGE
-    // mapping (`SPAN_REASON_MESSAGES`) is load-bearing, not decorative — mutation-proven in
-    // `itemHighlightWriterFixRoundB7a.test.ts` (RULING R9): removing the lookup turns this exact
-    // assertion red (the message falls back to the bare internal reason code).
-    expect(v.violations.join(' ')).toMatch(/fabric\/material claim this blank does not back|fit\/cut claim this blank does not back/)
+    expect(v.violations.join(' ')).toMatch(/^arrangement:/)
+    // PLAIN-LANGUAGE, not a bare code: the S2 grammar message names the unit, the required shape,
+    // and the reason ("asserts a fit/cut claim this blank does not back") in one sentence.
+    expect(v.violations.join(' ')).toMatch(/must stand ALONE in its own "," comma clause.*asserts a fit\/cut claim this blank does not back/)
     // Repair A: drop the offending neighbour (an extra pool phrase clears the 97-char floor).
     const repairA = [
       { unit: identity }, { unit: garmentHead }, { glue: 'with' }, { unit: specUnit!.id }, { glue: ',' },

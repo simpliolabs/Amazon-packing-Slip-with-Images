@@ -306,7 +306,11 @@ describe('RULING R4: relation clauses are counted from GLUE, not from words insi
     expect(parts.some((p) => 'glue' in p && (p.glue === 'with' || p.glue === 'in'))).toBe(false)
     const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail: runTailFor('THE CEO Retro Sunset Shirt', PURE_TEE, truthCtx) })
     expect(v.ok, JSON.stringify(v)).toBe(false)
-    if (!v.ok) expect(v.violations.join(' ')).toMatch(/reads as a keyword list \(0 of \d+ clauses contain a "with"\/"in" relation/)
+    // RULING S5 (fix round B8a, value Important): the retry message is now built from
+    // RELATION_GLUE's own wording — a "with"/"in" JOIN, explicitly NOT a word appearing inside a
+    // unit's own text — so it never contradicts the very clause ("Christmas in July Shirt") whose
+    // "in" the model can see with its own eyes.
+    if (!v.ok) expect(v.violations.join(' ')).toMatch(/reads as a keyword list \(0 of \d+ clauses contain a "with"\/"in" JOIN — a "with"\/"in" appearing inside a unit's own text does not count/)
   })
 
   it('"Mom with Attitude" (a pool phrase containing "with") is likewise rejected as a keyword list', () => {
@@ -438,9 +442,31 @@ describe('RULING R6: the wear fact is list-join only', () => {
 
   it('the prompt teaches the wear-fact-list-only rule whenever a wear-fact unit is offered, and withholds it otherwise', () => {
     const { system } = buildWriterPrompt(units, 'Retro Sunset', [], 'Comfort Colors')
-    expect(system).toMatch(/A wear-fact unit .* is LIST-JOIN ONLY/)
+    // RULING S2 (fix round B8a, value Important, spec §2h rule 2): the taught sentence now says
+    // "stand ALONE in its own comma clause" — superseding "is LIST-JOIN ONLY" (a wear fact list-
+    // joined to a NEIGHBOUR read as one fit/cut claim, exactly the shape §2h names).
+    expect(system).toMatch(/A wear-fact unit .* must stand ALONE in its own "," comma clause/)
     const noWear = buildAdmittedUnits({ candidates: ['Vintage Beach Vibes'], specFacts: ['Classic Fit'], brandPick: null, wearFact: null }, { designName: 'Retro Sunset', truthCtx: { ...truthCtx, allowedBrand: null } })
     const { system: systemNoWear } = buildWriterPrompt(noWear, 'Retro Sunset', [])
-    expect(systemNoWear).not.toMatch(/A wear-fact unit .* is LIST-JOIN ONLY/)
+    expect(systemNoWear).not.toMatch(/A wear-fact unit .* must stand ALONE in its own "," comma clause/)
+  })
+
+  it('RULING S2 (fix round B8a): "with Can be worn as Oversized" (relation subject, unchanged) vs list-joined to a NEIGHBOUR (NEW named violation, not standing alone) are BOTH refused', () => {
+    const parts: ArrangementPart[] = [
+      { unit: id('Retro Sunset') }, { unit: garmentHead }, { glue: 'with' }, { glue: 'a' }, { unit: id('Relaxed Fit') },
+      { glue: ',' }, { unit: id('Can be worn as Oversized') }, { glue: 'and' }, { unit: id('Vintage Beach Vibes') },
+    ]
+    const v = validateArrangement({ parts }, units)
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.violation).toMatch(/'Can be worn as Oversized' is a wear-fact unit and must stand ALONE in its own "," comma clause/)
+  })
+
+  it('RULING S2: the wear fact abutting a neighbour with NO glue at all is likewise refused (not standing alone)', () => {
+    const parts: ArrangementPart[] = [
+      { unit: id('Retro Sunset') }, { unit: garmentHead }, { glue: ',' }, { unit: id('Can be worn as Oversized') }, { unit: id('Vintage Beach Vibes') },
+    ]
+    const v = validateArrangement({ parts }, units)
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.violation).toMatch(/abut with no join|must stand ALONE in its own "," comma clause/)
   })
 })

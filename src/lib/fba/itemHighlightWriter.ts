@@ -345,6 +345,16 @@ export function buildAdmittedUnits(
 
   // W1: "Units are as in B1, PLUS the family's garment head noun(s) for this blank as single-word
   // units, so an arrangement can name the garment. They pass rule (a) by construction."
+  // RULING S1 (fix round B8a, value Blocking B1, spec §2h rule 1): a garment-head unit is offered
+  // ONLY when an identity unit was actually ADMITTED above — §2g rule 4's abutment position ("<design
+  // name> <head>") is the garment-head unit's ONE legal place in the whole grammar (R5), so with no
+  // surviving identity (`designName` null, OR the identity was dropped for a trademark, a celebrity,
+  // or an untrue claim — the SAME three doors the identity loop above already gates on), every head
+  // unit offered here would be an OFFERED-BUT-UNUSABLE unit: no arrangement could ever legally place
+  // it (`r10b` census, mutation-proved), so offering it only teaches the model a phrase it can never
+  // use, or burns a call discovering that the hard way. Logged with the SAME tag every other
+  // admission-time drop uses (`IH_WRITER_UNIT_DROPPED`), reason `no-identity-anchor`.
+  const identityAdmittedForHeads = units.some((u) => u.kind === 'identity')
   const { allowed } = garmentNounConstraint(opts.truthCtx)
   const seenHead = new Set<string>()
   for (const word of allowed) {
@@ -352,6 +362,10 @@ export function buildAdmittedUnits(
     const folded = ihFoldWord(word)
     if (!IH_GARMENT_HEAD_FOLDED.has(folded) || seenHead.has(folded)) continue
     seenHead.add(folded)
+    if (!identityAdmittedForHeads) {
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_UNIT_DROPPED', phrase: titleCasePhrase(word), kind: 'garment-head', reason: 'no-identity-anchor' }))
+      continue
+    }
     push(titleCasePhrase(word), 'garment-head')
   }
   // RULING P6(c) (fix round B5, value Important): drop and log ANY unit whose own text fails an
@@ -699,6 +713,27 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
       return `'${u.text}' is a garment-head unit and may appear ONLY directly after the identity unit with no glue (e.g. '<design name> ${u.text}') — anywhere else, even joined by "," or "and", it names a second garment or a multi-pack`
     }
   }
+  // RULING S2 (fix round B8a, value Important, spec §2h rule 2): the wear fact stands ALONE in its
+  // own "," comma clause. The relation-clause pass above (Q1) already refuses it as the SUBJECT of
+  // "with"/"in"; this closes the OTHER half — a wear-fact unit joined to a NEIGHBOUR by a LIST glue
+  // ("and" "&" "—" "|") reads as one fit/cut claim on that neighbour ("Can be worn as Oversized and a
+  // Classic Fit"), exactly the shape §2h names. Walked over the WHOLE `parts` array, the same scope
+  // R5's garment-head-position pass uses: the ONLY legal neighbours on either side of a wear-fact
+  // unit are a "," (or the start/end of the line) — never another glue token, and never a bare
+  // abutment (which the earlier abutment pass already refuses for every kind but garment-head).
+  for (let k = 0; k < parts.length; k++) {
+    const p = parts[k]
+    if (glueRole(p) !== 'unit') continue
+    const u = unitAt(p)
+    if (u.kind !== 'wear-fact') continue
+    const prev = k > 0 ? parts[k - 1] : null
+    const next = k < parts.length - 1 ? parts[k + 1] : null
+    const prevOk = !prev || (glueRole(prev) !== 'unit' && (prev as ArrangementGluePart).glue === ',')
+    const nextOk = !next || (glueRole(next) !== 'unit' && (next as ArrangementGluePart).glue === ',')
+    if (!prevOk || !nextOk) {
+      return `'${u.text}' is a wear-fact unit and must stand ALONE in its own "," comma clause — joined to a neighbour by "and"/"&"/"—"/"|" (or abutting one directly), it asserts a fit/cut claim this blank does not back; put it between two commas, or at the very start/end of the line`
+    }
+  }
   return null
 }
 
@@ -921,17 +956,32 @@ function countListSectionsFromShapes(shapes: readonly boolean[]): number {
   return sections
 }
 
+/** RULING S9 (fix round B8a, truth minor m6): escapes every regex-special character in `s` so it
+ *  can be embedded literally inside a `RegExp` — a design name can contain any of them ("Ladies?!",
+ *  "Cat (Person)"). */
+function escapeRegExpLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
 /** RULING R2 (fix round B7a, value Blocking B2): "The design name is a PERSONA, not an audience
  *  claim." Removes the identity unit(s)' OWN rendered text from `text` before a gender/Unisex check
  *  reads it, so a design named "Ladies Man" or "Crazy Cat Lady" is judged on what OTHER units say,
  *  never on its own name. Units render verbatim (Q2) and each is used at most once, so the identity's
- *  exact stored text is always a contiguous substring of the rendered line when it is present —
- *  removing that substring (never word-by-word, which could not distinguish the identity's OWN
- *  occurrence from another unit's) is exact, not an approximation. */
+ *  exact stored text is always a contiguous substring of the rendered line when it is present.
+ *  RULING S9 (fix round B8a, truth Minor m6, superseding R2's own docstring claim): the ORIGINAL
+ *  `text.split(t).join(' ')` removed `t` as a RAW substring, not on word boundaries — so an
+ *  identity ONE WORD long that happens to be a PREFIX of a gender-core word ("Lad") cut that word out
+ *  of an entirely DIFFERENT unit's text ("Ladies Night Out" -> " ies Night Out", stripping the "Lad"
+ *  that also starts "Ladies" and silently removing the gender signal readability exists to catch —
+ *  the review's own A33/A34 control pair). `\b…\b` requires a WORD BOUNDARY on both sides of the
+ *  matched span, so "Lad" no longer matches inside "Ladies" (there is no boundary between the 'd' of
+ *  "Lad" and the 'i' of "Ladies" — both are word characters) while the exact phrase "Crazy Cat Lady"
+ *  still matches only its own contiguous occurrence, unchanged from before. This is exact, not an
+ *  approximation, in the sense the old docstring claimed but the old implementation did not deliver. */
 function stripIdentityWords(text: string, identityTexts: readonly string[]): string {
   let out = text
   for (const t of identityTexts) {
-    if (t) out = out.split(t).join(' ')
+    if (!t) continue
+    out = out.replace(new RegExp(`\\b${escapeRegExpLiteral(t)}\\b`, 'g'), ' ')
   }
   return out
 }
@@ -982,8 +1032,15 @@ export function writerReadabilityVerdict(line: string, units: readonly AdmittedU
   const relationClauses = parts
     ? clauseShapesFromParts(parts).filter((keywordShaped) => !keywordShaped).length
     : countRelationClauses(line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean))
+  // RULING S5 (fix round B8a, value Important): named from RELATION_GLUE, and explicit that a
+  // "with"/"in" appearing INSIDE a unit's own text (never an arrangement GLUE part) does not count —
+  // the exact wording the registry sentence now teaches (`writerReadabilityFidelitySentence` below),
+  // so a model that follows the retry message and the taught rule are never taught two different
+  // things ("Christmas in July Shirt" carries the letters "in" but ZERO relation GLUE, and this
+  // message used to say only "0 of N clauses contain a … relation", which reads as a claim about the
+  // rendered WORDS, contradicting the very clause the model just wrote).
   if (relationClauses < 1) {
-    return { ok: false, reason: `reads as a keyword list (0 of ${clauseCount} clauses contain a "with"/"in" relation — at least one relation clause is required)` }
+    return { ok: false, reason: `reads as a keyword list (0 of ${clauseCount} clauses contain a "with"/"in" JOIN — a "with"/"in" appearing inside a unit's own text does not count; at least one relation clause is required)` }
   }
   const listSections = parts
     ? countListSectionsFromShapes(clauseShapesFromParts(parts))
@@ -1004,14 +1061,18 @@ export function writerReadabilityVerdict(line: string, units: readonly AdmittedU
   // claim." The identity unit's OWN words are excluded from this pair of checks (both here on the
   // full line, and in `identityPairViolation`'s admission-time pair check) — a design named "Ladies
   // Man" or "Crazy Cat Lady" is judged on what OTHER units say, never on its own name.
+  // RULING S9 (fix round B8a, value minor m1): CALLS `genderAudienceViolation` — the SAME function
+  // `identityPairViolation`'s admission-time pair check calls — instead of re-implementing the two
+  // LEAN_FEM_RE/LEAN_MASC_RE tests inline. The two copies were equivalent at HEAD (both read from the
+  // same regex cores), but "one function, not a copy" is R2's own stated discipline, and a re-
+  // implementation is exactly the shape that drifts silently the NEXT time either check changes.
   const identityUnitsForGender = units.filter((u) => u.kind === 'identity')
   const genderProbeLine = identityUnitsForGender.length ? stripIdentityWords(line, identityUnitsForGender.map((u) => u.text)) : line
-  const hasFem = LEAN_FEM_RE.test(genderProbeLine)
-  const hasMasc = LEAN_MASC_RE.test(genderProbeLine)
-  if (/\bunisex\b/i.test(genderProbeLine) && (hasFem || hasMasc)) {
+  const genderViolation = genderAudienceViolation(genderProbeLine)
+  if (genderViolation === 'unisex-gender') {
     return { ok: false, reason: 'states a gender audience beside "Unisex"' }
   }
-  if (hasFem && hasMasc) {
+  if (genderViolation === 'gender-mix') {
     return { ok: false, reason: 'states both a feminine and a masculine audience word in the same line' }
   }
   // B6.3 — names or evokes the design whenever an identity unit exists.
@@ -1329,7 +1390,11 @@ export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
   // and it was 100% of the remaining literal-model rejections (§2f rule 5). Taught the SAME shape as
   // the brand rule (list-join only), gated on whether a wear-fact unit is even offered — pointless
   // prompt weight otherwise (the same reasoning as `unisex-gender`'s own gate, below).
-  { id: 'wear-fact-list-only', sentence: 'A wear-fact unit (e.g. "Can be worn as Oversized") is LIST-JOIN ONLY, exactly like the brand unit above — join it with "," "and" "&" "—" or "|", never after "with"/"in", and never anywhere inside a relation clause that is still open (before the next ",").', when: (ctx) => ctx.units.some((u) => u.kind === 'wear-fact') },
+  // RULING S2 (fix round B8a, value Important, spec §2h rule 2): superseded from "list-join only" to
+  // "stands ALONE in its own comma clause" — R6's own sentence still invited "and"/"&"/"—"/"|" onto
+  // the wear fact, and every one of those joins was refused 100% of the time (the wear fact asserts a
+  // fit/cut claim only on ITSELF, never paired with a neighbour any other way).
+  { id: 'wear-fact-list-only', sentence: 'A wear-fact unit (e.g. "Can be worn as Oversized") must stand ALONE in its own "," comma clause — never after "with"/"in" (like the brand unit, it is never the subject of a relation), and never joined to a NEIGHBOUR by "and" "&" "—" or "|" either: put a "," immediately before it and a "," immediately after it (or the very start/end of the line), with no other unit in between.', when: (ctx) => ctx.units.some((u) => u.kind === 'wear-fact') },
   { id: 'sentence-shape', sentence: 'The arrangement must contain AT LEAST ONE "," (comma) glue token somewhere between two units — "—", "|" and "&" alone do NOT satisfy this, and an arrangement with zero commas will be rejected even if it otherwise reads well.' },
   // RULING Q4 (fix round B6, value Blocking B1): split OUT of `unisex-gender` — this half of the
   // check has no dependency on a Unisex unit and fires on EVERY family, so it is taught
@@ -1370,13 +1435,23 @@ export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
  *  the exact failure class K4's own completeness test could not catch (it only checks the sentence
  *  APPEARS, never that it matches what is enforced). A test asserts this sentence changes if
  *  `READABILITY_CLAUSE_SPLIT_RE`'s glue characters change. */
+/** RULING S5 (fix round B8a, value Important): built from `RELATION_GLUE` (the arrangement's own
+ *  GLUE role, `with`/`in` as a JOIN), never `RELATION_WORDS_FOLDED` (the word-scan fallback) — the
+ *  taught sentence must say the same thing the REAL check (`writerReadabilityVerdict`'s parts-based
+ *  branch) actually does: a relation clause needs a "with"/"in" JOIN between two units, and a
+ *  "with"/"in" sitting inside one unit's own text ("Christmas in July Shirt") is not a join at all
+ *  and does not count. The two constants hold the identical words today (`RELATION_GLUE = {'with',
+ *  'in'}`, folded the same way), so this is a wording fix, not a behaviour change — but the WORDING
+ *  was actively wrong: it told a literal-following model to look for the relation WORD, and the
+ *  judge's own retry message for the "Christmas in July" rejection said the same thing, so the one
+ *  unit for which the system already knows the right answer was teaching the model the wrong one. */
 function writerReadabilityFidelitySentence(): string {
   const splitChars = READABILITY_CLAUSE_SPLIT_RE.source.replace(/[[\]]/g, '').split('').join(' ')
-  const relationWords = [...RELATION_WORDS_FOLDED].join('"/"')
+  const relationWords = [...RELATION_GLUE].join('"/"')
   // RULING Q11 (fix round B6, readability shape refined): a list SECTION is a RUN OF TWO OR MORE
   // consecutive clauses lacking a relation word — a single such clause, sitting between two
   // relation clauses, is ordinary prose, not a list section (`countListSections` above).
-  return `READABILITY: split the line at every ${splitChars} into clauses. AT LEAST ONE clause must contain "${relationWords}" (a relation word) — a line with ZERO such clauses reads as a keyword list and is rejected. After that, a RUN OF TWO OR MORE consecutive clauses that all lack "${relationWords}" counts as ONE list section (a trailing run of any length still counts once; a SINGLE such clause on its own, between two relation clauses, is ordinary prose and does NOT count) — AT MOST ONE such list section is allowed; a SECOND one, split off by another relation clause, will also be rejected. If the design has an identity unit, the line must also name or evoke it.`
+  return `READABILITY: split the line at every ${splitChars} into clauses. AT LEAST ONE clause must contain a "${relationWords}" JOIN (a glue token connecting two units) — a "${relationWords}" appearing INSIDE a unit's own text does not count, and a line with ZERO such join clauses reads as a keyword list and is rejected. After that, a RUN OF TWO OR MORE consecutive clauses that all lack a "${relationWords}" join counts as ONE list section (a trailing run of any length still counts once; a SINGLE such clause on its own, between two relation clauses, is ordinary prose and does NOT count) — AT MOST ONE such list section is allowed; a SECOND one, split off by another relation clause, will also be rejected. If the design has an identity unit, the line must also name or evoke it.`
 }
 
 /** W1: the prompt — the admitted units grouped by kind WITH THEIR IDS, the design name EXACTLY as
@@ -1413,8 +1488,16 @@ export function buildWriterPrompt(units: readonly AdmittedUnit[], designName: st
   // RULING P7 (fix round B5, value Minor M1): " in " is 4 chars (1 space + "in" + 1 space), not
   // 5-7 — split each join word out individually instead of one lumped, imprecise range.
   const joinCosts = '", " = 2 chars, " and " = 5 chars, " with " = 6 chars, " in " = 4 chars, " — "/" | "/" & " = 3 chars, "a "/"an " = 2-3 chars'
+  // RULING S1 (fix round B8a, value Blocking B1, folding in m2): NEVER send the DESIGN NAME line
+  // when no identity unit was admitted — `designName` null, OR the name was dropped for a trademark,
+  // a celebrity, or an untrue claim (`buildAdmittedUnits`'s identity loop). Before this, a DROPPED
+  // name ("Disney Squad") was still sent with the "reproduce spelling EXACTLY" instruction even
+  // though there is no identity unit id anywhere in `units` for the model to place — an impossible
+  // instruction that leaked nothing (the model cannot write free text), but named a design the writer
+  // was never going to be allowed to use.
+  const hasIdentityUnit = units.some((u) => u.kind === 'identity')
   const user = [
-    `DESIGN NAME (reproduce spelling EXACTLY, including any typo): ${JSON.stringify(designName ?? '')}`,
+    hasIdentityUnit ? `DESIGN NAME (reproduce spelling EXACTLY, including any typo): ${JSON.stringify(designName ?? '')}` : '',
     `ADMITTED UNITS (json), grouped by kind, each {"id":"...","text":"..."} — arrange these ids, never their text:`,
     JSON.stringify(grouped),
     // RULING P2 (fix round B5, compliance Important, value Blocking 2): name the REQUIRED brand

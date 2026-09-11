@@ -286,15 +286,23 @@ describe('W1: buildAdmittedUnits', () => {
     expect(ids).toEqual(units.map((_, i) => `u${i}`))
   })
 
-  it('adds the family\'s garment head noun(s) as single-word units, EVERY one numberable BY CONSTRUCTION (rule (a))', () => {
+  it('adds the family\'s garment head noun(s) as single-word units, EVERY one numberable BY CONSTRUCTION (rule (a)) — WITH an identity unit admitted (RULING S1: a garment-head unit is offered only when one is)', () => {
     for (const garmentFamily of ['tee', 'sweatshirt', 'hoodie'] as const) {
       const units = buildAdmittedUnits({ candidates: [], specFacts: [], brandPick: null, wearFact: null }, {
+        designName: 'Retro Sunset',
         truthCtx: { garmentFamily, spec: { material: '100% Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' },
       })
       const heads = units.filter((u) => u.kind === 'garment-head')
       expect(heads.length, garmentFamily).toBeGreaterThan(0)
       for (const h of heads) expect(h.numberable, `${garmentFamily}: "${h.text}"`).toBe(true)
     }
+  })
+
+  it('RULING S1 (fix round B8a): with NO identity unit admitted (no designName at all), NO garment-head unit is offered — the family still carries head words, they are simply dropped, logged no-identity-anchor', () => {
+    const units = buildAdmittedUnits({ candidates: [], specFacts: [], brandPick: null, wearFact: null }, {
+      truthCtx: { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' },
+    })
+    expect(units.filter((u) => u.kind === 'garment-head')).toHaveLength(0)
   })
 
   it('a non-apparel family ("none") gets ZERO garment-head units', () => {
