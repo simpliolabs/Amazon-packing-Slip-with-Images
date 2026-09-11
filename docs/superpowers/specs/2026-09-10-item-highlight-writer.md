@@ -330,6 +330,39 @@ lens judged all ten reference writer lines better than the composer's. Two narro
    the regex's blind spots (comments between tokens, URLs on the same line, `$` identifiers,
    package-imports aliases, files outside `src/`).
 
+## 2i. AMENDMENT 2026-09-11 (B8 panel) — what the door guard is for, and where it stops
+
+*Why.* Five rounds (B4 through B8) went to the test that guards the writer's single door. Each
+round, the wire reviewer found a deeper construction:
+- aliased and namespace imports;
+- then `any`-typed flows;
+- then the regex rules' blind spots;
+- then, at `fa42a67`, resolution tricks that only the production bundler honours: a new tsconfig
+  paths alias, a package.json `imports` entry whose `types` condition points at a stub, and a
+  directory package.json with a stub `types`.
+
+In that same round, the truth, compliance and value lenses found ZERO Blocking.
+
+*The threat model, decided.* The guard exists to stop ACCIDENTAL path divergence: a future call site
+that reaches the sync producers through the repo's ordinary import mechanisms, and so ships the
+composer's line where the writer should run. The end-to-end cost of that failure is small and
+bounded. The path ships the composer's already-vetted line, which is exactly flag-off behaviour, and
+every Amazon push is PO-approved. The guard is NOT a sandbox against a developer who deliberately
+builds a resolution alias or a hand-written type stub to hide an import from the compiler. That
+requires editing build configuration or adding stub files, both of which are visible in review.
+
+*So the guard:*
+1. builds its program from the repo's REAL tsconfig (paths, baseUrl, conditions), not a literal
+   option set;
+2. refuses any configuration entry that points at a producer module outside the allowlist:
+   tsconfig `paths`, every package.json's `main`/`module`/`exports`/`imports`/`types`, and
+   next.config aliases;
+3. refuses value re-exports of the producer modules from `.d.ts` files;
+4. keeps every AST and reference rule already built.
+
+*Accepted residual (recorded, not chased):* a hand-written type declaration that lies about a
+module's runtime identity. Its worst case is the composer's vetted line shipping on that path.
+
 ## 3. ADVERSARY
 
 - **"The writer will hallucinate a spec."** Provenance makes that a rejection, not a hope: a token
