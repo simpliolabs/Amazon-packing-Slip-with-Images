@@ -397,245 +397,233 @@ describe('Item Highlights writer (B4/G7): namespace imports, re-exports, and dyn
   })
 })
 
-// ═════════════════════════════════════════════════════════════════════════════════════════════
-// RULING W1 (fix round B7b, wire Blocking, controller review B6/wire B1): CLOSE THE ENUMERATION
-// CLASS AT THE MODULE BOUNDARY, WHICH `any` CANNOT LAUNDER.
-// ═════════════════════════════════════════════════════════════════════════════════════════════
-//
-// Review B6/wire (§1b) proved the K8 reference-scanner is a permanent arms race: 13 of 16 NEW
-// `any`-typed-dataflow shapes (y1-y16, the round's own probes) escaped it, on top of 2 (X4, X6) the
-// PRIOR round already left open — every round adds a follower for the LATEST laundering trick and
-// the next reviewer finds the next one. Every one of those 15 shapes shares ONE prerequisite: the
-// file must first get a HANDLE on the restricted module's whole namespace (`import * as X from
-// '<home>'`, or a dynamic `import('<home>')`) before any `any`-cast, container or late assignment can
-// launder it further. Import/export/dynamic-import declarations are SYNTAX, not types — refusing the
-// HANDLE itself, unconditionally, regardless of what the file does with it afterward, closes the
-// whole class at the ONE place every shape shares instead of chasing the next follower.
+// RULING V1 (fix round B8b, controller review B7/wire B1): "W1 is still a spelling scan." The three
+// rules that used to live here (`findNamespaceImportOfHome`, `findHomeModuleNamespaceReExport`,
+// `findDynamicImportSyntaxViolations`) were regular expressions over source text, and the B7/wire
+// review's z0-z15 probes proved the class, not just an individual follower, escapes them: an alias
+// charset gap (`$lp`), missing whitespace, a comment INSIDE the declaration, a `//`-comment string
+// truncating the rest of the line, a specifier-text home-check that never resolves a path alias or a
+// package.json "imports" subpath, and a scan scope of `src/` only (a file outside `src/` was never
+// even opened). Rules 1-3 are rebuilt below on the TypeScript AST and the COMPILER'S OWN module
+// resolution (`ts.resolveModuleName`, via the shared host — the same one K8 already builds a
+// `ts.Program` with) — never on source text — and folded directly into `findEnumerationViolations`
+// (see the K8 section below), so the module boundary and the reference check share ONE program build
+// and ONE walk instead of paying for a second `ts.createProgram`. K8's reference check is kept
+// unchanged as the second line, per the ruling.
 
-/** Rules 1 and 3: files permitted to reach a restricted home module's WHOLE namespace today —
- *  production code only; every `*.test.*` file is already excluded from this scan entirely by
- *  `listTsFilesFlat`/`COMPILED_TEST_RE`, so no test file needs an entry here. Kept explicit and
- *  minimal (a reviewed diff adds a name), never a wildcard or a directory prefix. Verified empty
- *  today (see "the REAL tree" test below) — no production file namespace-imports either home
- *  module. */
+/** Rule 1 (namespace import) and rule 3b (a literal dynamic import/require OF a home module): files
+ *  permitted to reach a restricted home module's WHOLE namespace today — production code only; every
+ *  `*.test.*` file is excluded from the program's root set already, so no test file needs an entry
+ *  here. Kept explicit and minimal (a reviewed diff adds a name), never a wildcard or a directory
+ *  prefix. Verified empty today (see "the REAL tree" test below) — no production file
+ *  namespace-imports either home module. */
 const NAMESPACE_IMPORT_ALLOWLIST: readonly string[] = []
-/** Rule 3's home-module half: the ONE existing production dynamic import of a whole home module —
+/** Rule 3b's home-module half: the ONE existing production dynamic import of a whole home module —
  *  `syncKeywordIntelligence.ts:249` reads `APPAREL_PRODUCT_TYPES` (an UNRESTRICTED export) off
- *  `listingPipeline.ts` via a literal `await import(...)`. `findDynamicImportBypass` above already
- *  proves it never reaches a RESTRICTED name; rule 3 is stricter still — it refuses ANY literal
- *  dynamic import of a home module outside an allowlist, regardless of what is destructured, because
- *  the import briefly materializes the WHOLE namespace object, and nothing but review stops a later
- *  edit from widening the destructure to a restricted name. This one legitimate use is named here,
- *  by file path, so any new one is a reviewed diff. */
+ *  `listingPipeline.ts` via a literal `await import(...)`. `findDynamicImportBypass` (above) already
+ *  proves it never reaches a RESTRICTED name; this rule is stricter still — it refuses ANY literal
+ *  dynamic import/require of a home module outside an allowlist, regardless of what is destructured,
+ *  because the import briefly materializes the WHOLE namespace object, and nothing but review stops a
+ *  later edit from widening the destructure to a restricted name. This one legitimate use is named
+ *  here, by file path, so any new one is a reviewed diff. */
 const DYNAMIC_HOME_IMPORT_ALLOWLIST: readonly string[] = ['src/lib/sync/syncKeywordIntelligence.ts']
-/** Rule 3's other half: a dynamic `import()`/`require()` whose specifier is not a string literal AT
- *  ALL is refused anywhere under `src/`, home module or not — its target cannot be statically
- *  verified. Empty today (verified below); kept as an explicit allowlist per the ruling's own
- *  wording, not because a legitimate use exists yet. */
+/** Rule 3a: a dynamic `import()`/`require()` whose specifier is not a string literal AT ALL (or not a
+ *  direct literal call at all — see the `require`/`module.require`/`createRequire` VALUE-USE rule) is
+ *  refused anywhere in the program, home module or not — its target cannot be statically verified.
+ *  Empty today (verified below); kept as an explicit allowlist per the ruling's own wording, not
+ *  because a legitimate use exists yet. */
 const NON_LITERAL_DYNAMIC_IMPORT_ALLOWLIST: readonly string[] = []
 
-/**
- * W1 rule 1. Flags EVERY `import * as X from '<home>'` whose specifier targets a restricted home
- * module, UNCONDITIONALLY — never mind whether `X` is ever property-accessed, cast, captured in a
- * container, or left completely unused. This is what collapses y1-y12, y16, X4 and X6 (every shape
- * that starts by binding the module's namespace to a name) to ONE check: none of their downstream
- * `any`-laundering tricks matter if the import itself is refused before any of that code runs.
- * Exempt: the home file's own module (never imports itself this way), `listingPipeline.ts` (the
- * sanctioned two-name consumer of the composer, exactly like every other scanner in this file), and
- * `NAMESPACE_IMPORT_ALLOWLIST`.
- */
-export function findNamespaceImportOfHome(relPath: string, source: string): string[] {
-  const stripped = stripLineComments(source)
-  const violations: string[] = []
-  const NS_RE = /import\s+\*\s+as\s+([A-Za-z0-9_]+)\s+from\s*['"]([^'"]+)['"]/g
-  let m: RegExpExecArray | null
-  while ((m = NS_RE.exec(stripped))) {
-    const target = specifierTargetsRestrictedHome(m[2])
-    if (!target) continue
-    const home = target === 'pipeline' ? LISTING_PIPELINE_REL : ITEM_HIGHLIGHT_COMPOSER_REL
-    if (relPath === home || relPath === LISTING_PIPELINE_REL) continue
-    if (NAMESPACE_IMPORT_ALLOWLIST.includes(relPath)) continue
-    violations.push(`${relPath}: namespace-imports '${m[2]}' as ${m[1]} — a restricted home module (${home}); refused at the import declaration regardless of downstream use (not in the W1 allowlist)`)
+describe('RULING V1 (fix round B8b, wire Blocking): the module boundary is refused via the compiler\'s AST and module resolution, never source text', () => {
+  // Every shape below is asserted only via `findEnumerationViolations` (the SAME function K8 uses,
+  // now doing both jobs in one program/one walk) through `scratchCopy` — never a standalone regex
+  // function taking raw text, because the whole POINT of this round is that there is no such
+  // function left to call directly: resolution requires a real `ts.Program`.
+
+  // z0 (control) + the z1-z8/z12/z13 spelling-defeat shapes the OLD regex scanners were shown to
+  // miss (z0's own the-REAL-tree run is proven RED against a scratch copy separately below, and
+  // pasted into the report per the round's "reproduce first" instruction).
+  const SPELLING_DEFEAT_SHAPES: Record<string, string> = {
+    'z0-control': `import * as lp from '@/lib/fba/listingPipeline'\nlet m: any\nexport async function POST() { m = lp; return m['buildItemHighlights']({} as never) }`,
+    'z1-dollar-alias': `import * as $lp from '@/lib/fba/listingPipeline'\nlet m: any\nexport async function POST() { m = $lp; return m['buildItemHighlights']({} as never) }`,
+    'z2-nospace': `import*as lp from'@/lib/fba/listingPipeline'\nexport async function POST() { return (lp as never)['buildItemHighlights']({} as never) }`,
+    'z3-comment-inside-decl': `import * /* ns */ as lp from '@/lib/fba/listingPipeline'\nexport async function POST() { return (lp as never)['buildItemHighlights']({} as never) }`,
+    'z4-url-same-line': `const U = 'https://example.com/x' // a same-line comment used to truncate a REGEX scanner, irrelevant to a real parser\nimport * as lp from '@/lib/fba/listingPipeline'\nexport async function POST() { return (lp as never)['buildItemHighlights']({} as never) }`,
+    'z6b-tsignore-plus-default': `// @ts-ignore\nimport def, * as lp from '@/lib/fba/listingPipeline'\nexport default function GET() { return (lp as never)['buildItemHighlights']({} as never) }`,
+    'z7-starcomment-barrel': `export * /* everything */ from '@/lib/fba/listingPipeline'\n`,
+    'z8-dollar-namespaceexport': `export * as $lpBarrel from '@/lib/fba/listingPipeline'\n`,
+    'z12-require-as-value': `export function POST() { const r = require; return r('@/lib/fba/listingPipeline') }`,
+    'z13-template-specifier': 'export async function POST() { return import(`@/lib/fba/listingPipeline`) }',
+    'z15-string-namespaceexport': `export * as "lp string name" from '@/lib/fba/listingPipeline'\n`,
   }
-  return violations
-}
-
-/**
- * W1 rule 2 (addition). `findReExportBypass` above already refuses a bare `export * from '<home>'`
- * and a named `export { restrictedName } from '<home>'`, but neither regex matches
- * `export * as X from '<home>'` — its `*` is followed by `as <alias>`, not directly by `from`. That
- * gap let a barrel re-exporting the WHOLE home namespace under an alias sit completely unflagged
- * whenever nothing downstream happened to reach a restricted name through it — the K8 scanner only
- * fires on a REFERENCE, and an inert barrel (the "exportStarAs" shape's own first file, before any
- * second file ever consumes it) has none. Refuse the re-export itself, unconditionally, exactly like
- * rule 1 refuses the import.
- */
-export function findHomeModuleNamespaceReExport(relPath: string, source: string): string[] {
-  const stripped = stripLineComments(source)
-  const violations: string[] = []
-  const STAR_AS_RE = /export\s*\*\s+as\s+([A-Za-z0-9_]+)\s+from\s*['"]([^'"]+)['"]/g
-  let m: RegExpExecArray | null
-  while ((m = STAR_AS_RE.exec(stripped))) {
-    const target = specifierTargetsRestrictedHome(m[2])
-    if (!target) continue
-    const home = target === 'pipeline' ? LISTING_PIPELINE_REL : ITEM_HIGHLIGHT_COMPOSER_REL
-    if (relPath === home || relPath === LISTING_PIPELINE_REL) continue
-    violations.push(`${relPath}: re-exports the WHOLE namespace of a restricted home module (${home}) as ${m[1]} ('export * as ... from') — refused regardless of whether anything downstream ever consumes it`)
+  for (const [name, content] of Object.entries(SPELLING_DEFEAT_SHAPES)) {
+    it(`sensitivity ("${name}") — flagged by AST/resolution regardless of the spelling trick the OLD regex missed`, () => {
+      const isBarrel = name.startsWith('z7') || name.startsWith('z8') || name.startsWith('z15')
+      const relPath = isBarrel ? `lib/fba/v1Barrel-${name}.ts` : `app/api/fba/probe-v1-${name}/route.ts`
+      const { inputs, cleanup } = scratchCopy({ extra: { relPath, content } })
+      try {
+        const { violations } = findEnumerationViolations(inputs)
+        expect(violations.length, `"${name}" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      } finally { cleanup() }
+    })
   }
-  return violations
-}
 
-/**
- * W1 rule 3, both halves, at the dynamic-import/`require` CALL syntax:
- * (a) ANY dynamic `import(...)`/`require(...)` whose argument is not a single plain string literal
- *     is refused anywhere under `src/` (`NON_LITERAL_DYNAMIC_IMPORT_ALLOWLIST`) — its target cannot
- *     be statically verified, so it could reach a restricted home module through indirection no
- *     static scan can rule out.
- * (b) A literal dynamic `import('<home>')`/`require('<home>')` of a restricted home module is
- *     refused outside `DYNAMIC_HOME_IMPORT_ALLOWLIST`, regardless of what is destructured from it —
- *     `findDynamicImportBypass` above only fires once a RESTRICTED name is actually reached; this
- *     refuses the WHOLE-MODULE handle itself, the same "syntax, not semantics" move as rules 1-2.
- * A plain source-text scan, like every other first-line check in this file — every dynamic
- * import/require call in this codebase today (verified below) uses a single unbroken string literal
- * argument, so the `[^)]*` capture never needs to reason about nested parens.
- *
- * BLOCK comments are stripped too (unlike every OTHER scanner in this file, which strips only `//`
- * line comments): "import" followed by an open paren is common ENGLISH prose ("...to import (and
- * unit-test) the X separately...", "...this file is bundled into the client\n// page for its
- * pushable-check helpers..." wrapped at 80 columns) and this codebase's own JSDoc blocks contain it
- * more than once — verified empirically (the real-tree run below caught 5 such false positives
- * before this strip was added; see the round's report). A bare `import\s*\(`/`require\s*\(` is
- * common enough in prose that skipping block comments, not just line comments, is required for this
- * one check to be sound; the other regex-based scanners match far more specific multi-token syntax
- * ("import { ... } from '...'", "export \* from '...'") that essentially never appears as prose.
- */
-function stripBlockComments(s: string): string {
-  return s.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
-}
-export function findDynamicImportSyntaxViolations(relPath: string, source: string): string[] {
-  // `stripLineComments`'s per-line `.replace(/\/\/.*$/, '')` never matches on a CRLF file: `.` does
-  // not cross a line terminator, and a trailing `\r` sits BETWEEN the comment text and `$` (which
-  // (without the `m` flag) matches only the true end of the line string) — so the whole `//...`
-  // comment survives untouched on every `\r\n` file. Normalizing to `\n` first (local to this
-  // function, not the shared `stripLineComments` — every other scanner in this file matches far more
-  // specific multi-token syntax that has never surfaced this) is what caught two real false
-  // positives during verification: a `//` comment reading "...import (Intelligence tab)" (English
-  // prose) and a multi-line `//` block whose OWN un-stripped continuation line supplied the closing
-  // `)` my `[^)]*` capture needs, joining two unrelated comment lines into one fake "call".
-  const stripped = stripBlockComments(stripLineComments(source.replace(/\r\n/g, '\n')))
-  const violations: string[] = []
-  const isPlainStringLiteral = (text: string): string | null => {
-    const m = /^\s*(['"])((?:(?!\1).)*)\1\s*$/.exec(text)
-    return m ? m[2] : null
-  }
-  const scanCalls = (re: RegExp, kind: 'import' | 'require') => {
-    let m: RegExpExecArray | null
-    while ((m = re.exec(stripped))) {
-      const arg = m[1]
-      const literal = isPlainStringLiteral(arg)
-      if (literal === null) {
-        if (NON_LITERAL_DYNAMIC_IMPORT_ALLOWLIST.includes(relPath)) continue
-        violations.push(`${relPath}: dynamic ${kind}(${arg.trim() || '…'}) has a NON-LITERAL specifier — refused anywhere under src/ (not in the allowlist)`)
-        continue
-      }
-      const target = specifierTargetsRestrictedHome(literal)
-      if (!target) continue
-      const home = target === 'pipeline' ? LISTING_PIPELINE_REL : ITEM_HIGHLIGHT_COMPOSER_REL
-      if (relPath === home || relPath === LISTING_PIPELINE_REL) continue
-      if (DYNAMIC_HOME_IMPORT_ALLOWLIST.includes(relPath)) continue
-      violations.push(`${relPath}: literal dynamic ${kind}('${literal}') of a restricted home module (${home}) — refused outside the allowlist regardless of what is destructured`)
-    }
-  }
-  scanCalls(/\bimport\s*\(\s*([^)]*)\)/g, 'import')
-  scanCalls(/\brequire\s*\(\s*([^)]*)\)/g, 'require')
-  return violations
-}
-
-describe('RULING W1 (fix round B7b, wire Blocking): the module boundary itself is refused, not just the shapes built on top of it', () => {
-  it('sensitivity — a namespace import of a home module is flagged even completely UNUSED (rule 1)', () => {
-    const fakeFile = 'src/app/api/fba/some-unused-namespace-route/route.ts'
-    const fakeSource = `import * as lp from '@/lib/fba/listingPipeline'\nexport async function GET() { return new Response('ok') }\n`
-    expect(findNamespaceImportOfHome(fakeFile, fakeSource)).toEqual([
-      expect.stringContaining("namespace-imports '@/lib/fba/listingPipeline' as lp"),
-    ])
+  // z9/z9b: a home-module barrel living OUTSIDE `src/` entirely — the OLD scan scope
+  // (`listTsFilesFlat(SRC_ROOT)`/`rootNames`) never opened it. `findEnumerationViolations` now walks
+  // `program.getSourceFiles()` (every file the COMPILER resolved into the program, home-module or
+  // not, inside `src/` or not), so a file the compiler reaches via an ordinary relative import from
+  // an in-`src/` route is scanned even though nothing added it as a root by hand.
+  it('sensitivity ("z9", outside src/) — a barrel doing `export * from home` OUTSIDE src/, reached ONLY by resolving an in-src route\'s relative import (never added as its own root), is flagged', () => {
+    // `notRoot: true` on the barrel is the actual claim under test: this file is NEVER listed in
+    // `rootNames` — the only way `findEnumerationViolations` ever sees it is by the compiler
+    // resolving the route's own import and pulling it into `program.getSourceFiles()`. Mutation-
+    // proved: reverting the scan to `rootNames`-only (which the route.ts root still lists) leaves
+    // this file OUT of the scan and the shape escapes — see the round's report.
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: '../ihx/v1OutsideBarrel.ts', content: `export * from '../src/lib/fba/listingPipeline'\n`, notRoot: true },
+        { relPath: 'app/api/fba/probe-v1-z9/route.ts', content: `import * as outside from '../../../../../ihx/v1OutsideBarrel'\nexport async function POST() { return (outside as never)['buildItemHighlights']({} as never) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"z9" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+  it('sensitivity ("z9b", outside src/, FULLY TYPED, no `any` and no cast, reached ONLY by resolution) — a named re-export of a restricted name from a file outside src/ is flagged at the re-export site', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: '../ihx/v1OutsideAlias.ts', content: `export { buildItemHighlights as bih } from '../src/lib/fba/listingPipeline'\n`, notRoot: true },
+        { relPath: 'app/api/fba/probe-v1-z9b/route.ts', content: `import { bih } from '../../../../../ihx/v1OutsideAlias'\nexport async function POST() { return bih({} as never) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.some((v) => v.includes('buildItemHighlights')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
   })
 
-  it('sensitivity — every one of the 13 y1/y2/y3/y4/y5/y6/y7/y8/y9/y10/y11/y12/y16 shapes is flagged by rule 1 alone, before any downstream `any` trick runs', () => {
-    const NAMESPACE_SHAPES: Record<string, string> = {
-      'y1-lateassign': `import * as lp from '@/lib/fba/listingPipeline'\nlet m: any\nexport async function POST() { m = lp; return m['buildItemHighlights']({} as never) }`,
-      'y2-conditional': `import * as lp from '@/lib/fba/listingPipeline'\nconst m = process.env.R9_TOGGLE ? lp : null\nexport async function POST() { return (m as any)['buildItemHighlights']({} as never) }`,
-      'y6-mapregistry': `import * as lp from '@/lib/fba/listingPipeline'\nconst registry = new Map<string, any>([['pipeline', lp]])\nexport async function POST() { return registry.get('pipeline')['buildItemHighlights']({} as never) }`,
-      'y11-globalthis': `import * as lp from '@/lib/fba/listingPipeline'\n;(globalThis as any).__ihLp = lp\nexport async function POST() { return (globalThis as any).__ihLp['buildItemHighlights']({} as never) }`,
-      'x4-concatkey': `import * as lp from '@/lib/fba/listingPipeline'\nconst K = 'buildItem' + 'Highlights'\nexport async function POST() { const fn = (lp as any)[K] as (i: never) => unknown; return fn({} as never) }`,
-      'x6-entriesfind': `import * as lp from '@/lib/fba/listingPipeline'\nexport async function POST() { const entry = Object.entries(lp).find(([k]) => k === 'buildItemHighlights'); const fn = entry?.[1] as unknown as (i: never) => unknown; return fn({} as never) }`,
-    }
-    for (const [name, content] of Object.entries(NAMESPACE_SHAPES)) {
-      const violations = findNamespaceImportOfHome(`src/app/api/fba/probe-${name}/route.ts`, content)
-      expect(violations.length, `"${name}" must be flagged by rule 1 alone`).toBeGreaterThan(0)
-    }
+  // z10: a package.json "imports" subpath alias (`#ihp`) that resolves — via the COMPILER's own
+  // resolution, never a specifier-text pattern — to a home module. The specifier text `#ihp` shares
+  // not one character with either home module's path, so this shape is the clearest possible proof
+  // that the check is resolution-based, not spelling-based.
+  it('sensitivity ("z10", package.json "imports" alias) — a `#ihp` subpath import resolving to a home module is flagged, though its specifier text names nothing restricted', () => {
+    const { inputs, cleanup } = scratchCopy({
+      packageJson: { name: 'v1-scratch', private: true, imports: { '#ihp': './src/lib/fba/listingPipeline.ts' } },
+      extra: { relPath: 'app/api/fba/probe-v1-z10/route.ts', content: `import * as lp from '#ihp'\nlet m: any\nexport async function POST() { m = lp; return m['buildItemHighlights']({} as never) }` },
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"z10" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      expect(violations.some((v) => v.includes('#ihp')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
   })
 
-  it('sensitivity — a dynamic import bound at module scope then awaited into an any (y13) is flagged by rule 3, with NO namespace import present', () => {
-    const fakeFile = 'src/lib/fba/probeY13Helper.ts'
-    const fakeSource = `const p = import('@/lib/fba/listingPipeline')\nexport async function POST() { const m: any = await p; return m['buildItemHighlights']({} as never) }`
-    expect(findNamespaceImportOfHome(fakeFile, fakeSource)).toEqual([]) // no namespace import in this shape
-    expect(findDynamicImportSyntaxViolations(fakeFile, fakeSource)).toEqual([
-      expect.stringContaining("literal dynamic import('@/lib/fba/listingPipeline')"),
-    ])
+  // Two shapes the OLD regex-based named-import/re-export scanners (`findSyncBuilderBypassImports`,
+  // `findReExportBypass`) were ALSO vulnerable to in principle: a block comment sitting INSIDE the
+  // braces, between the restricted name and its alias — `stripLineComments` only strips `//` line
+  // comments, so `/* x */` text survives into the specifier-splitting regex and breaks the exact-text
+  // match. Both shapes ARE flagged correctly (asserted below) — but MUTATION-TESTED (not assumed):
+  // disabling the new named-import/re-export DECLARATION branch alone (`if (nb &&
+  // ts.isNamedImports(nb))` / the re-export `if (RESTRICTED_NAMES.includes(originalText) ...)`
+  // check) leaves BOTH shapes GREEN, because K8's own identifier walk already visits the import/
+  // re-export specifier's `propertyName` token (text `buildItemHighlights`/`runIhTail`) as an
+  // ordinary Identifier reference and resolves it via `resolvesToTarget`, independent of the LOCAL
+  // alias and unaffected by a comment between tokens (AST parsing ignores comments regardless of
+  // which scanner reads it). A directly-spelled import/re-export specifier of a restricted name
+  // therefore has NO shape where the new declaration-level rule is independently load-bearing: ES
+  // module syntax requires the propertyName token to exist, and K8 already resolves it under any
+  // local name. The declaration rule is still correct and still implements the ruling's "under any
+  // local name" wording via the compiler's symbol resolution rather than text — it is DEFENSE IN
+  // DEPTH alongside K8, not a shape K8 misses. (Restated in the round's report, not hidden.)
+  it('sensitivity ("named import, comment inside braces") — flagged (via K8; the new declaration rule is redundant here, see comment above)', () => {
+    const content = `import { /* keep */ buildItemHighlights as composeIh } from '@/lib/fba/listingPipeline'\nexport async function POST() { return composeIh({} as never) }`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'app/api/fba/probe-v1-namedcomment/route.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.some((v) => v.includes('buildItemHighlights')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+  it('sensitivity ("named re-export, comment inside braces") — flagged (via K8; the new declaration rule is redundant here, see comment above)', () => {
+    const content = `export { /* keep */ runIhTail as tail } from '@/lib/fba/listingPipeline'\n`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'lib/fba/v1ReexportComment.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.some((v) => v.includes('runIhTail')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
   })
 
-  it('sensitivity — a dynamic import consumed inline via .then with no destructure (y15) is flagged by rule 3', () => {
-    const fakeFile = 'src/app/api/fba/probe-y15-thenparam/route.ts'
-    const fakeSource = `export async function POST() { return import('@/lib/fba/listingPipeline').then((m: any) => m['buildItemHighlights']({} as never)) }`
-    expect(findDynamicImportSyntaxViolations(fakeFile, fakeSource)).toEqual([
-      expect.stringContaining("literal dynamic import('@/lib/fba/listingPipeline')"),
-    ])
+  // ImportEqualsDeclaration (`import X = require('<home>')`): named explicitly by the ruling as a
+  // form to resolve. `import ... = require(...)` is a TS1202 DIAGNOSTIC error under this repo's own
+  // `module: esnext` (the semantic checker refuses the construct), but the PARSER still produces a
+  // real ImportEqualsDeclaration node in the program either way (a diagnostic is not a parse
+  // failure, and this scanner never consults diagnostics) — verified empirically (z14 in the
+  // round's report goes RED through the full `findEnumerationViolations` pipeline, not just a
+  // synthetic unit check).
+  it('sensitivity ("z14", import-equals require of home) — flagged through the full pipeline despite the construct\'s own TS1202 diagnostic elsewhere', () => {
+    const content = `import lp = require('@/lib/fba/listingPipeline')\nlet m: any\nexport async function POST() { m = lp; return m['buildItemHighlights']({} as never) }`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'app/api/fba/probe-v1-z14/route.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"z14" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
   })
 
-  it('sensitivity — a NON-LITERAL dynamic import specifier is flagged anywhere under src/, even when it targets nothing restricted', () => {
-    const fakeFile = 'src/lib/fba/probeNonLiteralImport.ts'
-    const fakeSource = `export async function loadIt(modulePath: string) { return import(modulePath) }`
-    expect(findDynamicImportSyntaxViolations(fakeFile, fakeSource)).toEqual([
-      expect.stringContaining('NON-LITERAL specifier'),
-    ])
+  // Non-literal dynamic import/require, and require/module.require/createRequire used as a VALUE
+  // rather than a direct literal call — refused ANYWHERE in the program regardless of target, since
+  // the target cannot be statically bounded.
+  it('sensitivity ("non-literal dynamic import") — a variable specifier is flagged even when it targets nothing restricted', () => {
+    const content = `export async function loadIt(modulePath: string) { return import(modulePath) }`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'lib/fba/v1NonLiteralImport.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.some((v) => v.includes('NON-LITERAL')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+  it('sensitivity ("require used as a value") — `const r = require` then `r(...)` is flagged even though the literal call site itself is never home-targeted first', () => {
+    const content = `export function loadIt() { const r = require; return r('lodash') }`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'lib/fba/v1RequireValue.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.some((v) => v.includes("value use of 'require'")), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+  it('sensitivity ("module.require used as a value")', () => {
+    const content = `export function loadIt() { const r = module.require; return r('lodash') }`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'lib/fba/v1ModuleRequireValue.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.some((v) => v.includes("'module.require'")), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+  it('sensitivity ("createRequire") — any reference is flagged; its indirection cannot be statically bounded', () => {
+    const content = `import { createRequire } from 'node:module'\nexport function loadIt() { const req = createRequire(import.meta.url); return req('lodash') }`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'lib/fba/v1CreateRequire.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.some((v) => v.includes('createRequire')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+  it('a PLAIN literal require/import of an UNRELATED module is NOT flagged (the value-use and non-literal rules do not over-refuse ordinary code)', () => {
+    const content = `export function loadIt() { return require('lodash') }\nexport async function loadIt2() { return import('lodash') }`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'lib/fba/v1PlainRequire.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations, JSON.stringify(violations)).toEqual([])
+    } finally { cleanup() }
   })
 
-  it('sensitivity — an inert barrel doing `export * as X from home`, with NOTHING downstream ever consuming it, is still flagged (rule 2)', () => {
-    const fakeFile = 'src/lib/fba/someInertBarrel.ts'
-    const fakeSource = `export * as lpR7 from '@/lib/fba/listingPipeline'\n`
-    expect(findHomeModuleNamespaceReExport(fakeFile, fakeSource)).toEqual([
-      expect.stringContaining('re-exports the WHOLE namespace'),
-    ])
-  })
-
-  it('the allowlist mechanism itself does not over-refuse: the ONE real production use (syncKeywordIntelligence.ts, an unrestricted export) stays GREEN', () => {
-    const relPath = 'src/lib/sync/syncKeywordIntelligence.ts'
-    const source = fs.readFileSync(path.join(SRC_ROOT, 'lib/sync/syncKeywordIntelligence.ts'), 'utf8')
-    expect(findDynamicImportSyntaxViolations(relPath, source)).toEqual([])
-    // proves the allowlist is doing the exempting, not an accidental non-match: removing the file
-    // from the allowlist (a plain array literal, checked directly here rather than via the module
-    // constant) must flag the exact same source.
-    const withoutAllowlist = findDynamicImportSyntaxViolations('src/lib/sync/someOtherFile.ts', source)
-    expect(withoutAllowlist.some((v) => v.includes("listingPipeline")), JSON.stringify(withoutAllowlist)).toBe(true)
-  })
-
-  it('the REAL tree: zero production file namespace-imports a home module, re-exports one via `export * as`, or dynamic-imports/requires with a non-literal specifier or a literal home-module target outside the allowlists', () => {
-    // RULING P8's own extension set (listTsFilesFlat), not the narrower .ts/.tsx-only listTsFiles —
-    // a plain-JS or .mts route is just as reachable as a .ts one (see the js-route/mts-helper
-    // shapes already pinned under K8).
-    const nsViolations: string[] = []
-    const reExportViolations: string[] = []
-    const dynViolations: string[] = []
-    for (const abs of getRealRootNamesCached()) {
-      const rel = path.relative(process.cwd(), abs).replace(/\\/g, '/')
-      const source = fs.readFileSync(abs, 'utf8')
-      nsViolations.push(...findNamespaceImportOfHome(rel, source))
-      reExportViolations.push(...findHomeModuleNamespaceReExport(rel, source))
-      dynViolations.push(...findDynamicImportSyntaxViolations(rel, source))
-    }
-    expect(nsViolations, JSON.stringify(nsViolations)).toEqual([])
-    expect(reExportViolations, JSON.stringify(reExportViolations)).toEqual([])
-    expect(dynViolations, JSON.stringify(dynViolations)).toEqual([])
+  it('the allowlist mechanism itself does not over-refuse: removing syncKeywordIntelligence.ts from the allowlist DOES flag its own real dynamic import of APPAREL_PRODUCT_TYPES', () => {
+    // Proves the allowlist is doing the exempting rather than an accidental non-match: the REAL
+    // tree's own "the REAL tree" test (below, K8 section) already asserts `[]` WITH the allowlist in
+    // place — this copies that one file's real content to a NEW path outside the allowlist and
+    // confirms the SAME dynamic import is now flagged.
+    const realSource = fs.readFileSync(path.join(SRC_ROOT, 'lib/sync/syncKeywordIntelligence.ts'), 'utf8')
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'lib/sync/v1NotAllowlisted.ts', content: realSource } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.some((v) => v.includes('v1NotAllowlisted') && v.includes('listingPipeline')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
   })
 })
 
@@ -898,6 +886,20 @@ function makeSharedHost(overlay: ReadonlyMap<string, string>): ts.CompilerHost {
     fileExists: (fileName) => {
       const key = toPosix(fileName)
       return overlay.has(key) || readFileTextCache.has(key) || base.fileExists(fileName)
+    },
+    // RULING V1 (fix round B8b): resolving a relative specifier that lands OUTSIDE the real src/
+    // tree (an overlay-only synthetic file, e.g. z9/z9b's `ihx/` probe) needs its PARENT directory
+    // to read as existing — the real filesystem has no such directory, and without this override
+    // `base.directoryExists` (backed by the real fs) says no, so `ts.resolveModuleName`'s own
+    // directory-probe short-circuits before ever calling `fileExists` for a candidate file inside
+    // it, and the whole shape silently fails to resolve (verified empirically: removing this
+    // override drops the z9b probe's resolution to `undefined` — see the round's report). An
+    // overlay directory reads as existing whenever ANY overlaid path sits under it.
+    directoryExists: (dirName) => {
+      const key = toPosix(dirName)
+      const withSlash = key.endsWith('/') ? key : `${key}/`
+      for (const k of overlay.keys()) { if (k.startsWith(withSlash)) return true }
+      return base.directoryExists ? base.directoryExists(dirName) : true
     },
     readFile: (fileName) => {
       const key = toPosix(fileName)
@@ -1255,14 +1257,172 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
     return t.flags & ts.TypeFlags.StringLiteral ? (t as ts.StringLiteralType).value : null
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // RULING V1 (fix round B8b, controller review B7/wire B1): the module-boundary rules, rebuilt on
+  // the compiler's AST and its OWN module resolution — never on source text. Folded into this same
+  // function (sharing the ONE program/checker K8 already built above) rather than a second
+  // `ts.createProgram` call.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  const homeFilesPosix = new Set<string>([toPosix(listingPipelineAbs), toPosix(composerAbs)])
+  /** Resolves an import/export/dynamic-import/require specifier to a FILE using the compiler's own
+   *  resolution — `ts.resolveModuleName`, fed the SAME host K8's program uses, so a path alias
+   *  (`@/*`) and a package.json "imports" subpath (`#foo`) resolve exactly as the real build would
+   *  resolve them. Returns the resolved file as a posix path, or null when TS could not resolve it
+   *  at all (an unresolvable specifier is never treated as a violation — silence, not a guess). */
+  function resolveSpecifierToFile(specText: string, containingFile: string): string | null {
+    const result = ts.resolveModuleName(specText, containingFile, options, host)
+    const resolved = result.resolvedModule?.resolvedFileName
+    return resolved ? toPosix(resolved) : null
+  }
+  function homeKindOfResolved(resolvedPosix: string): { home: string } | null {
+    if (resolvedPosix === toPosix(listingPipelineAbs)) return { home: listingPipelineAbs }
+    if (resolvedPosix === toPosix(composerAbs)) return { home: composerAbs }
+    return null
+  }
+  /** Rules 1, 2, "export *", and the named-import/re-export half of rule 4 — all DECLARATION-level
+   *  (refused regardless of whether anything downstream ever uses the binding), all resolved via
+   *  the compiler rather than matched by specifier spelling. Only ever called for a non-home file
+   *  (the home files' own sanctioned cross-imports are handled by K8's reference walk, exactly as
+   *  before). Import/export declarations are always TOP-LEVEL, so `sf.statements` — never a
+   *  recursive walk — is the complete and correct search space. */
+  function checkModuleBoundaryDeclarations(sf: ts.SourceFile, rel: string): void {
+    for (const stmt of sf.statements) {
+      if (ts.isImportDeclaration(stmt) && ts.isStringLiteralLike(stmt.moduleSpecifier)) {
+        const resolved = resolveSpecifierToFile(stmt.moduleSpecifier.text, sf.fileName)
+        const hit = resolved ? homeKindOfResolved(resolved) : null
+        if (!hit) continue
+        const clause = stmt.importClause
+        if (!clause || clause.isTypeOnly) continue // side-effect-only, or `import type { ... }`
+        const nb = clause.namedBindings
+        if (nb && ts.isNamespaceImport(nb)) {
+          if (!NAMESPACE_IMPORT_ALLOWLIST.includes(rel)) {
+            violations.push(`${rel}: namespace-imports '${stmt.moduleSpecifier.text}' as ${nb.name.text} — resolved by the compiler to a restricted home module (${hit.home}); refused at the import declaration regardless of downstream use (not in the allowlist)`)
+          }
+        }
+        if (nb && ts.isNamedImports(nb)) {
+          for (const el of nb.elements) {
+            if (el.isTypeOnly) continue
+            for (const name of RESTRICTED_NAMES) {
+              if (homeAbsOf[name] !== hit.home) continue
+              const target = declSymbols[name]
+              // "under any local name": resolved via the SYMBOL the local binding aliases to, never
+              // the text of the `as` clause — a rename does not change what it resolves to.
+              if (target && resolvesToTarget(el.name, target)) {
+                violations.push(`${rel}: imports '${name}'${el.propertyName ? ` (as ${el.name.text})` : ''} — resolved by the compiler to its home module (${hit.home}); route through the produce* wrapper instead`)
+              }
+            }
+          }
+        }
+      }
+      if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteralLike(stmt.moduleSpecifier)) {
+        if (stmt.isTypeOnly) continue
+        const resolved = resolveSpecifierToFile(stmt.moduleSpecifier.text, sf.fileName)
+        const hit = resolved ? homeKindOfResolved(resolved) : null
+        if (!hit) continue
+        const clause = stmt.exportClause
+        if (!clause) {
+          violations.push(`${rel}: 'export * from ${JSON.stringify(stmt.moduleSpecifier.text)}' — resolved by the compiler to a restricted home module (${hit.home}); re-exports EVERY name, including its restricted ones`)
+          continue
+        }
+        if (ts.isNamespaceExport(clause)) {
+          violations.push(`${rel}: re-exports the WHOLE namespace of a restricted home module (${hit.home}) as ${clause.name.text} ('export * as ... from'), resolved by the compiler — refused regardless of whether anything downstream ever consumes it`)
+          continue
+        }
+        for (const el of clause.elements) {
+          if (el.isTypeOnly) continue
+          // A re-export's `propertyName`/`name` MUST be a name the SOURCE module actually exports —
+          // since that source module is already confirmed to be a home file, a direct text match
+          // against its five known export names is exact (no deeper symbol hop is needed the way
+          // the named-IMPORT case above needs one for a possible local rename).
+          const originalText = (el.propertyName ?? el.name).text
+          if ((RESTRICTED_NAMES as readonly string[]).includes(originalText) && homeAbsOf[originalText as RestrictedName] === hit.home) {
+            violations.push(`${rel}: re-exports '${originalText}'${el.propertyName ? ` (as ${el.name.text})` : ''} from '${stmt.moduleSpecifier.text}' — resolved by the compiler to its home module (${hit.home})`)
+          }
+        }
+      }
+      if (ts.isImportEqualsDeclaration(stmt) && ts.isExternalModuleReference(stmt.moduleReference) && ts.isStringLiteralLike(stmt.moduleReference.expression)) {
+        const resolved = resolveSpecifierToFile(stmt.moduleReference.expression.text, sf.fileName)
+        const hit = resolved ? homeKindOfResolved(resolved) : null
+        if (hit) {
+          violations.push(`${rel}: 'import ${stmt.name.text} = require(${JSON.stringify(stmt.moduleReference.expression.text)})' — resolved by the compiler to a restricted home module (${hit.home}); an import-equals require hands out the WHOLE namespace, refused regardless of downstream use`)
+        }
+      }
+    }
+  }
+  /** True when `node` (an Identifier) sits in the callee position of a CallExpression whose only
+   *  argument is a plain string literal — the one shape rule 3/the require value-use rule leaves
+   *  alone; every other use of the identifier is refused regardless of what it resolves to. */
+  function isDirectLiteralCallCallee(node: ts.Node): ts.CallExpression | null {
+    const p = node.parent
+    if (p && ts.isCallExpression(p) && p.expression === node && p.arguments.length === 1 && ts.isStringLiteralLike(p.arguments[0])) return p
+    return null
+  }
+  function checkLiteralDynamicTarget(argText: string, containingFile: string, rel: string, kind: 'import' | 'require'): void {
+    const resolved = resolveSpecifierToFile(argText, containingFile)
+    const hit = resolved ? homeKindOfResolved(resolved) : null
+    if (hit && !DYNAMIC_HOME_IMPORT_ALLOWLIST.includes(rel)) {
+      violations.push(`${rel}: literal dynamic ${kind}('${argText}') of a restricted home module (${hit.home}), resolved by the compiler — refused outside the allowlist regardless of what is destructured`)
+    }
+  }
+
   const violations: string[] = []
-  for (const file of rootNames) {
-    const sf = program.getSourceFile(file)
-    if (!sf) continue
+  // RULING V1: "every non-node_modules, non-.d.ts source file IN THE PROGRAM, not only src/
+  // rootNames" — the compiler pulls in any file it can resolve an import to, home-module or not,
+  // inside `src/` or not (the z9/z9b "outside src/" shapes); scanning `program.getSourceFiles()`
+  // instead of the narrower `rootNames` array is what makes those files reachable to the scanner at
+  // all, with no change to which files become ROOTS (still `src/`, plus whatever a shape test adds).
+  const scanSourceFiles = program.getSourceFiles().filter((f) => !/[\\/]node_modules[\\/]/.test(f.fileName) && !f.fileName.endsWith('.d.ts'))
+  for (const sf of scanSourceFiles) {
+    const file = sf.fileName
     const rel = path.relative(process.cwd(), file).replace(/\\/g, '/')
-    const isHome = homeFiles.has(file)
-    if (!isHome) violations.push(...structuralDynamicViolations(sf, rel))
+    const isHome = homeFilesPosix.has(file)
+    if (!isHome) {
+      violations.push(...structuralDynamicViolations(sf, rel))
+      checkModuleBoundaryDeclarations(sf, rel)
+    }
     const visit = (node: ts.Node): void => {
+      // RULING V1, rule 3 (dynamic import) and the require/module.require/createRequire VALUE-USE
+      // rule: a non-literal specifier, or any use of `require`/`module.require`/`createRequire`
+      // other than a direct literal call, is refused ANYWHERE in the program (home-targeted or not
+      // — its target cannot be statically bounded); a literal specifier that DOES resolve to a home
+      // module is refused outside the allowlist. Placed in the SAME recursive walk K8 already runs
+      // (these node kinds can appear anywhere, unlike an import/export declaration).
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        if (node.arguments.length !== 1 || !ts.isStringLiteralLike(node.arguments[0])) {
+          if (!NON_LITERAL_DYNAMIC_IMPORT_ALLOWLIST.includes(rel)) {
+            violations.push(`${rel}: dynamic import(...) has a NON-LITERAL specifier — refused anywhere in the program (not in the allowlist)`)
+          }
+        } else {
+          checkLiteralDynamicTarget((node.arguments[0] as ts.StringLiteralLike).text, sf.fileName, rel, 'import')
+        }
+      }
+      // A bare identifier `require` is skipped when it sits in PROPERTY-NAME position (`x.require`)
+      // — that is not a value reference to Node's `require` at all (any object could happen to have
+      // a property spelled that way); the ONE such combination that IS a real indirection risk,
+      // `module.require`, is matched structurally below instead, by its own PropertyAccessExpression
+      // shape, never by this identifier text alone.
+      if (ts.isIdentifier(node) && node.text === 'require' && !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)) {
+        const directCall = isDirectLiteralCallCallee(node)
+        if (directCall) {
+          checkLiteralDynamicTarget((directCall.arguments[0] as ts.StringLiteralLike).text, sf.fileName, rel, 'require')
+        } else {
+          // Not the sanctioned `require('literal')` direct-call shape — assigned to a variable,
+          // passed as an argument, called with zero/non-literal args, etc. Refused unconditionally;
+          // its target cannot be statically bounded.
+          violations.push(`${rel}: value use of 'require' other than a direct literal call is refused`)
+        }
+      }
+      if (ts.isPropertyAccessExpression(node) && node.name.text === 'require' && ts.isIdentifier(node.expression) && node.expression.text === 'module') {
+        const directCall = isDirectLiteralCallCallee(node)
+        if (directCall) {
+          checkLiteralDynamicTarget((directCall.arguments[0] as ts.StringLiteralLike).text, sf.fileName, rel, 'require')
+        } else {
+          violations.push(`${rel}: value use of 'module.require' other than a direct literal call is refused`)
+        }
+      }
+      if (ts.isIdentifier(node) && node.text === 'createRequire') {
+        violations.push(`${rel}: value use of 'createRequire' is refused — its indirection cannot be statically bounded`)
+      }
       // RULING P8: the KEY need not be a literal NODE — a `const K = '...' as const` used later
       // as `lp[K]` (N13) has an IDENTIFIER argument whose TYPE is the string-literal type.
       if (ts.isElementAccessExpression(node)) {
@@ -1342,7 +1502,7 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
  *  Nothing is ever written to disk; `cleanup` is a no-op kept only so every existing call site's
  *  `const { inputs, cleanup } = scratchCopy(...); try { ... } finally { cleanup() }` shape still
  *  compiles and runs unchanged. */
-function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: string }; extra?: { relPath: string; content: string } | readonly { relPath: string; content: string }[] }): { inputs: EnumerationProgramInputs; cleanup: () => void } {
+function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: string }; extra?: { relPath: string; content: string; notRoot?: boolean } | readonly { relPath: string; content: string; notRoot?: boolean }[]; packageJson?: Record<string, unknown> }): { inputs: EnumerationProgramInputs; cleanup: () => void } {
   const listingPipelineAbs = path.join(SRC_ROOT, 'lib/fba/listingPipeline.ts')
   const composerAbs = path.join(SRC_ROOT, 'lib/fba/itemHighlightComposer.ts')
   const overlay = new Map<string, string>()
@@ -1354,9 +1514,24 @@ function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: 
   const rootNames = getRealRootNamesCached()
   const extras = opts.extra ? (Array.isArray(opts.extra) ? opts.extra : [opts.extra]) : []
   for (const e of extras) {
+    // A `relPath` starting with `../` (e.g. `../ihx/probe.ts`, the z9/z9b "outside src/" shapes)
+    // escapes SRC_ROOT the same way a real relative import would — `path.join` resolves it, it is
+    // never written to disk, and `makeSharedHost`'s overlay + `directoryExists` override (above)
+    // serve it as if it existed there.
     const full = path.join(SRC_ROOT, e.relPath)
     overlay.set(toPosix(full), e.content)
-    rootNames.push(full)
+    // `notRoot: true` (the z9/z9b "reached only by resolution" test) deliberately leaves this file
+    // OUT of `rootNames` — the compiler must find it by resolving another root file's import, which
+    // is exactly the "program.getSourceFiles(), not only rootNames" scope this round's ruling asks
+    // for. Every OTHER extra (an inert barrel nothing imports) still needs the explicit root.
+    if (!e.notRoot) rootNames.push(full)
+  }
+  // RULING V1 (fix round B8b, z10: a package.json "imports" subpath alias): overlay the REPO
+  // ROOT's package.json with synthetic content (never written to disk, never touching the real
+  // file) so `ts.resolveModuleName`'s bundler resolution — which walks UP from the importing file
+  // looking for the nearest package.json's "imports" field — reads the synthetic one instead.
+  if (opts.packageJson) {
+    overlay.set(toPosix(path.join(process.cwd(), 'package.json')), JSON.stringify(opts.packageJson))
   }
   const inputs: EnumerationProgramInputs = { rootNames, options: REAL_OPTIONS, listingPipelineAbs, composerAbs, overlay }
   return { inputs, cleanup: () => {} }
