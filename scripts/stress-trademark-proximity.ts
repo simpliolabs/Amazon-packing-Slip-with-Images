@@ -66,7 +66,6 @@ ok(findTrademarkPhrases('Marvel inspired graphic tee').includes('marvel'), 'Marv
 ok(findTrademarkPhrases('Harvard alumni shirt').includes('harvard'), 'Harvard token flagged')
 
 console.log('[9] singularize helper handles edge cases (no over-strip on short words)')
-import('../src/lib/fba/listingPipeline').then(() => {})
 ok(findTrademarkPhrases('sd cards storage').length === 0,
    'short word "cards" not over-stemmed into something matching')
 ok(findTrademarkPhrases('classes for sports fans').length === 0,
