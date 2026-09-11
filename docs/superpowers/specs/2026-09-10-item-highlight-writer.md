@@ -278,6 +278,39 @@ designs, against 22-44% before, with expected calls per accepted line down from 
    untaught on exactly the families it governs. Every registry entry declares its condition, and a
    fidelity test fails when a check is broader than its sentence.
 
+## 2g. AMENDMENT 2026-09-10 (B6 panel) — MANDATORY units are never filtered, the design name is a persona, and the boundary is the module
+
+*Why.* At `e28c799` the round did not converge (5 distinct Blocking). The new identity-collision
+filter dropped the Comfort Colors unit, and the brand check read the FILTERED list, so unbranded
+lines shipped. A gendered design name ("Ladies Man") made a design unwritable. A relation word
+INSIDE a unit's own text ("Christmas in July Shirt") let a keyword list pass readability. And the
+enumeration test lost an arms race against `any`-typed references.
+
+*The rule:*
+1. **Mandatory units (the identity and the brand) are exempt from every admission filter.** The
+   brand requirement is keyed on the composer's own `needBrand` / `brandPick`, passed in explicitly,
+   never on whichever units survived admission. If the identity itself carries the brand, the
+   identity satisfies the requirement (one carrier). If two mandatory units collide in any other way,
+   the design skips the writer with a named reason: 0 calls, and the composer ships.
+2. **The design name is a persona, not an audience claim.** Its own words are excluded from the
+   gender and Unisex readability checks. Every OTHER unit is admitted only if the full set of
+   line-level checks passes on `identity + ', ' + unit`, using the same predicates the judge uses.
+3. **A relation clause is counted from the arrangement's GLUE parts,** never by scanning the
+   rendered words. A unit whose text happens to contain "in" or "with" is not a relation.
+4. **A garment-head unit is legal only directly after the identity** ("Don't Quit Sweatshirt").
+   Anywhere else it names a second garment or a multi-pack ("Tee and Top").
+5. **The wear fact is list-joined only.** It is a clause, not an attribute noun, so "with Can be worn
+   as Oversized" is ungrammatical and always refused. That construction was 100% of the remaining
+   literal-model rejections.
+6. **The comma is not an English scope boundary for serial lists.** "with a Classic Fit, Deep
+   Pockets and Stretchy Waistband" reads as one relation over a list. The pool units involved pass
+   the admission oracle on tees and crewnecks, and the flag-off picker lists them too, so this is
+   picker-bounded. The feature claims themselves ("Deep Pockets", "Drawstring Hood", "Kangaroo
+   Pocket") are FILED to the admission-oracle programme.
+7. **The writer's door is guarded at the MODULE boundary,** which `any` cannot launder. Outside an
+   allowlist, no file may namespace-import or re-export the producer modules, or import them through
+   a computed specifier. So a module cannot obtain a restricted function value at all.
+
 ## 3. ADVERSARY
 
 - **"The writer will hallucinate a spec."** Provenance makes that a rejection, not a hope: a token
