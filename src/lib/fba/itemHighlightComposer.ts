@@ -111,9 +111,30 @@ export function brandCarrierRegex(allowedBrand: string): RegExp {
   return new RegExp('\\b' + allowedBrand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*') + '\\b', 'i')
 }
 const flattenForBrandMatch = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+/** RULING Q9 (fix round B6, wire Important W8): `flattenForBrandMatch(s).includes(...)` used to be a
+ *  RAW SUBSTRING test on the flattened string — no word boundary at all. With `allowedBrand='Ace'`
+ *  it matched "Peace Shirt" and "Race Day Tee" (both contain the literal characters "ace"), which
+ *  would drop an UNRELATED unit — even the design's own IDENTITY unit ("Ace Design") — as a "second
+ *  brand carrier". Splitting both sides into WORDS and requiring the brand's own word sequence to
+ *  appear as a contiguous run of WHOLE words (never a mid-word substring) keeps every intended catch
+ *  (a separator-spelled second carrier — "Comfort-colors"/"Comfort.Colors"/"Comfort/Colors" all
+ *  flatten every non-alnum RUN to a single space, so the brand's words still line up exactly) while
+ *  refusing every one of these false positives. A jammed no-separator spelling ("ComfortColors") is
+ *  unaffected — it was always caught by `brandCarrierRegex`'s own `\s*` between the brand's words,
+ *  never by this flattened branch. */
+function flattenWords(s: string): string[] {
+  return flattenForBrandMatch(s).split(' ').filter(Boolean)
+}
 export function lineCarriesBrand(s: string, allowedBrand: string): boolean {
   const re = brandCarrierRegex(allowedBrand)
-  return re.test(s) || flattenForBrandMatch(s).includes(flattenForBrandMatch(allowedBrand))
+  if (re.test(s)) return true
+  const brandWords = flattenWords(allowedBrand)
+  if (brandWords.length === 0) return false
+  const words = flattenWords(s)
+  for (let i = 0; i + brandWords.length <= words.length; i++) {
+    if (brandWords.every((w, k) => words[i + k] === w)) return true
+  }
+  return false
 }
 
 /** The deterministic brand phrase when no pool candidate carries the brand: "<Brand> <garment noun>". */

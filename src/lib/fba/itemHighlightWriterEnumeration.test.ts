@@ -644,6 +644,17 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
   }
 
   function resolvesToTarget(node: ts.Node, target: ts.Symbol): boolean {
+    // RULING Q3 (fix round B6, wire Blocking, "X1"): a SHORTHAND property (`{ buildItemHighlights }`
+    // inside an object literal — a dispatch table: `const t = { buildItemHighlights }` then
+    // `t.buildItemHighlights(i)`) resolves its NAME node to the object literal's OWN property
+    // symbol (declared by the ShorthandPropertyAssignment itself), never to the function it pulls
+    // its VALUE from — `getSymbolAtLocation` alone therefore always misses it, no matter how the
+    // alias chain below is walked. `getShorthandAssignmentValueSymbol` is the checker's OWN API for
+    // exactly this: "what does this shorthand's implicit value reference resolve to".
+    if (ts.isIdentifier(node) && ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node) {
+      const valueSym = checker.getShorthandAssignmentValueSymbol(node.parent)
+      if (valueSym === target || (valueSym?.declarations ?? []).some((d) => (target.declarations ?? []).includes(d))) return true
+    }
     let sym: ts.Symbol | undefined = checker.getSymbolAtLocation(node)
     if (!sym) return false
     const seen = new Set<ts.Symbol>()
@@ -711,11 +722,22 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
           spec = (init.expression.arguments[0] as ts.StringLiteralLike).text
         }
         const home = spec ? specifierTargetsHome(spec) : null
-        if (home && home !== sf.fileName) {
+        let flagged = !!home && home !== sf.fileName
+        // RULING Q3 (fix round B6, wire Blocking, "X7"): CLOSE THE CLASS beyond require/dynamic-
+        // import literal specifiers — destructuring directly from a namespace-of-home reference
+        // reached through ANY cast/alias chain (`const { buildItemHighlights: b } = lp as any`)
+        // is the SAME shape, just a different source expression. Structural, via the SAME
+        // `resolvesToNamespaceOfHome` the bracket-access checker below already uses.
+        if (!flagged) {
+          let stripped: ts.Expression = init
+          while (ts.isAsExpression(stripped) || ts.isParenthesizedExpression(stripped) || ts.isNonNullExpression(stripped)) stripped = stripped.expression
+          if ((ts.isIdentifier(stripped) || ts.isPropertyAccessExpression(stripped)) && resolvesToNamespaceOfHome(stripped, 0)) flagged = true
+        }
+        if (flagged) {
           for (const el of (node.name as ts.ObjectBindingPattern).elements) {
             const propName = el.propertyName ?? el.name
             if (ts.isIdentifier(propName) && (RESTRICTED_NAMES as readonly string[]).includes(propName.text)) {
-              out.push(`${rel}: destructures restricted name '${propName.text}' from '${spec}' outside its home module`)
+              out.push(`${rel}: destructures restricted name '${propName.text}'${spec ? ` from '${spec}'` : ' from a namespace-of-home reference'} outside its home module`)
             }
           }
         }
@@ -730,10 +752,33 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
    *  "holder.mod[...]" — RULING P8, N5/N5b) to a namespace import of a restricted home module.
    *  `idNode` may itself be a `PropertyAccessExpression` ("holder.mod"), not only a bare
    *  identifier — every recursive call unwraps `as`/paren/non-null wrappers first. */
+  /** RULING Q3 (fix round B6, wire Blocking): does barrel FILE `barrelSf`, at its TOP LEVEL,
+   *  contain a wildcard re-export (`export * from '<home>'`, no namespace binding at all) whose
+   *  specifier targets home? Used to extend a namespace import of an INTERMEDIATE barrel ("X2",
+   *  `import * as ns from './barrel'` where `barrel.ts` says `export * from '<home>'`) — every one
+   *  of `ns`'s properties for a home export name IS that home export's own symbol, so `ns` is
+   *  namespace-of-home too, even though `ns`'s OWN import specifier names the barrel, not home. */
+  function barrelHasWildcardReexportOfHome(barrelSf: ts.SourceFile): boolean {
+    for (const stmt of barrelSf.statements) {
+      if (ts.isExportDeclaration(stmt) && !stmt.exportClause && stmt.moduleSpecifier
+        && specifierTargetsHome(stmt.moduleSpecifier.getText().replace(/^['"]|['"]$/g, ''))) return true
+    }
+    return false
+  }
   function resolvesToNamespaceOfHome(idNode: ts.Node, depth: number): boolean {
     if (depth > 5) return false
     let node: ts.Node = idNode
     while (ts.isAsExpression(node) || ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) node = node.expression
+    // RULING Q3 (fix round B6, wire Blocking): CLOSE THE CLASS, not the six cases — treat an
+    // expression as reaching home whenever the CHECKER's own TYPE for it IS, or is aliased to, a
+    // home module's namespace type (every module's type-symbol declaration is its OWN SourceFile).
+    // This alone closes X3 (`const m = await import(home)` — TS types the awaited value as
+    // `typeof import(home)` precisely) and X9 (a two-hop barrel re-export preserves the namespace
+    // TYPE across both hops even where the alias-SYMBOL chain might not), with no shape-specific
+    // code for either.
+    const nodeType = checker.getTypeAtLocation(node)
+    const typeSym = nodeType.getSymbol() ?? nodeType.aliasSymbol
+    if (typeSym && (typeSym.declarations ?? []).some((d) => ts.isSourceFile(d) && homeFiles.has(d.fileName))) return true
     const origSym = checker.getSymbolAtLocation(node)
     /** Checks ONE symbol's own declarations for a namespace-of-home shape — never the fully
      *  alias-unwrapped TARGET, which for a plain `import * as X from home` skips PAST the
@@ -741,7 +786,17 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
      *  not a NamespaceImport) and would wrongly report false. */
     const declaresNamespaceOfHome = (sym: ts.Symbol | undefined): boolean => {
       for (const d of sym?.declarations ?? []) {
-        if (ts.isNamespaceImport(d) && specifierTargetsHome((d.parent.parent as ts.ImportDeclaration).moduleSpecifier.getText().replace(/^['"]|['"]$/g, ''))) return true
+        if (ts.isNamespaceImport(d)) {
+          const spec = (d.parent.parent as ts.ImportDeclaration).moduleSpecifier.getText().replace(/^['"]|['"]$/g, '')
+          if (specifierTargetsHome(spec)) return true
+          // RULING Q3 ("X2", plain `export * from` barrel behind a namespace import): the
+          // namespace import targets an INTERMEDIATE local barrel, not home directly — check
+          // whether that barrel's OWN file wildcard-re-exports home.
+          const importSym = checker.getSymbolAtLocation((d.parent.parent as ts.ImportDeclaration).moduleSpecifier)
+          for (const bd of importSym?.declarations ?? []) {
+            if (ts.isSourceFile(bd) && barrelHasWildcardReexportOfHome(bd)) return true
+          }
+        }
         // `export * as X from '<home>'` — the barrel's OWN re-export declaration (N3b).
         if (ts.isNamespaceExport(d) && ts.isExportDeclaration(d.parent) && d.parent.moduleSpecifier
           && specifierTargetsHome(d.parent.moduleSpecifier.getText().replace(/^['"]|['"]$/g, ''))) return true
@@ -766,6 +821,14 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
         let init: ts.Expression = d.initializer
         while (ts.isAsExpression(init) || ts.isParenthesizedExpression(init) || ts.isNonNullExpression(init)) init = init.expression
         if ((ts.isIdentifier(init) || ts.isPropertyAccessExpression(init)) && resolvesToNamespaceOfHome(init, depth + 1)) return true
+        // RULING Q3 ("X5", a namespace passed THROUGH a helper call whose declared return type
+        // WIDENS it, e.g. `function asMap(m: unknown): Record<string,unknown> { return m as any }`
+        // then `const m = asMap(lp)`): the TYPE-based check above cannot see through the widened
+        // return type, so follow the CALL's own ARGUMENTS structurally instead — conservative
+        // (never proves the function forwards the value, only that it COULD), exactly the
+        // "structural, never a spelling regex" discipline this file already uses for require/
+        // dynamic-import destructuring.
+        if (ts.isCallExpression(init) && init.arguments.some((a) => resolvesToNamespaceOfHome(a, depth + 1))) return true
       }
       // RULING P8 (object capture, N5/N5b): a property inside an object LITERAL whose own value
       // (or shorthand binding) is a namespace-of-home identifier/property-access.
@@ -827,6 +890,54 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
     return t.flags & ts.TypeFlags.StringLiteral ? (t as ts.StringLiteralType).value : null
   }
 
+  /** RULING Q3 (fix round B6, wire Blocking, "X6"): `Object.entries(lp).find(([k]) => k ===
+   *  'buildItemHighlights')` puts the restricted name in a BinaryExpression, never as a call
+   *  argument or an element-access key — neither `stringLiteralTypeValue`'s callers nor
+   *  `resolvesToNamespaceOfHome`'s own callers see it. Detected STRUCTURALLY: an enumeration call
+   *  (`Object.entries`/`.keys`/`.values`/`.getOwnPropertyNames`, `Reflect.ownKeys`) whose argument
+   *  resolves to a namespace-of-home, combined ANYWHERE in the same enclosing STATEMENT with a
+   *  restricted-name string literal compared via `==`/`===`/`!=`/`!==` — the general shape "read
+   *  this home module's own key names and test one against a restricted name", not a case written
+   *  for this one probe string. */
+  function objectKeysEnumerationViolations(sf: ts.SourceFile, rel: string): string[] {
+    const out: string[] = []
+    const EQUALITY_OPS: ReadonlySet<ts.SyntaxKind> = new Set([
+      ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken,
+      ts.SyntaxKind.ExclamationEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken,
+    ])
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.arguments.length === 1) {
+        const callee = node.expression
+        const ownerText = ts.isIdentifier(callee.expression) ? callee.expression.text : null
+        const methodName = callee.name.text
+        const isEnumCall = (ownerText === 'Object' && ['entries', 'keys', 'values', 'getOwnPropertyNames'].includes(methodName))
+          || (ownerText === 'Reflect' && methodName === 'ownKeys')
+        if (isEnumCall) {
+          let arg: ts.Expression = node.arguments[0]
+          while (ts.isAsExpression(arg) || ts.isParenthesizedExpression(arg)) arg = arg.expression
+          if ((ts.isIdentifier(arg) || ts.isPropertyAccessExpression(arg)) && resolvesToNamespaceOfHome(arg, 0)) {
+            let stmt: ts.Node = node
+            while (stmt.parent && !ts.isStatement(stmt)) stmt = stmt.parent
+            const scan = (n: ts.Node): void => {
+              if (ts.isBinaryExpression(n) && EQUALITY_OPS.has(n.operatorToken.kind)) {
+                for (const side of [n.left, n.right]) {
+                  if (ts.isStringLiteralLike(side) && (RESTRICTED_NAMES as readonly string[]).includes(side.text)) {
+                    out.push(`${rel}: enumerates a namespace-of-home object's keys (${ownerText}.${methodName}) and compares one to restricted name '${side.text}' — outside its home module`)
+                  }
+                }
+              }
+              ts.forEachChild(n, scan)
+            }
+            scan(stmt)
+          }
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sf)
+    return out
+  }
+
   const violations: string[] = []
   for (const file of rootNames) {
     const sf = program.getSourceFile(file)
@@ -834,6 +945,7 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
     const rel = path.relative(process.cwd(), file).replace(/\\/g, '/')
     const isHome = homeFiles.has(file)
     if (!isHome) violations.push(...structuralDynamicViolations(sf, rel))
+    if (!isHome) violations.push(...objectKeysEnumerationViolations(sf, rel))
     const visit = (node: ts.Node): void => {
       // RULING P8: the KEY need not be a literal NODE — a `const K = '...' as const` used later
       // as `lp[K]` (N13) has an IDENTIFIER argument whose TYPE is the string-literal type.
@@ -905,10 +1017,16 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
 
 /** Copies `SRC_ROOT` into a fresh scratch temp dir (never inside the repo — RULING K8's own
  *  "scratch COPY" instruction), optionally appending `homeAppend` text to one home file (to prove a
- *  new in-home bypass function goes RED) and/or adding one synthetic file at `extraRelPath`
- *  (relative to `src/`) with `extraContent` (to prove an outside-file bypass goes RED). Returns
- *  program inputs pointed at the COPY, and a cleanup function. The real tree is NEVER written. */
-function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: string }; extra?: { relPath: string; content: string } }): { inputs: EnumerationProgramInputs; cleanup: () => void } {
+ *  new in-home bypass function goes RED) and/or adding one or more synthetic files (`extra`, or
+ *  `extraFiles` for a genuine MULTI-FILE shape — RULING Q3, fix round B6: the real `export * as X
+ *  from '<home>'` barrel shape needs a SEPARATE barrel file plus a route that imports the alias, not
+ *  one file pretending to be both) at a path relative to `src/`. Returns program inputs pointed at
+ *  the COPY, and a cleanup function. The real tree is NEVER written. */
+function scratchCopy(opts: {
+  homeAppend?: { rel: 'pipeline' | 'composer'; text: string }
+  extra?: { relPath: string; content: string }
+  extraFiles?: { relPath: string; content: string }[]
+}): { inputs: EnumerationProgramInputs; cleanup: () => void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ihw-enum-k8-'))
   const copyRoot = path.join(dir, 'src')
   fs.cpSync(SRC_ROOT, copyRoot, { recursive: true })
@@ -917,10 +1035,11 @@ function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: 
     fs.appendFileSync(target, '\n' + opts.homeAppend.text)
   }
   const rootNames = listTsFilesFlat(copyRoot)
-  if (opts.extra) {
-    const full = path.join(copyRoot, opts.extra.relPath)
+  const allExtra = [...(opts.extra ? [opts.extra] : []), ...(opts.extraFiles ?? [])]
+  for (const e of allExtra) {
+    const full = path.join(copyRoot, e.relPath)
     fs.mkdirSync(path.dirname(full), { recursive: true })
-    fs.writeFileSync(full, opts.extra.content)
+    fs.writeFileSync(full, e.content)
     rootNames.push(full)
   }
   const inputs: EnumerationProgramInputs = {
@@ -1001,13 +1120,12 @@ describe('RULING K8: the enumeration test detects REFERENCES, not spellings (Typ
     // RULING P8 (fix round B5, wire Blocking 1): the 9 shapes review B4 measured GREEN under K8
     // itself — an `as any` bracket through a namespace import, a typed generic "pick" helper, an
     // object-capture bracket, `Reflect.get` (typed and untyped), and a constkey element access.
-    'exportStarAs-anyBracket': `
-      import * as lpR7 from '@/lib/fba/listingPipeline'
-      export async function POST() {
-        const lpAny = lpR7 as any
-        return lpAny['buildItemHighlights']({})
-      }
-    `,
+    // RULING Q3 (fix round B6, wire Blocking): `exportStarAs-anyBracket` used to live HERE as a
+    // single-file `import * as lpR7` — a PLAIN namespace import, not `export * as`, already caught
+    // by `declaresNamespaceOfHome`'s pre-existing branch, so the alias-hop loop this shape was
+    // named for was never exercised (`test-proves-the-mock`, again). Moved to its own dedicated
+    // TWO-FILE test below (a real barrel + a route consuming its alias), which `extraFiles` can now
+    // express.
     'typed-pick': `
       import * as lp from '@/lib/fba/listingPipeline'
       function pick<M, K extends keyof M>(m: M, k: K): M[K] { return m[k] }
@@ -1038,6 +1156,51 @@ describe('RULING K8: the enumeration test detects REFERENCES, not spellings (Typ
         return (lp as never)[K]({} as never)
       }
     `,
+    // RULING Q3 (fix round B6, wire Blocking): the 6 "new (r8/B5)" shapes review B5 measured GREEN
+    // under K8 itself (§1 of that review). Reproduced VERBATIM from the reviewer's own probe files
+    // (`.../scratchpad/writer/r8-wire/shapes/`), never re-typed loosely.
+    'awaitimport-anyBracket': `
+      export async function POST() {
+        const m = await import('@/lib/fba/listingPipeline')
+        const fn = (m as any)['buildItemHighlights'] as (i: never) => unknown
+        return fn({} as never)
+      }
+    `,
+    'concat-key': `
+      import * as lp from '@/lib/fba/listingPipeline'
+      const K = 'buildItem' + 'Highlights'
+      export async function POST() {
+        const fn = (lp as any)[K] as (i: never) => unknown
+        return fn({} as never)
+      }
+    `,
+    'cast-through-function': `
+      import * as lp from '@/lib/fba/listingPipeline'
+      function asMap(m: unknown): Record<string, (i: never) => unknown> {
+        return m as Record<string, (i: never) => unknown>
+      }
+      const map = asMap(lp)
+      export async function POST() { return map['buildItemHighlights']({} as never) }
+    `,
+    'entries-find': `
+      import * as lp from '@/lib/fba/listingPipeline'
+      export async function POST() {
+        const entry = Object.entries(lp).find(([k]) => k === 'buildItemHighlights')
+        const fn = entry?.[1] as unknown as (i: never) => unknown
+        return fn({} as never)
+      }
+    `,
+    'any-destructure': `
+      import * as lp from '@/lib/fba/listingPipeline'
+      const { buildItemHighlights: b } = lp as any
+      export async function POST() { return (b as (i: never) => unknown)({} as never) }
+    `,
+    // RULING Q3 ("X11", already RED at HEAD — reproduced here for the acceptance's own "all 11 go
+    // RED" instruction, never removed just because it was already caught).
+    'optional-chain': `
+      import * as lp from '@/lib/fba/listingPipeline'
+      export async function POST() { return lp?.buildItemHighlights?.({} as never) }
+    `,
   }
   for (const [name, content] of Object.entries(OUTSIDE_FILE_SHAPES)) {
     it(`sensitivity ("${name}") — an outside-file bypass goes RED in a scratch copy`, () => {
@@ -1048,6 +1211,100 @@ describe('RULING K8: the enumeration test detects REFERENCES, not spellings (Typ
       } finally { cleanup() }
     })
   }
+
+  // RULING Q3 (fix round B6, wire Blocking): the REAL `exportStarAs-anyBracket` shape — a genuine
+  // TWO-FILE barrel (`export * as X from '<home>'`) plus a route that imports the barrel's alias and
+  // brackets it through `as any`. The OLD pin (a single-file `import * as lpR7`) was never this
+  // shape at all — it was a PLAIN namespace import, already caught by `declaresNamespaceOfHome`
+  // before the alias-hop loop this fix round added was ever reached. This shape's own barrel file
+  // resolves `lpR7`'s declaration to a `NamespaceExport` node (`export * as lpR7 from ...`), which
+  // `declaresNamespaceOfHome`'s FIRST check (looking only for `NamespaceImport`) does NOT match —
+  // only the alias-hop loop's `NamespaceExport` branch does, so this pin actually exercises it.
+  it('sensitivity ("exportStarAs-anyBracket", the REAL two-file shape) — a barrel `export * as X` consumed through `as any` goes RED', () => {
+    const barrel = `export * as lpR7 from '@/lib/fba/listingPipeline'`
+    const route = `
+      import { lpR7 } from '../../../../lib/fba/probe-k8-exportStarAs-anyBracket-barrel'
+      export async function POST() {
+        const lpAny = lpR7 as any
+        return lpAny['buildItemHighlights']({})
+      }
+    `
+    const { inputs, cleanup } = scratchCopy({
+      extraFiles: [
+        { relPath: 'lib/fba/probe-k8-exportStarAs-anyBracket-barrel.ts', content: barrel },
+        { relPath: 'app/api/fba/probe-k8-exportStarAs-anyBracket/route.ts', content: route },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `real exportStarAs-anyBracket must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  // Proves the pin above actually exercises the alias-hop loop, per the ruling's own instruction
+  // ("confirm it goes RED, and that it FAILS if the alias-hop loop is removed"): re-running
+  // `declaresNamespaceOfHome`'s FIRST check ALONE (no alias-hop) against the SAME barrel-declared
+  // symbol must NOT see it — proving the loop, not the direct check, is what catches this shape.
+  it('the exportStarAs-anyBracket pin is NOT caught by the direct (non-alias-hop) NamespaceImport/NamespaceExport check alone — proving the alias-hop loop is load-bearing for it', () => {
+    const barrel = `export * as lpR7 from '@/lib/fba/listingPipeline'`
+    const route = `
+      import { lpR7 } from '../../../../lib/fba/probe-k8-exportStarAs-anyBracket-barrel2'
+      export async function POST() {
+        const lpAny = lpR7 as any
+        return lpAny['buildItemHighlights']({})
+      }
+    `
+    const { inputs, cleanup } = scratchCopy({
+      extraFiles: [
+        { relPath: 'lib/fba/probe-k8-exportStarAs-anyBracket-barrel2.ts', content: barrel },
+        { relPath: 'app/api/fba/probe-k8-exportStarAs-anyBracket2/route.ts', content: route },
+      ],
+    })
+    try {
+      const program = ts.createProgram({ rootNames: inputs.rootNames, options: inputs.options })
+      const checker = program.getTypeChecker()
+      const routeSf = program.getSourceFile(inputs.rootNames.find((f) => f.includes('probe-k8-exportStarAs-anyBracket2'))!)!
+      let importedIdentifier: ts.Identifier | null = null
+      const findImport = (n: ts.Node): void => {
+        if (ts.isImportSpecifier(n) && n.name.text === 'lpR7') importedIdentifier = n.name
+        ts.forEachChild(n, findImport)
+      }
+      findImport(routeSf)
+      expect(importedIdentifier).not.toBeNull()
+      const sym = checker.getSymbolAtLocation(importedIdentifier!)
+      // The DIRECT (non-alias-hop) check: does `sym` ITSELF declare a NamespaceImport/NamespaceExport
+      // of the home module? An import SPECIFIER's own symbol is an ALIAS symbol whose declaration is
+      // the ImportSpecifier node, never a NamespaceImport/NamespaceExport — only unwrapping the alias
+      // (the loop) reaches the barrel's `export * as` declaration.
+      const directlyDeclaresNamespace = (sym?.declarations ?? []).some((d) => ts.isNamespaceImport(d) || ts.isNamespaceExport(d))
+      expect(directlyDeclaresNamespace, 'the import specifier symbol itself must NOT directly declare the namespace — only the alias-hop loop reaches it').toBe(false)
+    } finally { cleanup() }
+  })
+
+  // RULING Q3 (fix round B6, wire Blocking, "X2"): a PLAIN `export * from '<home>'` barrel (no
+  // namespace binding at all — every home export is forwarded flattened) consumed via a namespace
+  // import of the BARREL, bracketed through `as any`. Caught only by the OLD `findReExportBypass`
+  // spelling scanner before this round; `barrelHasWildcardReexportOfHome` closes it in K8 itself.
+  it('sensitivity ("starexport-barrel-anyBracket") — a plain `export * from` barrel behind a namespace import + any-bracket goes RED', () => {
+    const barrel = `export * from '@/lib/fba/listingPipeline'`
+    const route = `
+      import * as barrelNs from '../../../../lib/fba/probe-k8-starexport-barrel'
+      export async function POST() {
+        const anyNs = barrelNs as any
+        return anyNs['buildItemHighlights']({})
+      }
+    `
+    const { inputs, cleanup } = scratchCopy({
+      extraFiles: [
+        { relPath: 'lib/fba/probe-k8-starexport-barrel.ts', content: barrel },
+        { relPath: 'app/api/fba/probe-k8-starexport-barrel-route/route.ts', content: route },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `starexport-barrel-anyBracket must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
 
   // RULING P8 (fix round B5, wire Blocking 1, "reflect-typed"/N8b): the SAME Reflect.get mechanism
   // with NO cast at all — TS types `Reflect.get`'s return precisely, so this is the "fully typed,
@@ -1090,6 +1347,49 @@ describe('RULING K8: the enumeration test detects REFERENCES, not spellings (Typ
     try {
       const { violations } = findEnumerationViolations(inputs)
       expect(violations.length, 'mts-helper must be flagged').toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  // RULING Q3 (fix round B6, wire Blocking, "X8", already RED at HEAD — reproduced for the
+  // acceptance's own "all 11 go RED" instruction): a `.mjs` helper, the SAME extension-scan class
+  // as "mts-helper" above.
+  it('sensitivity ("mjs-helper") — a .mjs helper wrapping the builder goes RED (extension scan)', () => {
+    const content = `
+      import { buildItemHighlights } from '@/lib/fba/listingPipeline'
+      export function r8MjsWrap(input) { return buildItemHighlights(input) }
+    `
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'lib/fba/probeK8Helper.mjs', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, 'mjs-helper must be flagged').toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  // RULING Q3 (fix round B6, wire Blocking, "X9"): a TWO-HOP barrel — `barrel1` does `export * as
+  // inner from '<home>'`, `barrel2` does a PLAIN named re-export (`export { inner } from barrel1`),
+  // and the route imports `inner` from barrel2 and brackets it through `as any`. The TYPE-based
+  // check in `resolvesToNamespaceOfHome` closes this: `inner`'s TYPE (not its alias-symbol chain)
+  // is `typeof import('<home>')` across both re-export hops.
+  it('sensitivity ("twohop-barrel-anyBracket") — a barrel re-exporting ANOTHER barrel\'s `export * as` alias goes RED', () => {
+    const barrel1 = `export * as inner from '@/lib/fba/listingPipeline'`
+    const barrel2 = `export { inner } from './probe-k8-x9-barrel1'`
+    const route = `
+      import { inner } from '../../../../lib/fba/probe-k8-x9-barrel2'
+      export async function POST() {
+        const fn = (inner as any)['buildItemHighlights'] as (i: never) => unknown
+        return fn({} as never)
+      }
+    `
+    const { inputs, cleanup } = scratchCopy({
+      extraFiles: [
+        { relPath: 'lib/fba/probe-k8-x9-barrel1.ts', content: barrel1 },
+        { relPath: 'lib/fba/probe-k8-x9-barrel2.ts', content: barrel2 },
+        { relPath: 'app/api/fba/probe-k8-x9-route/route.ts', content: route },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `twohop-barrel-anyBracket must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
     } finally { cleanup() }
   })
 
@@ -1157,6 +1457,29 @@ export function composeItemHighlight(pool: unknown, titles: string[]) {
   const res = composeItemHighlightDetailed(pool as never, titles, {} as never)
   return runIhTail(res.line ?? '', {} as never)
 }
+`,
+    },
+    // RULING Q3 (fix round B6, wire Blocking, "X1"): a SHORTHAND dispatch table INSIDE the home
+    // file itself — `const t = { buildItemHighlights }` then `t.buildItemHighlights(i)` — was
+    // caught only by the OLDER spelling scanners (a bare `buildItemHighlights(` call regex), never
+    // by K8 itself, because the shorthand's symbol is the object literal's OWN property, not the
+    // function. `resolvesToTarget`'s new `getShorthandAssignmentValueSymbol` branch closes it.
+    'home-shorthand-table': {
+      rel: 'pipeline',
+      text: `
+const k8X1Table = { buildItemHighlights }
+export function k8BypassX1(input: Parameters<typeof buildItemHighlights>[0]) {
+  return k8X1Table.buildItemHighlights(input)
+}
+`,
+    },
+    // RULING Q3 ("X10", already RED at HEAD — reproduced for the acceptance's own "all 11 go RED"
+    // instruction): a GETTER returning the builder — no `FunctionDeclaration` encloses the
+    // reference at all, only an accessor.
+    'home-getter': {
+      rel: 'pipeline',
+      text: `
+export const k8X10Holder = { get build() { return buildItemHighlights } }
 `,
     },
   }
