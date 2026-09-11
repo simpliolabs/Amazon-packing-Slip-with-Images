@@ -1691,6 +1691,21 @@ export async function runWriterForDesign(args: {
     console.warn(JSON.stringify({ tag: 'IH_WRITER_SKIP', design: identityTextForBrand, reason: 'mandatory-collision' }))
     return { accepted: false, value: '', reasons: ['skip: mandatory-collision (identity and required brand collide)'], calls: 0 }
   }
+  // RULING D5 (fix round C2, phase-c1-review-pins.md Minor C9.3 / phase-c2-rulings.md D5): the
+  // identity unit is MANDATORY and renders VERBATIM in every arrangement `buildAdmittedUnits` can
+  // ever produce — it is never edited or dropped by the model. When the identity's OWN text already
+  // trips the sentence-punctuation rule (a real "." "!" or "?" — a persona name like "Boss Lady!"),
+  // every possible arrangement's tail refusal is `ihFirstContentRuleViolation`'s SAME
+  // 'sentence-shape' verdict every single retry, for a rule `WRITER_RULE_REGISTRY` never teaches
+  // (there is no taught sentence naming "no sentence punctuation") and the model has no way to act
+  // on (it cannot rewrite or omit the mandatory identity). Ask the ONE source
+  // (`ihContentRuleViolations`, never a copy) whether the identity ALONE already carries that
+  // specific violation — never its generic comma-count violation, which is meaningless for an
+  // isolated single phrase — and skip before spending a call, exactly like the collision skip above.
+  if (identityTextForBrand && ihContentRuleViolations(identityTextForBrand).some((v) => v.reason === 'sentence-shape' && /sentence punctuation/.test(v.message))) {
+    console.warn(JSON.stringify({ tag: 'IH_WRITER_SKIP', design: identityTextForBrand, reason: 'identity-sentence-punctuation' }))
+    return { accepted: false, value: '', reasons: ['skip: identity-sentence-punctuation (identity text itself trips the sentence-punctuation rule; mandatory, cannot be edited by the model)'], calls: 0 }
+  }
 
   const units = buildAdmittedUnits(args.composed, { designName: args.designName, identityPhrases: args.identityPhrases, truthCtx: args.truthCtx })
   // W8: fewer than 2 admitted units, or the best possible join of every unit (no writer could ever

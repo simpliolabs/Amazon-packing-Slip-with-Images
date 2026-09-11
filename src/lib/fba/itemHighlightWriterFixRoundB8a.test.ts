@@ -468,6 +468,13 @@ describe('RULING S2: the wear fact stands alone in its own comma clause', () => 
     expect(exceptEnd, grammarSentence).toBeGreaterThan(exceptStart)
     const exemptionClause = grammarSentence.slice(exceptStart, exceptEnd)
     expect(exemptionClause, exemptionClause).not.toMatch(NO_QUOTED_WEAR_JOIN_RE)
+    // RULING D4 (fix round C2, phase-c1-review-pins.md Minor / phase-c2-rulings.md D4):
+    // `NO_QUOTED_WEAR_JOIN_RE` only catches a QUOTED "&"/"|" token — the ruled property is "no
+    // and/&/—/| token for the wear fact", quoted or bare. Neither raw character has any legitimate
+    // reason to appear in this clause's prose (the opening list-join enumeration that DOES quote
+    // them sits outside `exemptionClause`'s slice), so a direct character check catches an offer
+    // made without quotation marks too (mutation-proved RED under `T4f_bare`).
+    expect(exemptionClause, exemptionClause).not.toMatch(/[&|]/)
     // RULING C9 (fix round C1, value minor m1): the OLD wording ("it is never list-joined to a
     // neighbour either") denied the wear fact EVERY list join, comma included, contradicting rule
     // (3)'s own closing ("the wear fact STANDS ALONE in its own comma clause") and the WEAR_RULE
@@ -485,6 +492,13 @@ describe('RULING S2: the wear fact stands alone in its own comma clause', () => 
       if (!v.ok) {
         expect(v.violation, `${relation}: ${v.violation}`).toMatch(/cannot introduce the wear-fact unit '.*' — the wear fact must stand ALONE in its own "," comma clause/)
         expect(v.violation, `${relation}: ${v.violation}`).not.toMatch(NO_QUOTED_WEAR_JOIN_RE)
+        // RULING D4 (fix round C2, phase-c1-review-pins.md Minor / phase-c2-rulings.md D4): same
+        // bare-token gap as the grammar-sentence pin above — mutation-proved RED under `T4e_bare`.
+        // Scoped to the fixed prose around the interpolated wear-fact unit text (never the unit's
+        // OWN text, which this fixture's "Can be worn as Oversized" never gives an "&"/"|"), so a
+        // regression that put a bare "&"/"|" into the TEMPLATE itself is what this catches.
+        const fixedProse = v.violation.replace('Can be worn as Oversized', '')
+        expect(fixedProse, fixedProse).not.toMatch(/[&|]/)
       }
     }
   })
@@ -988,7 +1002,14 @@ describe('RULING S6: R1\'s produce*-path brand pins, committed through BOTH prod
     try {
       const name = 'Retro Sunset' // non-colliding, does NOT itself carry "Comfort Colors"
       const title = 'THE CEO Tee' // carries neither the design name nor the brand -> needBrand=true
-      const SECOND_BRAND_PHRASE = 'Comfort Colors Weekend Crew'
+      // RULING D1 (fix round C2, phase-c1-review-pins.md Important): flattened, NOT "Comfort Colors"
+      // with a space. The spaced spelling repeats the WORD "Comfort" against the primary carrier
+      // ("Comfort Colors Beach Days"), so under the brand-twice mutant the repeat-word cap refuses
+      // the line FIRST and `BRAND_COUNT` is never evaluated — the `accepted` assertion below goes RED
+      // instead of the ruled `BRAND_COUNT === 1` assertion. "ComfortColors" is a different WORD token
+      // from "Comfort" and from "Colors", so the repeat cap does not fire, while `BRAND_COUNT`'s regex
+      // (`comfort[\s\-._/]*colou?rs?`, zero-or-more separator) still counts it as a carrier.
+      const SECOND_BRAND_PHRASE = 'ComfortColors Weekend Crew'
       const pool = [...POOL.map((k, i) => kw(k, 5000 - i * 10)), kw(POOL_BRAND_PHRASE, 9999), kw(SECOND_BRAND_PHRASE, 9000)]
       const input = {
         finalTitle: title, pool, apparelProduct: true,
