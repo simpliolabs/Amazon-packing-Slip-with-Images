@@ -335,6 +335,15 @@ export async function POST(req: NextRequest) {
     // second, differently-scoped check.
     const capResult = capItemHighlightRepeats((built.value || '').trim(), { contentCtx: { designSeasons, capacityFamily, brandName } })
     if (!capResult.ok) {
+      // RULING W5 (fix round B7b, wire minor 3): this is the THIRD distinct 422 shape (alongside
+      // :278 and the `!hl` branch below) — reached only when the composer's OWN already-floor-
+      // checked output is refused by this defense-in-depth net (a repeat/length budget breach that
+      // slipped past composition). Confirmed correct BY READING (`capItemHighlightRepeats`'s own
+      // refusal contract, `productDetailAttrs.ts`), never behaviourally exercised through this real
+      // route this round — reaching it would require constructing a composer output that itself
+      // passes the composer's floor check yet fails this net, which reaches into composer-internals
+      // territory outside this round's wire-only scope (`Do NOT touch writer logic`). Source-pinned
+      // by design, per the round's own ruling.
       const reason: IhHoldReason = built.hold ?? (capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor')
       // RULING K10 (fix round B4, wire Important I1): the single-design shadow readout, same as the
       // 200 response and the multi-design 422 above.

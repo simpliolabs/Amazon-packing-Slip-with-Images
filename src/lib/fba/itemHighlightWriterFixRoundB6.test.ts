@@ -454,6 +454,18 @@ describe('RULING Q10 (P9\'s own ruled pin): a REAL local HTTP server, dead and s
     kw('funny graphic novelty tee', 450), kw('cute cartoon animal print', 900), kw('retro vintage style clothing', 300),
     kw('cozy everyday casual wear', 250), kw('trendy modern weekend outfit', 5000),
   ]
+  // RULING W3 (fix round B7b, wire Important): the PER-DESIGN test below feeds this SAME `pool` into
+  // `produceItemHighlightsPerDesign` for design keys 'A'/'B' — but `unratedDesignKeys`/`designFitOf`
+  // (themeFitByDesign.ts) rate designs by KEY, not by the flat `themeFit` above, and a row missing a
+  // design's key rating holds that design 'designs-unrated' (0 writer calls) UNCONDITIONALLY, before
+  // the writer is ever reached. Without this, the per-design test below silently never engaged the
+  // writer at all (verified: wall ~15ms, calls:0, unconditionally, regardless of server behaviour) —
+  // a DIFFERENT, and more severe, instance of the "test-proves-the-mock" class than the one Q10/W7
+  // named (a wall-time bound trivially holds when nothing was ever awaited). Every row rated for both
+  // keys (100% share, over the 30% DESIGN_RATED_MIN_SHARE floor) makes the per-design test below a
+  // REAL exercise of the writer; the single-design test above never reads `themeFitByDesign`, so this
+  // addition does not change its behaviour.
+  const perDesignPool: AnalyzedKeyword[] = pool.map((k) => ({ ...k, themeFitByDesign: { A: { fit: 3 }, B: { fit: 3 } } } as unknown as AnalyzedKeyword))
 
   it('single-design path (produceItemHighlights): a DEAD server (hangs, never responds) bounds wall <= deadline + 20000, shipped === composer', async () => {
     const { url, close } = await startServer(() => { /* never respond — the server hangs */ })
@@ -490,12 +502,16 @@ describe('RULING Q10 (P9\'s own ruled pin): a REAL local HTTP server, dead and s
         { key: 'A', designName: 'Sunny Beach Vibes', skus: [{ sku: 'A1', asin: 'B0A0000001' }], titles: ['THE CEO Sunny Beach Vibes Tee'] },
         { key: 'B', designName: 'Cozy Fall Layer', skus: [{ sku: 'B1', asin: 'B0B0000001' }], titles: ['THE CEO Cozy Fall Layer Tee'] },
       ]
-      const input = { groups, pool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: 'Beach Family' }
+      const input = { groups, pool: perDesignPool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: 'Beach Family' }
       const composer = buildItemHighlightsPerDesign(input)
       const client = new OpenAI({ apiKey: 'sk-test-local', baseURL: url, maxRetries: 0 })
       const t0 = Date.now()
       const result = await produceItemHighlightsPerDesign(input, { openai: client })
       const wall = Date.now() - t0
+      // RULING W3 (fix round B7b): non-vacuous — the writer must have actually run for both
+      // designs (never 'designs-unrated', never 0 calls), or the bound below passes trivially.
+      expect(result.writerLog?.length, JSON.stringify(result.writerLog)).toBe(2)
+      for (const row of result.writerLog ?? []) expect(row.calls, JSON.stringify(row)).toBeGreaterThan(0)
       expect(wall, `wall=${wall}ms`).toBeLessThanOrEqual(deadlineMs + 20_000)
       for (const d of result.perDesign) {
         const builtD = composer.perDesign.find((x) => x.designKey === d.designKey)!

@@ -138,6 +138,13 @@ describe('B9: IH_WRITER mode resolution', () => {
     expect(ihWriterMaxCallsBudget('0')).toBe(18)
     expect(ihWriterMaxCallsBudget('-3')).toBe(18)
     expect(ihWriterMaxCallsBudget('bogus')).toBe(18)
+    // RULING W5 (fix round B7b, wire minor 1): strict, like `ihWriterDeadlineMs` below —
+    // `Number.parseInt` alone parses only a PREFIX, so '2.9' silently became 2 and '/api/health'
+    // echoed a value nobody set (review B6/wire, health2.out.txt: "on/-/2.9/1e3 -> 2").
+    expect(ihWriterMaxCallsBudget('2.9')).toBe(18)
+    expect(ihWriterMaxCallsBudget('1e3')).toBe(18)
+    expect(ihWriterMaxCallsBudget('18ms')).toBe(18)
+    expect(ihWriterMaxCallsBudget('  5  ')).toBe(5)
   })
   it('IH_WRITER_RETRY_CAP (the PER-DESIGN retry cap) is 3 — distinct constant from the per-regen budget', () => {
     expect(IH_WRITER_RETRY_CAP).toBe(3)

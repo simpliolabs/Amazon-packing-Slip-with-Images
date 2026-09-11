@@ -71,10 +71,16 @@ export function ihWriterModel(raw: string | undefined = process.env.IH_WRITER_MO
 /** RULING W8 (F7, F9): the PER-REGEN call budget, counted ACROSS designs — distinct from
  *  `IH_WRITER_RETRY_CAP` below (the per-DESIGN retry cap, 1+2). Default 18. Echoed in `/api/health`
  *  so the bound is readable from outside the container, same convention as every other model/count
- *  pin in that route. */
+ *  pin in that route.
+ *  RULING W5 (fix round B7b, wire minor): `Number.parseInt` parses a PREFIX, exactly the P11 defect
+ *  already fixed on `ihWriterDeadlineMs` below — `'2.9'` silently became `2` and `/api/health` echoed
+ *  a value nobody set. Require the trimmed value to be CLEANLY all-digits first, same as the
+ *  deadline; anything else falls back to the default exactly as an absent env var does. */
 export function ihWriterMaxCallsBudget(raw: string | undefined = process.env.IH_WRITER_MAX_CALLS): number {
-  const n = Number.parseInt((raw ?? '').trim(), 10)
-  return Number.isFinite(n) && n > 0 ? n : 18
+  const trimmed = (raw ?? '').trim()
+  if (!/^[0-9]+$/.test(trimmed)) return 18
+  const n = Number.parseInt(trimmed, 10)
+  return n > 0 ? n : 18
 }
 
 /** RULING K10 (fix round B4, wire Important I2): a REGEN-LEVEL wall-time deadline for the
@@ -1430,6 +1436,12 @@ export function buildWriterPrompt(units: readonly AdmittedUnit[], designName: st
  *  never logs the API key — the client comes from `getLlmClientForRequest` (llmGateway.ts), which
  *  resolves it exactly as every other production caller does. Returns the PARSED JSON (or `{}` on any
  *  parse/call failure) — never a text `line`; `judgeWriterArrangement` validates the shape. */
+/** RULING W5 (fix round B7b, wire minor): the sentinel `askWriter` returns when ITS OWN deadline
+ *  check fires — never a real object shape `judgeWriterArrangement`/`parseJsonLoose` could produce,
+ *  so `draft === WRITER_DEADLINE_SKIPPED` is an exact, unambiguous test. A plain module-private
+ *  `Symbol`, not exported. */
+const WRITER_DEADLINE_SKIPPED: unique symbol = Symbol('writer-deadline-skipped')
+
 /** RULING P9 (fix round B5, wire Blocking 2): `deadlineAt` (an absolute epoch-ms bound, ONE per
  *  regen, threaded down from `runWriterForDesign`) bounds THIS call's own SDK request — never only
  *  the loop-level check between retries. When less than the per-call `20_000`ms budget remains, the
@@ -1437,7 +1449,14 @@ export function buildWriterPrompt(units: readonly AdmittedUnit[], designName: st
  *  `AbortSignal.timeout` — the ruling's own "carried as an AbortSignal" wording), so the worst case
  *  per call is `min(20_000, remaining)`, never a full new 20s window after the deadline has all but
  *  passed. When the deadline has ALREADY passed, the call is skipped entirely (no network round
- *  trip spent chasing a result nobody will use). */
+ *  trip spent chasing a result nobody will use).
+ *  RULING W5 (fix round B7b, wire minor): the skip above returns `WRITER_DEADLINE_SKIPPED`, a
+ *  distinct sentinel from the `{}` the catch block below returns on a REAL (attempted, billable)
+ *  failure — `runWriterForDesign`'s retry loop checks for it and does NOT advance `callsMade`,
+ *  because no network round trip happened. Before this, `callsMade = call` ran unconditionally right
+ *  after every `askWriter` return, so the loop-level deadline check (just above THIS call, in the
+ *  retry loop) racing against `askWriter`'s OWN `remainingMs <= 0` check — deadline passes in the
+ *  gap between them — over-counted a call that spent nothing. */
 async function askWriter(
   openai: OpenAI, model: string, units: readonly AdmittedUnit[], designName: string | null,
   priorViolations: readonly string[], deadlineAt?: number, allowedBrand?: string | null,
@@ -1446,7 +1465,7 @@ async function askWriter(
   const remainingMs = deadlineAt !== undefined ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY
   if (remainingMs <= 0) {
     console.warn(`[ih-writer] ${model} call skipped — writer deadline already exceeded`)
-    return {}
+    return WRITER_DEADLINE_SKIPPED
   }
   const callTimeout = Math.max(1, Math.min(20_000, remainingMs))
   try {
@@ -1572,6 +1591,12 @@ export async function runWriterForDesign(args: {
         break
       }
       const draft = await askWriter(openai, model, units, args.designName, priorViolations, args.deadlineAt, args.truthCtx.allowedBrand)
+      if (draft === WRITER_DEADLINE_SKIPPED) {
+        // RULING W5: askWriter's OWN deadline check fired — a race against the loop-level check just
+        // above, never a network round trip, so it is NOT a billable call (callsMade unchanged).
+        reasonsAll.push('skip: writer deadline exceeded mid-call')
+        break
+      }
       callsMade = call
       const verdict = judgeWriterArrangement(draft, units, { truthCtx: args.truthCtx, runTail: args.runTail, needBrand: args.composed.needBrand })
       if (verdict.ok) return { accepted: true, value: verdict.value, reasons: reasonsAll, calls: call }

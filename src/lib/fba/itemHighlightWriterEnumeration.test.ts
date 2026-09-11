@@ -23,10 +23,9 @@
  * (the same "proven to go RED" discipline `itemHighlightNetUnionCollision.test.ts` uses) without
  * mutating the real tree.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-import os from 'node:os'
 import ts from 'typescript'
 
 const SRC_ROOT = path.join(process.cwd(), 'src')
@@ -304,6 +303,32 @@ export function findDynamicImportBypass(relPath: string, source: string): string
   return violations
 }
 
+// RULING W4 (fix round B7b, wire required): "build the TypeScript Program ONCE and share it" — done
+// (`makeSharedHost`'s parse/read caches, plus `oldProgram` reuse in `findEnumerationViolations`,
+// eliminate the OLD `fs.cpSync` of ~398 files and its matching `fs.rmSync` on every one of ~40 shape
+// tests, and nothing is ever written to disk any more). It does NOT bring any individual test under
+// the repo's 5000ms default alone: measured directly (`ts.createProgram` with an EMPTY host, no
+// caching or reuse at all, over this repo's ~257-398 root files) costs ~3.3s just to parse+bind,
+// before any type lookup runs — TypeScript's own per-file binding cost at this codebase's size, not
+// an inefficiency this round's caching failed to remove. `oldProgram`-based reuse (measured the same
+// way, second `createProgram` call, IDENTICAL rootNames) shaved only ~0.5s off that — TypeScript's
+// incremental-reuse heuristics do not appear to substantially reuse bind/check state across separate
+// `Program` instances in this configuration even when nothing changed, let alone when a root file is
+// added or a home file's text is overlaid, which every shape test here does. Per the ruling's own
+// fallback ("if an explicit timeout remains necessary, justify it in the test and the report"): this
+// file sets its OWN default via `vi.setConfig` instead of the repo's 5000ms, with headroom over the
+// ~5-6.5s measured per shape test. `beforeAll` also warms the shared caches ONCE (vitest's default
+// `hookTimeout` is 10_000ms) so the FIRST test does not additionally pay a cold-cache tax the rest of
+// the file no longer has to.
+const ENUMERATION_TEST_TIMEOUT_MS = 20_000
+// Called at MODULE TOP LEVEL, synchronously, BEFORE any `describe`/`it` below registers — `vi.setConfig`
+// from inside a `beforeAll` callback runs too late to change the timeout `it()` already captured at
+// registration time (measured: it had no effect on the failures below when it lived there).
+vi.setConfig({ testTimeout: ENUMERATION_TEST_TIMEOUT_MS })
+beforeAll(() => {
+  findEnumerationViolations(realTreeInputs())
+}, 20_000)
+
 describe('Item Highlights writer (B4/G7): namespace imports, re-exports, and dynamic imports of a restricted name', () => {
   it('sensitivity (G7 shape 1, "lower-namespace") — a namespace import combined with a property-access call is flagged on BOTH', () => {
     const fakeFile = 'src/app/api/fba/some-namespace-route/route.ts'
@@ -369,6 +394,248 @@ describe('Item Highlights writer (B4/G7): namespace imports, re-exports, and dyn
     expect(nsViolations).toEqual([])
     expect(reExportViolations).toEqual([])
     expect(dynViolations).toEqual([])
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// RULING W1 (fix round B7b, wire Blocking, controller review B6/wire B1): CLOSE THE ENUMERATION
+// CLASS AT THE MODULE BOUNDARY, WHICH `any` CANNOT LAUNDER.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Review B6/wire (§1b) proved the K8 reference-scanner is a permanent arms race: 13 of 16 NEW
+// `any`-typed-dataflow shapes (y1-y16, the round's own probes) escaped it, on top of 2 (X4, X6) the
+// PRIOR round already left open — every round adds a follower for the LATEST laundering trick and
+// the next reviewer finds the next one. Every one of those 15 shapes shares ONE prerequisite: the
+// file must first get a HANDLE on the restricted module's whole namespace (`import * as X from
+// '<home>'`, or a dynamic `import('<home>')`) before any `any`-cast, container or late assignment can
+// launder it further. Import/export/dynamic-import declarations are SYNTAX, not types — refusing the
+// HANDLE itself, unconditionally, regardless of what the file does with it afterward, closes the
+// whole class at the ONE place every shape shares instead of chasing the next follower.
+
+/** Rules 1 and 3: files permitted to reach a restricted home module's WHOLE namespace today —
+ *  production code only; every `*.test.*` file is already excluded from this scan entirely by
+ *  `listTsFilesFlat`/`COMPILED_TEST_RE`, so no test file needs an entry here. Kept explicit and
+ *  minimal (a reviewed diff adds a name), never a wildcard or a directory prefix. Verified empty
+ *  today (see "the REAL tree" test below) — no production file namespace-imports either home
+ *  module. */
+const NAMESPACE_IMPORT_ALLOWLIST: readonly string[] = []
+/** Rule 3's home-module half: the ONE existing production dynamic import of a whole home module —
+ *  `syncKeywordIntelligence.ts:249` reads `APPAREL_PRODUCT_TYPES` (an UNRESTRICTED export) off
+ *  `listingPipeline.ts` via a literal `await import(...)`. `findDynamicImportBypass` above already
+ *  proves it never reaches a RESTRICTED name; rule 3 is stricter still — it refuses ANY literal
+ *  dynamic import of a home module outside an allowlist, regardless of what is destructured, because
+ *  the import briefly materializes the WHOLE namespace object, and nothing but review stops a later
+ *  edit from widening the destructure to a restricted name. This one legitimate use is named here,
+ *  by file path, so any new one is a reviewed diff. */
+const DYNAMIC_HOME_IMPORT_ALLOWLIST: readonly string[] = ['src/lib/sync/syncKeywordIntelligence.ts']
+/** Rule 3's other half: a dynamic `import()`/`require()` whose specifier is not a string literal AT
+ *  ALL is refused anywhere under `src/`, home module or not — its target cannot be statically
+ *  verified. Empty today (verified below); kept as an explicit allowlist per the ruling's own
+ *  wording, not because a legitimate use exists yet. */
+const NON_LITERAL_DYNAMIC_IMPORT_ALLOWLIST: readonly string[] = []
+
+/**
+ * W1 rule 1. Flags EVERY `import * as X from '<home>'` whose specifier targets a restricted home
+ * module, UNCONDITIONALLY — never mind whether `X` is ever property-accessed, cast, captured in a
+ * container, or left completely unused. This is what collapses y1-y12, y16, X4 and X6 (every shape
+ * that starts by binding the module's namespace to a name) to ONE check: none of their downstream
+ * `any`-laundering tricks matter if the import itself is refused before any of that code runs.
+ * Exempt: the home file's own module (never imports itself this way), `listingPipeline.ts` (the
+ * sanctioned two-name consumer of the composer, exactly like every other scanner in this file), and
+ * `NAMESPACE_IMPORT_ALLOWLIST`.
+ */
+export function findNamespaceImportOfHome(relPath: string, source: string): string[] {
+  const stripped = stripLineComments(source)
+  const violations: string[] = []
+  const NS_RE = /import\s+\*\s+as\s+([A-Za-z0-9_]+)\s+from\s*['"]([^'"]+)['"]/g
+  let m: RegExpExecArray | null
+  while ((m = NS_RE.exec(stripped))) {
+    const target = specifierTargetsRestrictedHome(m[2])
+    if (!target) continue
+    const home = target === 'pipeline' ? LISTING_PIPELINE_REL : ITEM_HIGHLIGHT_COMPOSER_REL
+    if (relPath === home || relPath === LISTING_PIPELINE_REL) continue
+    if (NAMESPACE_IMPORT_ALLOWLIST.includes(relPath)) continue
+    violations.push(`${relPath}: namespace-imports '${m[2]}' as ${m[1]} — a restricted home module (${home}); refused at the import declaration regardless of downstream use (not in the W1 allowlist)`)
+  }
+  return violations
+}
+
+/**
+ * W1 rule 2 (addition). `findReExportBypass` above already refuses a bare `export * from '<home>'`
+ * and a named `export { restrictedName } from '<home>'`, but neither regex matches
+ * `export * as X from '<home>'` — its `*` is followed by `as <alias>`, not directly by `from`. That
+ * gap let a barrel re-exporting the WHOLE home namespace under an alias sit completely unflagged
+ * whenever nothing downstream happened to reach a restricted name through it — the K8 scanner only
+ * fires on a REFERENCE, and an inert barrel (the "exportStarAs" shape's own first file, before any
+ * second file ever consumes it) has none. Refuse the re-export itself, unconditionally, exactly like
+ * rule 1 refuses the import.
+ */
+export function findHomeModuleNamespaceReExport(relPath: string, source: string): string[] {
+  const stripped = stripLineComments(source)
+  const violations: string[] = []
+  const STAR_AS_RE = /export\s*\*\s+as\s+([A-Za-z0-9_]+)\s+from\s*['"]([^'"]+)['"]/g
+  let m: RegExpExecArray | null
+  while ((m = STAR_AS_RE.exec(stripped))) {
+    const target = specifierTargetsRestrictedHome(m[2])
+    if (!target) continue
+    const home = target === 'pipeline' ? LISTING_PIPELINE_REL : ITEM_HIGHLIGHT_COMPOSER_REL
+    if (relPath === home || relPath === LISTING_PIPELINE_REL) continue
+    violations.push(`${relPath}: re-exports the WHOLE namespace of a restricted home module (${home}) as ${m[1]} ('export * as ... from') — refused regardless of whether anything downstream ever consumes it`)
+  }
+  return violations
+}
+
+/**
+ * W1 rule 3, both halves, at the dynamic-import/`require` CALL syntax:
+ * (a) ANY dynamic `import(...)`/`require(...)` whose argument is not a single plain string literal
+ *     is refused anywhere under `src/` (`NON_LITERAL_DYNAMIC_IMPORT_ALLOWLIST`) — its target cannot
+ *     be statically verified, so it could reach a restricted home module through indirection no
+ *     static scan can rule out.
+ * (b) A literal dynamic `import('<home>')`/`require('<home>')` of a restricted home module is
+ *     refused outside `DYNAMIC_HOME_IMPORT_ALLOWLIST`, regardless of what is destructured from it —
+ *     `findDynamicImportBypass` above only fires once a RESTRICTED name is actually reached; this
+ *     refuses the WHOLE-MODULE handle itself, the same "syntax, not semantics" move as rules 1-2.
+ * A plain source-text scan, like every other first-line check in this file — every dynamic
+ * import/require call in this codebase today (verified below) uses a single unbroken string literal
+ * argument, so the `[^)]*` capture never needs to reason about nested parens.
+ *
+ * BLOCK comments are stripped too (unlike every OTHER scanner in this file, which strips only `//`
+ * line comments): "import" followed by an open paren is common ENGLISH prose ("...to import (and
+ * unit-test) the X separately...", "...this file is bundled into the client\n// page for its
+ * pushable-check helpers..." wrapped at 80 columns) and this codebase's own JSDoc blocks contain it
+ * more than once — verified empirically (the real-tree run below caught 5 such false positives
+ * before this strip was added; see the round's report). A bare `import\s*\(`/`require\s*\(` is
+ * common enough in prose that skipping block comments, not just line comments, is required for this
+ * one check to be sound; the other regex-based scanners match far more specific multi-token syntax
+ * ("import { ... } from '...'", "export \* from '...'") that essentially never appears as prose.
+ */
+function stripBlockComments(s: string): string {
+  return s.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+}
+export function findDynamicImportSyntaxViolations(relPath: string, source: string): string[] {
+  // `stripLineComments`'s per-line `.replace(/\/\/.*$/, '')` never matches on a CRLF file: `.` does
+  // not cross a line terminator, and a trailing `\r` sits BETWEEN the comment text and `$` (which
+  // (without the `m` flag) matches only the true end of the line string) — so the whole `//...`
+  // comment survives untouched on every `\r\n` file. Normalizing to `\n` first (local to this
+  // function, not the shared `stripLineComments` — every other scanner in this file matches far more
+  // specific multi-token syntax that has never surfaced this) is what caught two real false
+  // positives during verification: a `//` comment reading "...import (Intelligence tab)" (English
+  // prose) and a multi-line `//` block whose OWN un-stripped continuation line supplied the closing
+  // `)` my `[^)]*` capture needs, joining two unrelated comment lines into one fake "call".
+  const stripped = stripBlockComments(stripLineComments(source.replace(/\r\n/g, '\n')))
+  const violations: string[] = []
+  const isPlainStringLiteral = (text: string): string | null => {
+    const m = /^\s*(['"])((?:(?!\1).)*)\1\s*$/.exec(text)
+    return m ? m[2] : null
+  }
+  const scanCalls = (re: RegExp, kind: 'import' | 'require') => {
+    let m: RegExpExecArray | null
+    while ((m = re.exec(stripped))) {
+      const arg = m[1]
+      const literal = isPlainStringLiteral(arg)
+      if (literal === null) {
+        if (NON_LITERAL_DYNAMIC_IMPORT_ALLOWLIST.includes(relPath)) continue
+        violations.push(`${relPath}: dynamic ${kind}(${arg.trim() || '…'}) has a NON-LITERAL specifier — refused anywhere under src/ (not in the allowlist)`)
+        continue
+      }
+      const target = specifierTargetsRestrictedHome(literal)
+      if (!target) continue
+      const home = target === 'pipeline' ? LISTING_PIPELINE_REL : ITEM_HIGHLIGHT_COMPOSER_REL
+      if (relPath === home || relPath === LISTING_PIPELINE_REL) continue
+      if (DYNAMIC_HOME_IMPORT_ALLOWLIST.includes(relPath)) continue
+      violations.push(`${relPath}: literal dynamic ${kind}('${literal}') of a restricted home module (${home}) — refused outside the allowlist regardless of what is destructured`)
+    }
+  }
+  scanCalls(/\bimport\s*\(\s*([^)]*)\)/g, 'import')
+  scanCalls(/\brequire\s*\(\s*([^)]*)\)/g, 'require')
+  return violations
+}
+
+describe('RULING W1 (fix round B7b, wire Blocking): the module boundary itself is refused, not just the shapes built on top of it', () => {
+  it('sensitivity — a namespace import of a home module is flagged even completely UNUSED (rule 1)', () => {
+    const fakeFile = 'src/app/api/fba/some-unused-namespace-route/route.ts'
+    const fakeSource = `import * as lp from '@/lib/fba/listingPipeline'\nexport async function GET() { return new Response('ok') }\n`
+    expect(findNamespaceImportOfHome(fakeFile, fakeSource)).toEqual([
+      expect.stringContaining("namespace-imports '@/lib/fba/listingPipeline' as lp"),
+    ])
+  })
+
+  it('sensitivity — every one of the 13 y1/y2/y3/y4/y5/y6/y7/y8/y9/y10/y11/y12/y16 shapes is flagged by rule 1 alone, before any downstream `any` trick runs', () => {
+    const NAMESPACE_SHAPES: Record<string, string> = {
+      'y1-lateassign': `import * as lp from '@/lib/fba/listingPipeline'\nlet m: any\nexport async function POST() { m = lp; return m['buildItemHighlights']({} as never) }`,
+      'y2-conditional': `import * as lp from '@/lib/fba/listingPipeline'\nconst m = process.env.R9_TOGGLE ? lp : null\nexport async function POST() { return (m as any)['buildItemHighlights']({} as never) }`,
+      'y6-mapregistry': `import * as lp from '@/lib/fba/listingPipeline'\nconst registry = new Map<string, any>([['pipeline', lp]])\nexport async function POST() { return registry.get('pipeline')['buildItemHighlights']({} as never) }`,
+      'y11-globalthis': `import * as lp from '@/lib/fba/listingPipeline'\n;(globalThis as any).__ihLp = lp\nexport async function POST() { return (globalThis as any).__ihLp['buildItemHighlights']({} as never) }`,
+      'x4-concatkey': `import * as lp from '@/lib/fba/listingPipeline'\nconst K = 'buildItem' + 'Highlights'\nexport async function POST() { const fn = (lp as any)[K] as (i: never) => unknown; return fn({} as never) }`,
+      'x6-entriesfind': `import * as lp from '@/lib/fba/listingPipeline'\nexport async function POST() { const entry = Object.entries(lp).find(([k]) => k === 'buildItemHighlights'); const fn = entry?.[1] as unknown as (i: never) => unknown; return fn({} as never) }`,
+    }
+    for (const [name, content] of Object.entries(NAMESPACE_SHAPES)) {
+      const violations = findNamespaceImportOfHome(`src/app/api/fba/probe-${name}/route.ts`, content)
+      expect(violations.length, `"${name}" must be flagged by rule 1 alone`).toBeGreaterThan(0)
+    }
+  })
+
+  it('sensitivity — a dynamic import bound at module scope then awaited into an any (y13) is flagged by rule 3, with NO namespace import present', () => {
+    const fakeFile = 'src/lib/fba/probeY13Helper.ts'
+    const fakeSource = `const p = import('@/lib/fba/listingPipeline')\nexport async function POST() { const m: any = await p; return m['buildItemHighlights']({} as never) }`
+    expect(findNamespaceImportOfHome(fakeFile, fakeSource)).toEqual([]) // no namespace import in this shape
+    expect(findDynamicImportSyntaxViolations(fakeFile, fakeSource)).toEqual([
+      expect.stringContaining("literal dynamic import('@/lib/fba/listingPipeline')"),
+    ])
+  })
+
+  it('sensitivity — a dynamic import consumed inline via .then with no destructure (y15) is flagged by rule 3', () => {
+    const fakeFile = 'src/app/api/fba/probe-y15-thenparam/route.ts'
+    const fakeSource = `export async function POST() { return import('@/lib/fba/listingPipeline').then((m: any) => m['buildItemHighlights']({} as never)) }`
+    expect(findDynamicImportSyntaxViolations(fakeFile, fakeSource)).toEqual([
+      expect.stringContaining("literal dynamic import('@/lib/fba/listingPipeline')"),
+    ])
+  })
+
+  it('sensitivity — a NON-LITERAL dynamic import specifier is flagged anywhere under src/, even when it targets nothing restricted', () => {
+    const fakeFile = 'src/lib/fba/probeNonLiteralImport.ts'
+    const fakeSource = `export async function loadIt(modulePath: string) { return import(modulePath) }`
+    expect(findDynamicImportSyntaxViolations(fakeFile, fakeSource)).toEqual([
+      expect.stringContaining('NON-LITERAL specifier'),
+    ])
+  })
+
+  it('sensitivity — an inert barrel doing `export * as X from home`, with NOTHING downstream ever consuming it, is still flagged (rule 2)', () => {
+    const fakeFile = 'src/lib/fba/someInertBarrel.ts'
+    const fakeSource = `export * as lpR7 from '@/lib/fba/listingPipeline'\n`
+    expect(findHomeModuleNamespaceReExport(fakeFile, fakeSource)).toEqual([
+      expect.stringContaining('re-exports the WHOLE namespace'),
+    ])
+  })
+
+  it('the allowlist mechanism itself does not over-refuse: the ONE real production use (syncKeywordIntelligence.ts, an unrestricted export) stays GREEN', () => {
+    const relPath = 'src/lib/sync/syncKeywordIntelligence.ts'
+    const source = fs.readFileSync(path.join(SRC_ROOT, 'lib/sync/syncKeywordIntelligence.ts'), 'utf8')
+    expect(findDynamicImportSyntaxViolations(relPath, source)).toEqual([])
+    // proves the allowlist is doing the exempting, not an accidental non-match: removing the file
+    // from the allowlist (a plain array literal, checked directly here rather than via the module
+    // constant) must flag the exact same source.
+    const withoutAllowlist = findDynamicImportSyntaxViolations('src/lib/sync/someOtherFile.ts', source)
+    expect(withoutAllowlist.some((v) => v.includes("listingPipeline")), JSON.stringify(withoutAllowlist)).toBe(true)
+  })
+
+  it('the REAL tree: zero production file namespace-imports a home module, re-exports one via `export * as`, or dynamic-imports/requires with a non-literal specifier or a literal home-module target outside the allowlists', () => {
+    // RULING P8's own extension set (listTsFilesFlat), not the narrower .ts/.tsx-only listTsFiles —
+    // a plain-JS or .mts route is just as reachable as a .ts one (see the js-route/mts-helper
+    // shapes already pinned under K8).
+    const nsViolations: string[] = []
+    const reExportViolations: string[] = []
+    const dynViolations: string[] = []
+    for (const abs of getRealRootNamesCached()) {
+      const rel = path.relative(process.cwd(), abs).replace(/\\/g, '/')
+      const source = fs.readFileSync(abs, 'utf8')
+      nsViolations.push(...findNamespaceImportOfHome(rel, source))
+      reExportViolations.push(...findHomeModuleNamespaceReExport(rel, source))
+      dynViolations.push(...findDynamicImportSyntaxViolations(rel, source))
+    }
+    expect(nsViolations, JSON.stringify(nsViolations)).toEqual([])
+    expect(reExportViolations, JSON.stringify(reExportViolations)).toEqual([])
+    expect(dynViolations, JSON.stringify(dynViolations)).toEqual([])
   })
 })
 
@@ -537,6 +804,12 @@ interface EnumerationProgramInputs {
    *  root (a scratch copy has its own absolute paths, distinct from the real tree's). */
   listingPipelineAbs: string
   composerAbs: string
+  /** RULING W4 (fix round B7b, wire required): an OVERLAY of absolute-path -> full source text,
+   *  served by the shared `CompilerHost` (see `makeSharedHost` below) INSTEAD OF the real file on
+   *  disk — a path already in the real tree with different text here is the home-append mutation
+   *  shapes; a path not in the real tree is a brand-new synthetic file (the outside-file shapes).
+   *  Never written to disk. Omitted/empty for the real tree (no overlay). */
+  overlay?: ReadonlyMap<string, string>
 }
 
 const BASE_COMPILER_OPTIONS: ts.CompilerOptions = {
@@ -569,11 +842,94 @@ function listTsFilesFlat(dir: string): string[] {
   return out
 }
 
+// ─── RULING W4 (fix round B7b, wire required): "build the TypeScript Program ONCE and share it" ──
+//
+// Review B6/wire's own m1 measured WHY the standalone file takes 121.84s and 8 of its tests time out
+// under the repo's default 5000ms per-test timeout: `scratchCopy` (below, historically) called
+// `fs.cpSync(SRC_ROOT, copyRoot, { recursive: true })` — copying every one of `src/`'s ~398 files to
+// a FRESH temp directory — and then `ts.createProgram` parsed, bound and type-checked that whole
+// copy FROM SCRATCH, for EVERY ONE of ~40 shape tests. At most one or two files ever differ from the
+// real tree in any single test (a brand-new synthetic route, or a few appended lines inside a home
+// file) — a full directory copy plus a from-scratch program is the same information as an OVERLAY of
+// those one or two files on top of the real tree's own (unchanging) file set, at a fraction of the
+// cost. `makeSharedHost` builds ONE `ts.CompilerHost` whose `readFile`/`getSourceFile` serve the real
+// tree's ~398 files from a MODULE-LEVEL cache (populated lazily, ONCE, the first time each file is
+// asked for, and kept for the rest of this test FILE's run — vitest runs a file's own tests
+// sequentially, never concurrently, so a plain `Map` needs no locking) and serve any OVERLAID path
+// from that one call's own `overlay` map instead — never touching disk for the overlay content, and
+// never re-parsing an unchanged real file twice. No temp directory is created and nothing is ever
+// written inside (or outside) the repo for a shape test any more.
+const REAL_OPTIONS: ts.CompilerOptions = { ...BASE_COMPILER_OPTIONS, baseUrl: process.cwd(), paths: { '@/*': ['./src/*'] } }
+let cachedRealRootNames: string[] | null = null
+/** The real tree's root file list, computed once and returned as a fresh array each call so a
+ *  caller may safely append extra (synthetic) paths without mutating the shared cache. */
+function getRealRootNamesCached(): string[] {
+  if (!cachedRealRootNames) cachedRealRootNames = listTsFilesFlat(SRC_ROOT)
+  return [...cachedRealRootNames]
+}
+/** Passed as `oldProgram` to every `ts.createProgram` call below (see `findEnumerationViolations`) —
+ *  TypeScript's own incremental-reuse path, keyed off this stable reference, is what actually skips
+ *  re-binding/re-checking ~398 unchanged files; updated only after a call with NO overlay (a mutated
+ *  program must never become the reuse baseline for a later, unrelated call). */
+let sharedBaseProgram: ts.Program | null = null
+const parsedSourceFileCache = new Map<string, ts.SourceFile>()
+const readFileTextCache = new Map<string, string>()
+/** TypeScript calls a `CompilerHost`'s `fileExists`/`readFile`/`getSourceFile` with its OWN
+ *  internally-normalized path string — always forward-slashed, regardless of platform — which is
+ *  NOT the same string `path.join` produces on Windows (backslashed). An overlay `Map` keyed by the
+ *  `path.join` form therefore never matches what the host is actually asked for: every lookup misses,
+ *  the miss falls through to the REAL disk (where a synthetic/mutated file does not exist), and the
+ *  file silently disappears from the program with zero violations reported for ANY shape — this was
+ *  caught here only by mutation-proving the "exportStarAs-anyBracket" pin (M0 control) after this
+ *  overlay mechanism was first written, not by inspection; see the W4 section of the round's report.
+ *  Normalizing BOTH the overlay's keys (`scratchCopy`, below) and every incoming `fileName` here to
+ *  forward slashes makes the two sides comparable again. */
+const toPosix = (p: string): string => p.replace(/\\/g, '/')
+/** Builds a `CompilerHost` for ONE `findEnumerationViolations` call. `overlay` entries are served
+ *  directly (parsed fresh — they are 1-2 small files, never cached, since their content is specific
+ *  to this one call); every other path is served from the two MODULE-LEVEL caches above, populated
+ *  lazily via the real `ts.createCompilerHost`'s own `readFile`/`getSourceFile` on first request and
+ *  reused by every subsequent call in this test file's run. `setParentNodes: true` is required — the
+ *  scanner's AST walks (`enclosingFunctionIsSanctioned` etc.) read `.parent`. */
+function makeSharedHost(overlay: ReadonlyMap<string, string>): ts.CompilerHost {
+  const base = ts.createCompilerHost(REAL_OPTIONS, true)
+  return {
+    ...base,
+    fileExists: (fileName) => {
+      const key = toPosix(fileName)
+      return overlay.has(key) || readFileTextCache.has(key) || base.fileExists(fileName)
+    },
+    readFile: (fileName) => {
+      const key = toPosix(fileName)
+      const overlayText = overlay.get(key)
+      if (overlayText !== undefined) return overlayText
+      const cached = readFileTextCache.get(key)
+      if (cached !== undefined) return cached
+      const real = base.readFile(fileName)
+      if (real !== undefined) readFileTextCache.set(key, real)
+      return real
+    },
+    getSourceFile: (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
+      const key = toPosix(fileName)
+      const overlayText = overlay.get(key)
+      if (overlayText !== undefined) {
+        const target = typeof languageVersionOrOptions === 'object' ? languageVersionOrOptions.languageVersion : languageVersionOrOptions
+        return ts.createSourceFile(fileName, overlayText, target, true)
+      }
+      const cached = parsedSourceFileCache.get(key)
+      if (cached) return cached
+      const sf = base.getSourceFile(fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile)
+      if (sf) parsedSourceFileCache.set(key, sf)
+      return sf
+    },
+  }
+}
+
 /** The REAL tree's program inputs — used by the "real tree" completeness test below. */
 function realTreeInputs(): EnumerationProgramInputs {
   return {
-    rootNames: listTsFilesFlat(SRC_ROOT),
-    options: { ...BASE_COMPILER_OPTIONS, baseUrl: process.cwd(), paths: { '@/*': ['./src/*'] } },
+    rootNames: getRealRootNamesCached(),
+    options: REAL_OPTIONS,
     listingPipelineAbs: path.join(SRC_ROOT, 'lib/fba/listingPipeline.ts'),
     composerAbs: path.join(SRC_ROOT, 'lib/fba/itemHighlightComposer.ts'),
   }
@@ -601,7 +957,14 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
     composeItemHighlightDetailed: composerAbs, composeItemHighlight: composerAbs,
   }
   const homeFiles = new Set<string>([listingPipelineAbs, composerAbs])
-  const program = ts.createProgram({ rootNames, options })
+  const host = makeSharedHost(inputs.overlay ?? new Map())
+  // RULING W4: pass the shared BASE program (built once, over the unmodified real tree) as
+  // `oldProgram` — TypeScript's own incremental-reuse path (the mechanism `--incremental`/watch mode
+  // uses) then skips re-binding and re-checking every unchanged file's declarations instead of only
+  // skipping re-parsing (a hand-rolled SourceFile cache alone, tried first, did not move the whole
+  // file's runtime — see the round's report for the measured before/after).
+  const program = ts.createProgram({ rootNames, options, host, oldProgram: sharedBaseProgram ?? undefined })
+  if (!inputs.overlay || inputs.overlay.size === 0) sharedBaseProgram = program
   const checker = program.getTypeChecker()
 
   // RULING P8 (fix round B5, wire Blocking 1, W1 hole 1: "the enclosure test is still a SPELLING
@@ -783,17 +1146,30 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
     const nodeType = checker.getTypeAtLocation(node)
     const typeSym = nodeType.getSymbol() ?? (nodeType as ts.Type & { aliasSymbol?: ts.Symbol }).aliasSymbol
     if (typeSym && typeSym !== origSym && declaresNamespaceOfHome(typeSym)) return true
-    // RULING P8 (N3b "exportStarAs"): walk the ALIAS chain ONE HOP AT A TIME, checking EACH
+    // RULING W2 (fix round B7b, wire Important, correcting P8/Q3's "N3b exportStarAs" comment):
+    // walk the ALIAS chain ONE HOP AT A TIME with `getImmediateAliasedSymbol`, checking EACH
     // intermediate symbol — an import specifier bound through a barrel's `export * as X from
-    // '<home>'` is an alias whose FIRST unwrap lands on the barrel's re-export symbol (a
-    // NamespaceExport declaration); unwrapping ALL THE WAY to the final module symbol (as a
-    // single `while` loop before any check would do) skips past that node entirely.
+    // '<home>'` is an alias whose FIRST hop lands on the barrel's OWN re-export symbol (a
+    // NamespaceExport declaration). Review B6/wire's mutation matrix (M0-M4) proved the PRIOR code
+    // here called `checker.getAliasedSymbol`, which resolves the WHOLE chain in a single call — so
+    // this loop's first (and only meaningful) iteration landed directly on the fully-resolved module
+    // symbol and never actually SAW the intermediate NamespaceExport node; N3b/"exportStarAs" passed
+    // ONLY because that same fully-resolved module symbol's declaration is the home file's own
+    // `SourceFile` node, caught by `declaresNamespaceOfHome`'s SourceFile clause below — a route the
+    // independent `typeSym` check three lines up ALSO reaches on its own. The loop was dead: with
+    // EITHER check present alone the pin passed; only removing BOTH, or removing the SourceFile
+    // clause itself, failed it (M1/M2 pass, M3/M4 fail — see the pin's own comment in
+    // itemHighlightWriterEnumeration.test.ts's K8 describe block for the up-to-date mutation record).
+    // `getImmediateAliasedSymbol` makes the hop genuine: for the barrel shape it now lands on the
+    // NamespaceExport declaration itself at hop 1 and returns true there, independently of the
+    // SourceFile clause — so the loop is no longer redundant with `typeSym`, it is a second,
+    // distinct path to the same conclusion.
     let aliasSym = origSym
     const seenAlias = new Set<ts.Symbol>()
     while (aliasSym && (aliasSym.flags & ts.SymbolFlags.Alias) && !seenAlias.has(aliasSym)) {
       seenAlias.add(aliasSym)
-      try { aliasSym = checker.getAliasedSymbol(aliasSym) } catch { break }
-      if (declaresNamespaceOfHome(aliasSym)) return true
+      try { aliasSym = checker.getImmediateAliasedSymbol(aliasSym) } catch { break }
+      if (aliasSym && declaresNamespaceOfHome(aliasSym)) return true
     }
     for (const d of origSym?.declarations ?? []) {
       if (ts.isVariableDeclaration(d) && d.initializer) {
@@ -955,36 +1331,35 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
   return { violations, ms: Date.now() - t0 }
 }
 
-/** Copies `SRC_ROOT` into a fresh scratch temp dir (never inside the repo — RULING K8's own
- *  "scratch COPY" instruction), optionally appending `homeAppend` text to one home file (to prove a
- *  new in-home bypass function goes RED) and/or adding one or more synthetic files at `extra`
- *  (relative to `src/`) (to prove an outside-file bypass goes RED — RULING Q3, fix round B6: a
- *  TWO-file shape, a barrel plus a route consuming it, needs more than one extra file at once).
- *  Returns program inputs pointed at the COPY, and a cleanup function. The real tree is NEVER
- *  written. */
+/** RULING W4 (fix round B7b): builds program inputs as an OVERLAY on the real tree instead of a
+ *  filesystem copy (see `makeSharedHost` above for why) — optionally appending `homeAppend` text to
+ *  one home file (to prove a new in-home bypass function goes RED) and/or adding one or more
+ *  synthetic files at `extra` (relative to `src/`) (to prove an outside-file bypass goes RED —
+ *  RULING Q3, fix round B6: a TWO-file shape, a barrel plus a route consuming it, needs more than one
+ *  extra file at once). `listingPipelineAbs`/`composerAbs` are now the REAL tree's own absolute
+ *  paths — the home-append overlay is keyed on that SAME path, so a mutated home file is still
+ *  resolved, by every other real file's `@/lib/fba/...` import, to the ONE path the overlay covers.
+ *  Nothing is ever written to disk; `cleanup` is a no-op kept only so every existing call site's
+ *  `const { inputs, cleanup } = scratchCopy(...); try { ... } finally { cleanup() }` shape still
+ *  compiles and runs unchanged. */
 function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: string }; extra?: { relPath: string; content: string } | readonly { relPath: string; content: string }[] }): { inputs: EnumerationProgramInputs; cleanup: () => void } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ihw-enum-k8-'))
-  const copyRoot = path.join(dir, 'src')
-  fs.cpSync(SRC_ROOT, copyRoot, { recursive: true })
+  const listingPipelineAbs = path.join(SRC_ROOT, 'lib/fba/listingPipeline.ts')
+  const composerAbs = path.join(SRC_ROOT, 'lib/fba/itemHighlightComposer.ts')
+  const overlay = new Map<string, string>()
   if (opts.homeAppend) {
-    const target = path.join(copyRoot, opts.homeAppend.rel === 'pipeline' ? 'lib/fba/listingPipeline.ts' : 'lib/fba/itemHighlightComposer.ts')
-    fs.appendFileSync(target, '\n' + opts.homeAppend.text)
+    const targetAbs = opts.homeAppend.rel === 'pipeline' ? listingPipelineAbs : composerAbs
+    const original = fs.readFileSync(targetAbs, 'utf8')
+    overlay.set(toPosix(targetAbs), original + '\n' + opts.homeAppend.text)
   }
-  const rootNames = listTsFilesFlat(copyRoot)
+  const rootNames = getRealRootNamesCached()
   const extras = opts.extra ? (Array.isArray(opts.extra) ? opts.extra : [opts.extra]) : []
   for (const e of extras) {
-    const full = path.join(copyRoot, e.relPath)
-    fs.mkdirSync(path.dirname(full), { recursive: true })
-    fs.writeFileSync(full, e.content)
+    const full = path.join(SRC_ROOT, e.relPath)
+    overlay.set(toPosix(full), e.content)
     rootNames.push(full)
   }
-  const inputs: EnumerationProgramInputs = {
-    rootNames,
-    options: { ...BASE_COMPILER_OPTIONS, baseUrl: dir, paths: { '@/*': ['./src/*'] } },
-    listingPipelineAbs: path.join(copyRoot, 'lib/fba/listingPipeline.ts'),
-    composerAbs: path.join(copyRoot, 'lib/fba/itemHighlightComposer.ts'),
-  }
-  return { inputs, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) }
+  const inputs: EnumerationProgramInputs = { rootNames, options: REAL_OPTIONS, listingPipelineAbs, composerAbs, overlay }
+  return { inputs, cleanup: () => {} }
 }
 
 describe('RULING K8: the enumeration test detects REFERENCES, not spellings (TypeScript compiler API)', () => {
@@ -1106,9 +1481,24 @@ describe('RULING K8: the enumeration test detects REFERENCES, not spellings (Typ
   // name (`itemHighlightWriterEnumeration.test.ts`, single-file, direct `import * as lpR7 ...`) was
   // a DIFFERENT shape entirely — a direct namespace import, already caught by the pre-existing
   // `declaresNamespaceOfHome` branch BEFORE the alias-hop loop this pin was written for ever runs
-  // (the `test-proves-the-mock` class). This pin is the two-file shape and asserts it fails WITHOUT
-  // the alias-hop loop too (a temporary local patch, reported in the round's own verification, never
-  // committed) — see the "REPRODUCE FIRST" acceptance evidence.
+  // (the `test-proves-the-mock` class). This pin is the two-file shape.
+  //
+  // RULING W2 (fix round B7b, wire Important) MUTATION RECORD, re-measured against the CURRENT
+  // `getImmediateAliasedSymbol`-based loop (the prior claim here — "asserts it fails WITHOUT the
+  // alias-hop loop too... reported in the round's own verification" — was false; review B6/wire §1a
+  // proved no such verification existed, and the OLD `getAliasedSymbol` loop was provably dead: it
+  // resolved the whole chain in one call and only ever passed via the `typeSym` path below it):
+  //   M0 control (no mutation)                                          -> PASS (detects it)
+  //   M1 loop no-op'd (`while (false && aliasSym...)`)                   -> STILL PASSES
+  //   M2 `typeSym` check disabled (`if (false && typeSym...)`)           -> STILL PASSES
+  //   M3 BOTH M1 and M2                                                  -> FAILS (goes RED)
+  //   M4 the SourceFile-declaration clause alone disabled                -> STILL PASSES
+  // M1 and M2 each independently still pass because `getImmediateAliasedSymbol` now hops ONE alias
+  // at a time: for this shape, hop 1 lands directly on the barrel's `export * as lpR7 from '<home>'`
+  // NamespaceExport declaration and returns true THERE, never needing the SourceFile clause at all —
+  // a second, genuinely independent path alongside `typeSym`'s own route to the same clause. That is
+  // also why M4 no longer fails as it did under the old code: detection here no longer depends on the
+  // SourceFile clause being present. Only removing BOTH paths (M3) leaves nothing to catch the shape.
   it('sensitivity ("exportStarAs-anyBracket", REAL two-file shape) — a barrel\'s `export * as X from home` consumed through an `any` bracket in a SEPARATE file goes RED', () => {
     const { inputs, cleanup } = scratchCopy({
       extra: [
