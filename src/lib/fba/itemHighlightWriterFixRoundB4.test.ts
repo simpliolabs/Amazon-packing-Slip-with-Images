@@ -239,7 +239,10 @@ describe('RULING K5: every adjacent unit pair (A join B, as rendered) is judged 
       runTail: (line) => ({ value: line, hold: null, reason: null }), // isolate K5 from the tail's own clause-level net
     })
     expect(v.ok, JSON.stringify(v)).toBe(false)
-    if (!v.ok) expect(v.violations.join(' ')).toMatch(/join:.*material-lie/)
+    // RULING Q5 (fix round B6, value Blocking B2): the raw reason code no longer appears in the
+    // `join:` violation — it is mapped through a plain-language sentence the model was taught (the
+    // `pair-truth` registry id), never the bare internal code.
+    if (!v.ok) expect(v.violations.join(' ')).toMatch(/join:.*fabric\/material claim/)
   })
 })
 
@@ -336,11 +339,17 @@ describe('RULING P7: a tail sentence-shape refusal names the taught rule, not th
   const id = (text: string) => units.find((u) => u.text === text)!.id
   const runTail = runTailFor('THE CEO Never Give Up Crewneck', GILDAN, truthCtx)
 
+  // RULING Q1 (fix round B6, truth Blocking TR-1): the relation clause now stays open until the
+  // next ",", so a POOL unit list-joined AFTER the relation's spec unit (the ORIGINAL T1/T1b shape:
+  // "...with Classic Fit — Graphic Crewneck & ...") is itself now a grammar violation — it would no
+  // longer isolate the TAIL's sentence-shape mapping this test exists to pin. The relation clause is
+  // moved to the END (nothing list-joined after "with Classic Fit") so the arrangement stays
+  // otherwise grammar-legal while remaining comma-less throughout.
   it('T1: a comma-less arrangement ("—"/"&" only) is refused for "needs at least one \',\' between phrases", not "sentence-shape"', () => {
     const parts: ArrangementPart[] = [
-      { unit: id("Don't Quit") }, { unit: id('Sweatshirt') }, { glue: 'with' }, { unit: id('Classic Fit') },
-      { glue: '—' }, { unit: id('Graphic Crewneck') }, { glue: '&' }, { unit: id('Fall Sweatshirts for Women') },
-      { glue: '&' }, { unit: id('Crewneck') },
+      { unit: id("Don't Quit") }, { unit: id('Sweatshirt') }, { glue: '—' }, { unit: id('Graphic Crewneck') },
+      { glue: '&' }, { unit: id('Fall Sweatshirts for Women') }, { glue: '&' }, { unit: id('Crewneck') },
+      { glue: 'with' }, { unit: id('Classic Fit') },
     ]
     const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail })
     expect(v.ok).toBe(false)
@@ -351,9 +360,9 @@ describe('RULING P7: a tail sentence-shape refusal names the taught rule, not th
   })
   it('T1b: a comma-less "and"-only arrangement gets the SAME taught message', () => {
     const parts: ArrangementPart[] = [
-      { unit: id("Don't Quit") }, { unit: id('Sweatshirt') }, { glue: 'with' }, { unit: id('Classic Fit') },
-      { glue: 'and' }, { unit: id('Graphic Crewneck') }, { glue: 'and' }, { unit: id('Fall Sweatshirts for Women') },
-      { glue: 'and' }, { unit: id('Crewneck') },
+      { unit: id("Don't Quit") }, { unit: id('Sweatshirt') }, { glue: 'and' }, { unit: id('Graphic Crewneck') },
+      { glue: 'and' }, { unit: id('Fall Sweatshirts for Women') }, { glue: 'and' }, { unit: id('Crewneck') },
+      { glue: 'with' }, { unit: id('Classic Fit') },
     ]
     const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail })
     expect(v.ok).toBe(false)

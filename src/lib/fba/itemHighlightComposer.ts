@@ -111,9 +111,32 @@ export function brandCarrierRegex(allowedBrand: string): RegExp {
   return new RegExp('\\b' + allowedBrand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*') + '\\b', 'i')
 }
 const flattenForBrandMatch = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+/** RULING Q9 (fix round B6, wire Blocking W8): is `needleWords` a CONTIGUOUS, WORD-BOUNDED run
+ *  inside `haystackWords`? A raw substring test on the flattened string over-matched: with brand
+ *  "Ace", `flattenForBrandMatch('Peace Shirt')` = "peace shirt" contains the literal characters
+ *  "ace" (mid-word, inside "pe-ace"), so the OLD `haystack.includes(needle)` wrongly flagged "Peace
+ *  Shirt" and "Race Day Tee" as carrying the brand — deleting the design's own IDENTITY unit
+ *  whenever it happened to sit beside a real second carrier (`buildAdmittedUnits`'s brand-carrier
+ *  drop). Comparing whole, already-flattened WORDS instead preserves the branch's actual job — a
+ *  hyphen/dot/slash/underscore-separated spelling ("Comfort-Colors", "comfort.colors") flattens to
+ *  the SAME multi-word sequence and still matches — while refusing a brand name that merely appears
+ *  as a substring of a DIFFERENT word. */
+function includesWordSequence(haystack: string, needle: string): boolean {
+  const needleWords = needle.split(' ').filter(Boolean)
+  if (!needleWords.length) return false
+  const haystackWords = haystack.split(' ').filter(Boolean)
+  for (let i = 0; i + needleWords.length <= haystackWords.length; i++) {
+    let match = true
+    for (let j = 0; j < needleWords.length; j++) {
+      if (haystackWords[i + j] !== needleWords[j]) { match = false; break }
+    }
+    if (match) return true
+  }
+  return false
+}
 export function lineCarriesBrand(s: string, allowedBrand: string): boolean {
   const re = brandCarrierRegex(allowedBrand)
-  return re.test(s) || flattenForBrandMatch(s).includes(flattenForBrandMatch(allowedBrand))
+  return re.test(s) || includesWordSequence(flattenForBrandMatch(s), flattenForBrandMatch(allowedBrand))
 }
 
 /** The deterministic brand phrase when no pool candidate carries the brand: "<Brand> <garment noun>". */

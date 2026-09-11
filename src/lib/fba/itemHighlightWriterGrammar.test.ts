@@ -54,21 +54,27 @@ function setup(o: { name: string; phrases?: string[]; pool: string[]; blank: Bla
 const GLUE = new Set<string>([...GLUE_WORDS, ...GLUE_PUNCTUATION])
 
 /** Resolves a spec array of unit TEXTS (matched case-insensitively against the setup's admitted
- *  units) and closed glue tokens into arrangement parts, mirroring the review's own `resolve()`. */
-function resolve(spec: readonly (string | { u: string; number: 'plural' | 'singular' })[], units: readonly AdmittedUnit[]): { parts: ArrangementPart[] } | { missing: string } {
+ *  units) and closed glue tokens into arrangement parts, mirroring the review's own `resolve()`.
+ *  RULING Q2 (fix round B6): the arrangement schema no longer carries a "number" field at all, so
+ *  this helper only ever produces bare `{unit}` parts now. */
+function resolve(spec: readonly string[], units: readonly AdmittedUnit[]): { parts: ArrangementPart[] } | { missing: string } {
   const parts: ArrangementPart[] = []
   for (const s of spec) {
-    if (typeof s === 'string' && GLUE.has(s)) { parts.push({ glue: s }); continue }
-    const text = typeof s === 'string' ? s : s.u
-    const u = units.find((x) => x.text.toLowerCase() === text.toLowerCase())
-    if (!u) return { missing: text }
-    parts.push(typeof s === 'string' ? { unit: u.id } : { unit: u.id, number: s.number })
+    if (GLUE.has(s)) { parts.push({ glue: s }); continue }
+    const u = units.find((x) => x.text.toLowerCase() === s.toLowerCase())
+    if (!u) return { missing: s }
+    parts.push({ unit: u.id })
   }
   return { parts }
 }
 
 describe('RULING G1 (spec §2c): the closed arrangement grammar — must-reject pins (adv.mts X1-X13)', () => {
-  const CASES: { id: string; o: Parameters<typeof setup>[0]; spec: (string | { u: string; number: 'plural' | 'singular' })[]; note: string }[] = [
+  // RULING Q2 (fix round B6, truth Important TR-2) superseded X13 (the original adv.mts case
+  // "number":"plural" on "Hold On Tight" -> wrong garment "tights"): the arrangement schema no
+  // longer carries a "number" field at all, so that specific recombination has NO operation left to
+  // produce it — `itemHighlightWriterArrangement.test.ts`'s "(d)" pin now covers the general case
+  // (any "number" key, on any unit, is an unrecognized-key violation).
+  const CASES: { id: string; o: Parameters<typeof setup>[0]; spec: string[]; note: string }[] = [
     { id: 'X1', o: { name: 'Keep It Pure', pool: SWEAT_POOL, blank: BLEND_SWEAT }, spec: ['Keep It Pure', 'Soft Cotton Feel', ',', 'Cozy Crewneck Sweatshirt', 'with', 'Brushed Fleece Lining', ',', 'Made For Chilly Fall Weekends'], note: 'abutment: identity + pool reads as "Pure Soft Cotton Feel" on a 52/48 blend' },
     { id: 'X3', o: { name: 'Give It All', pool: SWEAT_POOL, blank: BLEND_SWEAT }, spec: ['Give It All', 'Soft Cotton Feel', ',', 'Cozy Crewneck Sweatshirt', 'with', 'Brushed Fleece Lining', ',', 'Made For Chilly Fall Weekends'], note: 'abutment: "All Soft Cotton" on a blend' },
     { id: 'X4', o: { name: 'Just Say No', pool: SWEAT_POOL, blank: BLEND_SWEAT }, spec: ['Just Say No', 'Polyester Blend Comfort', ',', 'Cozy Crewneck Sweatshirt', 'with', 'Brushed Fleece Lining', ',', 'Made For Chilly Fall Weekends'], note: 'abutment: "No Polyester Blend" (ambiguous reading) on a blend' },
@@ -79,7 +85,6 @@ describe('RULING G1 (spec §2c): the closed arrangement grammar — must-reject 
     { id: 'X9', o: { name: 'Birthday Boy', pool: TEE_POOL, blank: PURE_TEE }, spec: ['Soft Graphic Tee', 'for', 'Birthday Boy', ',', 'Vintage Beach Vibes', 'and', 'Soft Cotton Feel', ',', 'Great For Weekend Road Trips'], note: '"for" is no longer a closed glue token at all (adult blank, invented audience, design-own-word exemption)' },
     { id: 'X10', o: { name: 'Girl Dad', phrases: ['Girls'], pool: TEE_POOL, blank: PURE_TEE }, spec: ['Girl Dad', 'Soft Graphic Tee', 'for', 'Girls', ',', 'Vintage Beach Vibes', 'and', 'Soft Cotton Feel', ',', 'Great For Weekend Road Trips'], note: '"for" is not glue AND a single-word vision seed ("Girls") is never admitted as identity (RULING G2)' },
     { id: 'X11', o: { name: 'Baby Shark', pool: TEE_POOL, blank: PURE_TEE }, spec: ['Soft Graphic Tee', 'for', 'Baby Shark', ',', 'Vintage Beach Vibes', 'and', 'Soft Cotton Feel', ',', 'Great For Weekend Road Trips'], note: '"for" is no longer a closed glue token at all' },
-    { id: 'X13', o: { name: 'Hold On Tight', pool: TEE_POOL, blank: PURE_TEE }, spec: [{ u: 'Hold On Tight', number: 'plural' }, 'Soft Graphic Tee', 'with', 'Vintage Beach Vibes', ',', 'Soft Cotton Feel', 'and', 'Relaxed Everyday Style'], note: 'RULING G3: "Tight" is not numberable (literal GARMENT_HEAD_WORDS membership) — wrong garment "tights" on a tee' },
   ]
 
   for (const c of CASES) {
@@ -104,7 +109,7 @@ describe('RULING G1 (spec §2c): the closed arrangement grammar — must-reject 
   // These list-joined variants remove every OTHER violation, so the ONLY thing that can reject them
   // is rule 1 (abutment) — and assert the NAMED abutment violation, not merely `ok === false`.
   it('X1/X3/X4, ISOLATED (list joins only): the identity-pool ABUTMENT itself is the named violation', () => {
-    const ISOLATED: { id: string; o: Parameters<typeof setup>[0]; spec: (string | { u: string; number: 'plural' | 'singular' })[] }[] = [
+    const ISOLATED: { id: string; o: Parameters<typeof setup>[0]; spec: string[] }[] = [
       { id: 'X1-isolated', o: { name: 'Keep It Pure', pool: SWEAT_POOL, blank: BLEND_SWEAT }, spec: ['Keep It Pure', 'Soft Cotton Feel', 'and', 'Cozy Crewneck Sweatshirt', 'and', 'Brushed Fleece Lining', ',', 'Made For Chilly Fall Weekends'] },
       { id: 'X3-isolated', o: { name: 'Give It All', pool: SWEAT_POOL, blank: BLEND_SWEAT }, spec: ['Give It All', 'Soft Cotton Feel', 'and', 'Cozy Crewneck Sweatshirt', 'and', 'Brushed Fleece Lining', ',', 'Made For Chilly Fall Weekends'] },
       { id: 'X4-isolated', o: { name: 'Just Say No', pool: SWEAT_POOL, blank: BLEND_SWEAT }, spec: ['Just Say No', 'Polyester Blend Comfort', 'and', 'Cozy Crewneck Sweatshirt', 'and', 'Brushed Fleece Lining', ',', 'Made For Chilly Fall Weekends'] },
@@ -123,7 +128,7 @@ describe('RULING G1 (spec §2c): the closed arrangement grammar — must-reject 
 
   it('X15 (true, control): the exact original spec array — abutting identity + pool with "with" — is now grammar-illegal (relation must introduce a spec unit), proving the fix generalizes; the NEAREST TRUE grammatical line (list joins only) still ships', () => {
     const s = setup({ name: 'Retro Sunset', pool: TEE_POOL, blank: PURE_TEE })
-    const original = resolve(['Retro Sunset', { u: 'Tee', number: 'plural' }, 'with', 'Vintage Beach Vibes', ',', 'Soft Cotton Feel', 'and', 'Relaxed Everyday Style', ',', 'Made For Lazy Summer Days'], s.units)
+    const original = resolve(['Retro Sunset', 'Tee', 'with', 'Vintage Beach Vibes', ',', 'Soft Cotton Feel', 'and', 'Relaxed Everyday Style', ',', 'Made For Lazy Summer Days'], s.units)
     expect('missing' in original).toBe(false)
     if (!('missing' in original)) {
       const v = judgeWriterArrangement({ parts: original.parts }, s.units, { truthCtx: s.truthCtx, runTail: s.runTail })
@@ -134,7 +139,7 @@ describe('RULING G1 (spec §2c): the closed arrangement grammar — must-reject 
     // K7, fix round B4, narrowed readability's "has a connecting word" test to RELATION words
     // "with"/"in" only; a list join like "and" no longer counts), then LIST joins for the rest,
     // gathered into ONE trailing clause so at most one clause is keyword-shaped.
-    const nearest = resolve(['Retro Sunset', { u: 'Tee', number: 'plural' }, 'with', 'Classic Fit', ',', 'Vintage Beach Vibes', 'and', 'Soft Cotton Feel', 'and', 'Made For Lazy Summer Days'], s.units)
+    const nearest = resolve(['Retro Sunset', 'Tee', 'with', 'Classic Fit', ',', 'Vintage Beach Vibes', 'and', 'Soft Cotton Feel', 'and', 'Made For Lazy Summer Days'], s.units)
     expect('missing' in nearest).toBe(false)
     if (!('missing' in nearest)) {
       const v = judgeWriterArrangement({ parts: nearest.parts }, s.units, { truthCtx: s.truthCtx, runTail: s.runTail })

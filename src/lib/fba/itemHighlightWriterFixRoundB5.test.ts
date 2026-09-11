@@ -82,12 +82,19 @@ describe('RULING P1: at most ONE brand-carrying unit, across every kind', () => 
     } finally { warn.mockRestore() }
   })
 
-  it('an identity text that ALSO carries the brand ("ComfortColors Club") is dropped at admission (attack8 §A8\'s mechanism)', () => {
+  // RULING Q9 (fix round B6, wire Blocking W8): the identity unit is NEVER dropped for carrying the
+  // brand any more — the identity is effectively mandatory (the "names or evokes the design" rule),
+  // and dropping it left the writer with no subject to name at all (attack8 §A8's mechanism is
+  // superseded: it is demoted — still admitted, just no longer eligible to sit alongside the
+  // dedicated brand unit, which the judge's own "more than one unit carries the brand" check
+  // enforces — see the next test).
+  it('an identity text that ALSO carries the brand ("ComfortColors Club") is DEMOTED, not dropped, at admission', () => {
     const units = buildAdmittedUnits(
       { candidates: ['Vintage Beach Vibes'], specFacts: ['100% Ring-Spun Cotton'], brandPick: 'Comfort Colors Tee', brandOrigin: 'spec', wearFact: null },
       { designName: 'ComfortColors Club', truthCtx },
     )
-    expect(units.some((u) => u.kind === 'identity')).toBe(false)
+    const identity = units.find((u) => u.kind === 'identity')
+    expect(identity?.text).toBe('ComfortColors Club')
     expect(units.filter((u) => u.isBrand)).toHaveLength(1)
   })
 
@@ -137,9 +144,13 @@ describe('RULING P3: a POOL unit may no longer abut a garment-head noun directly
 describe('RULING P4: span truth is judged per comma clause, over every contiguous sub-span, never across a comma', () => {
   it('N09-shaped: inserting a garment head BETWEEN the "%" marker and the fibre no longer launders the lie', () => {
     const truthCtx: PhraseTruthCtx = { garmentFamily: 'sweatshirt', spec: { material: '52% Cotton / 48% Polyester', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }
+    // RULING Q6 (fix round B6, value Blocking B3): the design name must not share a significant
+    // word with 'Farm Life Crewneck' (this pin's own pool candidate) or admission would drop it as
+    // an identity-collision before ever reaching P4's span-truth check this test isolates — 'Barn
+    // Yard' is unrelated vocabulary.
     const units = buildAdmittedUnits(
       { candidates: ['100% Awesome', 'Soft Poly Feel', 'Farm Life Crewneck'], specFacts: ['52% Cotton / 48% Polyester', 'Classic Fit'], brandPick: null, wearFact: null },
-      { designName: 'Farm Life', truthCtx },
+      { designName: 'Barn Yard', truthCtx },
     )
     const id = (t: string) => units.find((u) => u.text === t)!.id
     const garmentHead = units.find((u) => u.kind === 'garment-head' && u.text !== 'Crewneck')?.id ?? units.find((u) => u.kind === 'garment-head')!.id
@@ -151,9 +162,10 @@ describe('RULING P4: span truth is judged per comma clause, over every contiguou
       { glue: 'with' }, { unit: id('52% Cotton / 48% Polyester') }, { glue: ',' },
       { unit: id('Farm Life Crewneck') }, { glue: 'in' }, { glue: 'a' }, { unit: id('Classic Fit') },
     ]
-    const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail: runTailFor('THE CEO Farm Life', GILDAN, truthCtx) })
+    const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail: runTailFor('THE CEO Barn Yard', GILDAN, truthCtx) })
     expect(v.ok).toBe(false)
-    if (!v.ok) expect(v.violations.join(' ')).toMatch(/material-lie/)
+    // RULING Q5 (fix round B6, value Blocking B2): the raw code is now mapped to plain language.
+    if (!v.ok) expect(v.violations.join(' ')).toMatch(/fabric\/material claim/)
   })
 
   it('B08-shaped: the PO-sanctioned wear fact IN ITS OWN comma clause is ACCEPTED end to end — never laundered by crossing a comma', () => {

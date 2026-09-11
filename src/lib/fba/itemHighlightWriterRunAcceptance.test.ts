@@ -259,9 +259,17 @@ describe('W7: readability that fails the PO\'s own line', () => {
     expect(writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit', units).ok).toBe(true)
     expect(writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit, Crew Neck', units).ok).toBe(true)
   })
-  it('P5: a SECOND list section — split from the first by another relation clause — fails', () => {
-    const v = writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit, Crew Neck in Ring-Spun Cotton, Long Sleeve', units)
+  // RULING Q11 (fix round B6, readability shape refined): a list SECTION is now a RUN OF TWO OR
+  // MORE consecutive list clauses — a single lone list clause between two relation clauses is
+  // ordinary prose, not a section (see the next test). So this pin needs a run of 2+ on EACH side
+  // of the splitting relation clause to still trip "more than one list section".
+  it('P5: a SECOND list section (each a run of 2+ list clauses) — split from the first by another relation clause — fails', () => {
+    const v = writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit, Crew Neck, Ribbed Cuffs in Ring-Spun Cotton, Short Sleeve, Long Sleeve', units)
     expect(v.ok).toBe(false)
+  })
+  it('P5: a SINGLE lone list clause between two relation clauses is ordinary prose, not a list section — passes (RULING Q11, B08\'s own shape)', () => {
+    const v = writerReadabilityVerdict('Retro Sunset Tee with Everyday Wear, Classic Fit, Crew Neck in Ring-Spun Cotton, Long Sleeve', units)
+    expect(v.ok).toBe(true)
   })
   it('P5: zero relation clauses at all (a bare keyword list) fails, regardless of clause count', () => {
     expect(writerReadabilityVerdict('Retro Sunset Tee, Classic Fit, Crew Neck', units).ok).toBe(false)

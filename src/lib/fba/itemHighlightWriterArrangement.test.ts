@@ -199,17 +199,19 @@ describe('W1: validateArrangement', () => {
     expect(withBrandOk.ok).toBe(true)
   })
 
-  it('(d) rejects "number" on a unit whose last word is not a garment head noun', () => {
+  // RULING Q2 (fix round B6, truth Important TR-2): "number" is GONE from the arrangement schema
+  // entirely — a plural manufactured a quantity/multi-pack claim on ANY unit, not only the brand
+  // (P2 had already removed it from the brand unit alone; TR-2 measured the identical defect on the
+  // design's own garment head and on pool phrases). It is now simply an unrecognized key, on EVERY
+  // unit, numberable or not — superseding the two "(d)" tests this replaces (one used to accept it).
+  it('(d) "number" on ANY unit — numberable or not — is now an unrecognized key, not a request the schema honours', () => {
     const nonGarment = units.find((u) => !u.numberable)!
-    const v = validateArrangement({ parts: [{ unit: nonGarment.id, number: 'plural' }] }, units)
-    expect(v.ok).toBe(false)
-    if (!v.ok) expect(v.violation).toMatch(/cannot take a number/)
-  })
-
-  it('(d) accepts "number" on a numberable unit', () => {
     const garmentHead = units.find((u) => u.kind === 'garment-head')!
-    const v = validateArrangement({ parts: [{ unit: garmentHead.id, number: 'plural' }] }, units)
-    expect(v.ok).toBe(true)
+    for (const id of [nonGarment.id, garmentHead.id]) {
+      const v = validateArrangement({ parts: [{ unit: id, number: 'plural' }] }, units)
+      expect(v.ok, `unit ${id}`).toBe(false)
+      if (!v.ok) expect(v.violation, `unit ${id}`).toMatch(/unknown key/)
+    }
   })
 
   it('rejects an invalid "number" value', () => {
@@ -249,19 +251,19 @@ describe('W1: renderArrangement', () => {
     expect(renderArrangement(parts, units)).toBe('Shirt')
   })
 
-  it('"number":"plural" toggles ONLY the numberable unit\'s trailing garment word, nothing else in the text', () => {
-    const parts: ArrangementPart[] = [{ unit: 'u3', number: 'plural' }]
-    expect(renderArrangement(parts, units)).toBe('Shirts')
-  })
-
-  it('"number":"singular" round-trips a plural garment-head unit back to singular', () => {
+  // RULING Q2 (fix round B6): there is no singular/plural toggle any more — a `numberable` unit
+  // renders its OWN stored inflection, unchanged, exactly like every other unit. `validateArrangement`
+  // (above) rejects a `"number"` key outright, so `renderArrangement` never sees one in practice; this
+  // pins that IF it somehow did, rendering is still byte-verbatim (no silent toggle survives).
+  it('a numberable unit renders its OWN stored inflection verbatim — already-plural stays plural, already-singular stays singular', () => {
     const plural: AdmittedUnit[] = [{ id: 'p0', text: 'Sweatshirts', kind: 'garment-head', numberable: true }]
-    expect(renderArrangement([{ unit: 'p0', number: 'singular' }], plural)).toBe('Sweatshirt')
+    expect(renderArrangement([{ unit: 'p0' }], plural)).toBe('Sweatshirts')
+    expect(renderArrangement([{ unit: 'u3' }], units)).toBe('Shirt')
   })
 
-  it('number toggling never touches any OTHER word in a multi-word unit', () => {
+  it('an unrecognized key on a unit part (e.g. a stray "number") is ignored by the pure renderer — the byte-verbatim guarantee holds regardless, though validateArrangement rejects it before render is ever reached', () => {
     const compound: AdmittedUnit[] = [{ id: 'c0', text: 'Graphic Crewneck Sweatshirt', kind: 'pool', numberable: true }]
-    expect(renderArrangement([{ unit: 'c0', number: 'plural' }], compound)).toBe('Graphic Crewneck Sweatshirts')
+    expect(renderArrangement([{ unit: 'c0' } as ArrangementPart], compound)).toBe('Graphic Crewneck Sweatshirt')
   })
 })
 
@@ -400,7 +402,7 @@ describe('W2: the 12 new adversarial lines (N1,N3-N11,N15,N16) are unrenderable 
 describe('W2: picker-bounded rows (A4-class) — the writer\'s admission verdict on a VERBATIM unit equals the picker\'s own', () => {
   it('a pool unit that IS itself an admissible phrase renders (and ships) — the writer never becomes MORE permissive than the composer that supplied the unit', () => {
     const ctx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Ring-Spun Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', designTokens: ['Girl Dad'], field: 'highlights' }
-    const phrase = 'Great Tee For Girls' // admissible under the composer's OWN design-own-word rule (I1, FILED) — same as the picker would ship verbatim.
+    const phrase = 'Soft Graphic Tee' // admissible under the composer's OWN candidate filter — same as the picker would ship verbatim, and shares no word with the identity (see the next test for the case that DOES).
     expect(phraseTruthVerdict(phrase, ctx).ok).toBe(true) // the PICKER's verdict
     const units = buildAdmittedUnits({ candidates: [phrase], specFacts: [], brandPick: null, wearFact: null }, { designName: 'Girl Dad', truthCtx: ctx })
     const unit = units.find((u) => u.text === phrase)!
@@ -408,6 +410,22 @@ describe('W2: picker-bounded rows (A4-class) — the writer\'s admission verdict
     // the identical phrase the picker already admitted. Parity holds by construction: the unit only
     // exists because the composer's OWN admission put it in `candidates`.
     expect(renderArrangement([{ unit: unit.id }], units)).toBe(phrase)
+  })
+
+  // RULING Q6 (fix round B6, value Blocking B3): a design-own-word-exempt phrase is a DIFFERENT
+  // case — its very admissibility comes from sharing a significant word with the design's own name,
+  // and the identity unit is effectively mandatory (`writerReadabilityVerdict`'s "names or evokes the
+  // design" rule), so that shared word would ALWAYS repeat in any full accepted line. Offering it
+  // only costs a call finding that out; `buildAdmittedUnits` now drops it at admission (the SAME
+  // owner predicate, `lineHasSignificantRepeat`, applied to the PAIR) — this is NOT the writer being
+  // less permissive than the picker (the picker never had to co-render the design name as a separate
+  // token in the same breath), it is the unit the B6 rulings name: one that can never be used.
+  it('a design-own-word-exempt phrase (shares a significant word with the identity) is dropped at admission, never offered', () => {
+    const ctx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Ring-Spun Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', designTokens: ['Girl Dad'], field: 'highlights' }
+    const phrase = 'Great Tee For Girls'
+    expect(phraseTruthVerdict(phrase, ctx).ok).toBe(true) // still admissible to the PICKER
+    const units = buildAdmittedUnits({ candidates: [phrase], specFacts: [], brandPick: null, wearFact: null }, { designName: 'Girl Dad', truthCtx: ctx })
+    expect(units.find((u) => u.text === phrase)).toBeUndefined()
   })
 })
 
