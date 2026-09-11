@@ -311,6 +311,25 @@ enumeration test lost an arms race against `any`-typed references.
    allowlist, no file may namespace-import or re-export the producer modules, or import them through
    a computed specifier. So a module cannot obtain a restricted function value at all.
 
+## 2h. AMENDMENT 2026-09-11 (B7 panel) — a garment word needs a name to follow, the wear fact stands alone, and the boundary is read by the compiler
+
+*Where this stands.* At `4489eb6` the truth and compliance lenses found ZERO Blocking, and the value
+lens judged all ten reference writer lines better than the composer's. Two narrow gaps remained.
+
+*The rule:*
+1. **Garment-head units are offered only when an identity unit is.** §2g rule 4 lets a garment head
+   follow only the identity. When there is no identity (no design name, or the name was dropped for
+   a trademark, a celebrity or an untrue claim), every garment head became an offered unit that no
+   arrangement could use. A name that did not survive admission is never sent to the model.
+2. **The wear fact stands alone in its own comma clause.** Beside another unit via `and` `&` `—`
+   `|`, or as the subject of `with`/`in`, it asserts a fit claim the blank does not back. It was
+   refused 100% of the time while the prompt invited those shapes.
+3. **The module boundary is judged on the compiler's AST and its module resolution, never on source
+   text.** Every program source file is in scope, not only `src/`. Every import, re-export, import
+   call and require is resolved to a FILE and compared against the producer modules. That removes
+   the regex's blind spots (comments between tokens, URLs on the same line, `$` identifiers,
+   package-imports aliases, files outside `src/`).
+
 ## 3. ADVERSARY
 
 - **"The writer will hallucinate a spec."** Provenance makes that a rejection, not a hope: a token
