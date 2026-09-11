@@ -800,17 +800,9 @@ interface EnumerationProgramInputs {
   overlay?: ReadonlyMap<string, string>
 }
 
-const BASE_COMPILER_OPTIONS: ts.CompilerOptions = {
-  target: ts.ScriptTarget.ES2017,
-  module: ts.ModuleKind.ESNext,
-  moduleResolution: ts.ModuleResolutionKind.Bundler,
-  jsx: ts.JsxEmit.ReactJSX,
-  esModuleInterop: true,
-  allowJs: true,
-  skipLibCheck: true,
-  noEmit: true,
-  strict: false,
-}
+// RULING U1 (fix round B9b, controller ruling, spec §2i point 1) deleted `BASE_COMPILER_OPTIONS`/
+// `REAL_OPTIONS` (both used to live here as a hand-copied literal option set) — see
+// `getRealCompilerOptionsCached` below, next to the root-file-list cache it now sits beside.
 
 // RULING P8 (fix round B5, wire Blocking 1, W1): scan every extension the BUILD actually compiles —
 // `tsconfig.json` sets `allowJs: true` and `"**/*.mts"` in `include`, and Next's App Router routes
@@ -847,7 +839,211 @@ function listTsFilesFlat(dir: string): string[] {
 // from that one call's own `overlay` map instead — never touching disk for the overlay content, and
 // never re-parsing an unchanged real file twice. No temp directory is created and nothing is ever
 // written inside (or outside) the repo for a shape test any more.
-const REAL_OPTIONS: ts.CompilerOptions = { ...BASE_COMPILER_OPTIONS, baseUrl: process.cwd(), paths: { '@/*': ['./src/*'] } }
+// RULING U1 (fix round B9b, controller ruling, spec §2i point 1): "build the program from the
+// repo's REAL tsconfig (paths, baseUrl, customConditions, moduleSuffixes), not a literal option
+// set." The prior `REAL_OPTIONS` hard-coded `paths: { '@/*': ['./src/*'] }` as a TypeScript literal
+// — wire review B8 §1 point 1 proved a NEW tsconfig.json `paths` entry (n1/n2's "~ih", n18's
+// "@ih/*" fallback array) was therefore invisible to `ts.resolveModuleName`, even though the real
+// build's own resolution honours it. `ts.readConfigFile` + `ts.parseJsonConfigFileContent` read the
+// COMMITTED tsconfig.json exactly the way `tsc`/Next's own toolchain does — `include`, `paths`,
+// `baseUrl`, `customConditions` and `moduleSuffixes` all come from the real file, never a
+// hand-copied subset. Read via `ts.sys` (the real filesystem) rather than the overlay host: the
+// committed tsconfig.json is never mutated by any shape in this file (a NEW alias is expressed via
+// `scratchCopy`'s `pathsOverlay`, merged onto these real options in JS — see `scratchCopy` below —
+// never by writing a synthetic tsconfig.json to intercept), so there is nothing for an overlay to
+// serve here, and reading directly avoids re-running `parseJsonConfigFileContent`'s own `include`
+// glob expansion (non-trivial cost) on every one of this file's many calls. Cached once, like
+// `cachedRealRootNames` beside it.
+let cachedRealCompilerOptions: ts.CompilerOptions | null = null
+function getRealCompilerOptionsCached(): ts.CompilerOptions {
+  if (!cachedRealCompilerOptions) {
+    const configPath = path.join(process.cwd(), 'tsconfig.json')
+    const configFile = ts.readConfigFile(configPath, ts.sys.readFile)
+    if (configFile.error || !configFile.config) {
+      throw new Error(`RULING U1: could not read the real tsconfig.json at ${configPath}: ${JSON.stringify(configFile.error)}`)
+    }
+    const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, process.cwd())
+    cachedRealCompilerOptions = parsed.options
+  }
+  return cachedRealCompilerOptions
+}
+
+// ─── RULING U1 (fix round B9b, spec §2i point 2): CONFIGURATION entries ─────────────────────────
+//
+// "Refuse any CONFIGURATION entry that points at a producer module outside the allowlist: tsconfig
+// `paths`; every package.json outside node_modules (nested ones included): `main`/`module`/
+// `exports`/`imports`/`types`; next.config aliases, including `turbopack.resolveAlias`." These three
+// checks are declaration-level, exactly like `checkModuleBoundaryDeclarations` below (refused
+// regardless of whether anything in THIS run's program actually resolves through the entry yet) —
+// they run once per `findEnumerationViolations` call, independent of the per-file AST walk.
+
+/** The ONE tsconfig `paths` key already committed and reviewed. Kept explicit, per this file's own
+ *  established allowlist convention (`NAMESPACE_IMPORT_ALLOWLIST` etc. below) — a NEW key is a
+ *  reviewed diff, never a wildcard. */
+const TSCONFIG_PATHS_CONFIG_ALLOWLIST: readonly string[] = ['@/*']
+
+/** Does `targetPattern` (one entry of a `paths[key]` array, e.g. `'./src/lib/fba/*'` or a literal
+ *  `'./src/lib/fba/listingPipeline.ts'`) resolve — for SOME wildcard substitution, if it has one —
+ *  onto a restricted home file? Deliberately independent of any ONE specifier's actual resolution
+ *  outcome (n18's shape: the pattern's FIRST fallback target wins for `@ih/listingPipeline`, but
+ *  its SECOND target is still a live, silently-armed path onto home the moment the first target's
+ *  file ever goes missing) — this is a static property of the CONFIGURATION entry itself. */
+function pathsTargetHitsHome(targetPattern: string, baseDir: string, homeAbsSet: ReadonlySet<string>): string | null {
+  const starIdx = targetPattern.indexOf('*')
+  if (starIdx === -1) {
+    const abs = toPosix(path.resolve(baseDir, targetPattern))
+    for (const home of homeAbsSet) if (abs === home) return home
+    return null
+  }
+  const prefix = targetPattern.slice(0, starIdx)
+  const suffix = targetPattern.slice(starIdx + 1)
+  const prefixDir = (() => { const p = toPosix(path.resolve(baseDir, prefix)); return p.endsWith('/') ? p : `${p}/` })()
+  for (const home of homeAbsSet) {
+    const homeNoExt = home.replace(/\.tsx?$/, '')
+    if ((home.startsWith(prefixDir) && home.endsWith(suffix)) || (homeNoExt.startsWith(prefixDir) && homeNoExt.endsWith(suffix))) return home
+  }
+  return null
+}
+function findTsconfigPathsConfigViolations(options: ts.CompilerOptions, homeAbsSet: ReadonlySet<string>): string[] {
+  const violations: string[] = []
+  const paths = options.paths
+  if (!paths) return violations
+  const baseDir = options.baseUrl ? path.resolve(options.baseUrl) : process.cwd()
+  for (const [key, targets] of Object.entries(paths)) {
+    if (TSCONFIG_PATHS_CONFIG_ALLOWLIST.includes(key)) continue
+    for (const target of targets ?? []) {
+      const hit = pathsTargetHitsHome(target, baseDir, homeAbsSet)
+      if (hit) {
+        violations.push(`tsconfig.json: paths['${key}'] -> '${target}' resolves to a restricted home module (${hit}); refused as a CONFIGURATION entry outside the allowlist, regardless of whether an earlier fallback target in the same array wins for any one specifier today`)
+      }
+    }
+  }
+  return violations
+}
+
+/** Recursively collects every string LEAF out of a package.json field's value: a plain string, a
+ *  conditional-exports/imports style nested object (`{ types: ..., default: ... }`), or an array of
+ *  ordered fallbacks. Every leaf is a candidate resolution target REGARDLESS of which condition a
+ *  given specifier's resolution actually picks today (n3/n4: the "types" condition wins for TS's
+ *  own resolution and is excluded from the scan as a `.d.ts`, but the "default"/"main" condition —
+ *  what the real bundler takes at runtime — points straight at home). */
+function collectPackageJsonLeafStrings(value: unknown, out: string[]): void {
+  if (typeof value === 'string') { out.push(value); return }
+  if (Array.isArray(value)) { for (const v of value) collectPackageJsonLeafStrings(v, out); return }
+  if (value && typeof value === 'object') { for (const v of Object.values(value as Record<string, unknown>)) collectPackageJsonLeafStrings(v, out) }
+}
+const PACKAGE_JSON_SCANNED_FIELDS = ['main', 'module', 'exports', 'imports', 'types'] as const
+/** Scans ONE package.json's text for a `main`/`module`/`exports`/`imports`/`types` leaf that
+ *  resolves to a restricted home module. `pkgJsonAbsPosix` is used only to compute the package's own
+ *  directory (every leaf is resolved relative to IT, per Node/bundler package-relative resolution)
+ *  and for the reported path; an unparsable package.json is silently skipped — that is the build's
+ *  own problem, not this guard's. A bare specifier leaf (no leading `.`/`/`) is a real dependency
+ *  name, never a path target, and is skipped. */
+function findPackageJsonConfigViolations(pkgJsonAbsPosix: string, text: string, homeAbsSet: ReadonlySet<string>): string[] {
+  const violations: string[] = []
+  let parsed: unknown
+  try { parsed = JSON.parse(text) } catch { return violations }
+  if (!parsed || typeof parsed !== 'object') return violations
+  const pkgDir = path.posix.dirname(pkgJsonAbsPosix)
+  const rel = path.relative(process.cwd(), pkgJsonAbsPosix.replace(/\//g, path.sep)).replace(/\\/g, '/')
+  for (const field of PACKAGE_JSON_SCANNED_FIELDS) {
+    const fieldValue = (parsed as Record<string, unknown>)[field]
+    if (fieldValue === undefined) continue
+    const leaves: string[] = []
+    collectPackageJsonLeafStrings(fieldValue, leaves)
+    for (const leaf of leaves) {
+      if (!leaf.startsWith('.') && !leaf.startsWith('/')) continue
+      const abs = toPosix(path.resolve(pkgDir, leaf))
+      if (homeAbsSet.has(abs)) {
+        violations.push(`${rel || 'package.json'}: "${field}" targets '${leaf}' — resolves to a restricted home module (${abs}); refused as a CONFIGURATION entry regardless of which condition a resolver actually picks`)
+      }
+    }
+  }
+  return violations
+}
+/** The real tree's own package.json files outside node_modules (nested ones included), walked and
+ *  cached once — today just the repo root's. `.git` is skipped only because this worktree's own
+ *  `.git` entry is a plain file (a worktree gitlink), not a directory, so `isDirectory()` already
+ *  excludes it; named explicitly anyway for a normal `.git` directory checkout. */
+let cachedRealPackageJsonPathsPosix: string[] | null = null
+function getRealPackageJsonPathsCached(): string[] {
+  if (!cachedRealPackageJsonPathsPosix) {
+    const out: string[] = []
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) { walk(full); continue }
+        if (entry.name === 'package.json') out.push(toPosix(full))
+      }
+    }
+    walk(process.cwd())
+    cachedRealPackageJsonPathsPosix = out
+  }
+  return cachedRealPackageJsonPathsPosix
+}
+/** The real package.json paths, PLUS any this call's overlay adds (a shape test's root-level
+ *  `packageJson` overlay, or a nested `extra` file whose `relPath` ends in `package.json` — n4's
+ *  directory package). */
+function packageJsonPathsForThisRun(overlay: ReadonlyMap<string, string>): string[] {
+  const real = getRealPackageJsonPathsCached()
+  const rootOverlay = toPosix(path.join(process.cwd(), 'package.json'))
+  const overlaid = [...overlay.keys()].filter((k) => k.endsWith('/package.json') || k === rootOverlay)
+  return [...new Set([...real, ...overlaid])]
+}
+
+/** True when `node` is the `alias` property of a `<config>.resolve.alias` access — the shape both
+ *  `turbopack.resolveAlias` (an object literal) and a `webpack(config)` callback's
+ *  `config.resolve.alias.NAME = '...'` / `config.resolve.alias['NAME'] = '...'` mutation share, read
+ *  structurally (never by matching source text) so a rename of the `config` parameter changes
+ *  nothing. */
+function isResolveAliasAccess(node: ts.Expression): boolean {
+  if (!ts.isPropertyAccessExpression(node) || node.name.text !== 'alias') return false
+  const mid = node.expression
+  return ts.isPropertyAccessExpression(mid) && mid.name.text === 'resolve'
+}
+/** Scans next.config.ts (read via the shared, overlay-aware host, so a shape test can overlay this
+ *  ONE file the same way it overlays a package.json) for a `turbopack.resolveAlias` object literal
+ *  entry, or a `webpack()` callback's `config.resolve.alias.NAME = '<string>'` assignment, whose
+ *  string-literal TARGET resolves to a restricted home module. The real, committed `webpack: (config)
+ *  => { config.resolve.alias.canvas = false; ... }` line assigns `false`, not a string literal, so
+ *  it is correctly never flagged. next.config.ts is genuinely OUTSIDE this file's program (it is
+ *  build CONFIGURATION, never bundled into the app itself — spec §2i's own reason this is a
+ *  dedicated check rather than a program root), so it is read directly, never added to `rootNames`. */
+function findNextConfigAliasViolations(host: ts.CompilerHost, homeAbsSet: ReadonlySet<string>): string[] {
+  const violations: string[] = []
+  const nextConfigAbs = toPosix(path.join(process.cwd(), 'next.config.ts'))
+  const text = host.readFile(nextConfigAbs)
+  if (!text) return violations
+  const configDir = process.cwd()
+  const sf = ts.createSourceFile(nextConfigAbs, text, ts.ScriptTarget.ES2017, true)
+  const checkTarget = (spec: string, label: string): void => {
+    const abs = toPosix(path.resolve(configDir, spec))
+    if (homeAbsSet.has(abs)) violations.push(`next.config.ts: ${label} '${spec}' resolves to a restricted home module (${abs}); refused as a CONFIGURATION entry regardless of downstream use`)
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name) && node.name.text === 'resolveAlias' && ts.isObjectLiteralExpression(node.initializer)) {
+      for (const prop of node.initializer.properties) {
+        if (ts.isPropertyAssignment(prop) && ts.isStringLiteralLike(prop.initializer)) {
+          const key = ts.isIdentifier(prop.name) ? prop.name.text : ts.isStringLiteralLike(prop.name) ? prop.name.text : '?'
+          checkTarget(prop.initializer.text, `turbopack.resolveAlias['${key}'] ->`)
+        }
+      }
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isStringLiteralLike(node.right)) {
+      const lhs = node.left
+      if (ts.isPropertyAccessExpression(lhs) && isResolveAliasAccess(lhs.expression)) {
+        checkTarget(node.right.text, `webpack resolve.alias.${lhs.name.text} ->`)
+      } else if (ts.isElementAccessExpression(lhs) && isResolveAliasAccess(lhs.expression) && ts.isStringLiteralLike(lhs.argumentExpression)) {
+        checkTarget(node.right.text, `webpack resolve.alias['${lhs.argumentExpression.text}'] ->`)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return violations
+}
+
 let cachedRealRootNames: string[] | null = null
 /** The real tree's root file list, computed once and returned as a fresh array each call so a
  *  caller may safely append extra (synthetic) paths without mutating the shared cache. */
@@ -880,7 +1076,7 @@ const toPosix = (p: string): string => p.replace(/\\/g, '/')
  *  reused by every subsequent call in this test file's run. `setParentNodes: true` is required — the
  *  scanner's AST walks (`enclosingFunctionIsSanctioned` etc.) read `.parent`. */
 function makeSharedHost(overlay: ReadonlyMap<string, string>): ts.CompilerHost {
-  const base = ts.createCompilerHost(REAL_OPTIONS, true)
+  const base = ts.createCompilerHost(getRealCompilerOptionsCached(), true)
   return {
     ...base,
     fileExists: (fileName) => {
@@ -931,7 +1127,7 @@ function makeSharedHost(overlay: ReadonlyMap<string, string>): ts.CompilerHost {
 function realTreeInputs(): EnumerationProgramInputs {
   return {
     rootNames: getRealRootNamesCached(),
-    options: REAL_OPTIONS,
+    options: getRealCompilerOptionsCached(),
     listingPipelineAbs: path.join(SRC_ROOT, 'lib/fba/listingPipeline.ts'),
     composerAbs: path.join(SRC_ROOT, 'lib/fba/itemHighlightComposer.ts'),
   }
@@ -1364,8 +1560,55 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
       violations.push(`${rel}: literal dynamic ${kind}('${argText}') of a restricted home module (${hit.home}), resolved by the compiler — refused outside the allowlist regardless of what is destructured`)
     }
   }
+  // RULING U1 (fix round B9b, spec §2i point 3): ".d.ts files are never scanned" (B1 wire finding,
+  // mechanism 3) let n9's `r11Barrel.d.ts` — `export { buildItemHighlights as bih } from
+  // './listingPipeline'` — ship unflagged: a REAL value re-export is ordinary, valid TypeScript
+  // even inside a declaration file, and is exactly as dangerous there as in a `.ts` file (any
+  // downstream import of the barrel's alias reaches the LIVE function, not a type-only shadow).
+  // Reuses `checkModuleBoundaryDeclarations`'s own export-clause logic, body-for-body, over the
+  // SEPARATE `.d.ts` file list below — deliberately narrower than the full reference walk: a bare
+  // `declare function`/`declare module` block that merely CLAIMS a restricted name exists (n5's
+  // `declare module '*?ih'`, n7's `r11shim.d.ts`) is this round's own ACCEPTED RESIDUAL per spec
+  // §2i ("a hand-written type declaration that lies about a module's runtime identity"), not a
+  // re-export, and is deliberately left alone by this function.
+  function checkDtsValueReExports(sf: ts.SourceFile, rel: string): void {
+    for (const stmt of sf.statements) {
+      if (!ts.isExportDeclaration(stmt) || !stmt.moduleSpecifier || !ts.isStringLiteralLike(stmt.moduleSpecifier)) continue
+      if (stmt.isTypeOnly) continue
+      const resolved = resolveSpecifierToFile(stmt.moduleSpecifier.text, sf.fileName)
+      const hit = resolved ? homeKindOfResolved(resolved) : null
+      if (!hit) continue
+      const clause = stmt.exportClause
+      if (!clause) {
+        violations.push(`${rel}: (.d.ts) 'export * from ${JSON.stringify(stmt.moduleSpecifier.text)}' — resolved by the compiler to a restricted home module (${hit.home}); a declaration file's own value re-export re-exports EVERY name, restricted ones included`)
+        continue
+      }
+      if (ts.isNamespaceExport(clause)) {
+        violations.push(`${rel}: (.d.ts) re-exports the WHOLE namespace of a restricted home module (${hit.home}) as ${clause.name.text} — a declaration file's own value re-export`)
+        continue
+      }
+      for (const el of clause.elements) {
+        if (el.isTypeOnly) continue
+        const originalText = (el.propertyName ?? el.name).text
+        if ((RESTRICTED_NAMES as readonly string[]).includes(originalText) && homeAbsOf[originalText as RestrictedName] === hit.home) {
+          violations.push(`${rel}: (.d.ts) re-exports '${originalText}'${el.propertyName ? ` (as ${el.name.text})` : ''} from '${stmt.moduleSpecifier.text}' — resolved by the compiler to its home module (${hit.home}); a declaration file's own VALUE re-export`)
+        }
+      }
+    }
+  }
 
   const violations: string[] = []
+  // RULING U1 (fix round B9b, spec §2i point 2): CONFIGURATION entries — refused OUTRIGHT, before
+  // any per-file scan, regardless of whether this run's program happens to resolve anything through
+  // them yet (the same "refused regardless of downstream use" posture `checkModuleBoundaryDeclarations`
+  // already takes for an ordinary import/export declaration).
+  violations.push(...findTsconfigPathsConfigViolations(options, homeFilesPosix))
+  for (const pkgPath of packageJsonPathsForThisRun(inputs.overlay ?? new Map())) {
+    const pkgText = host.readFile(pkgPath)
+    if (pkgText !== undefined) violations.push(...findPackageJsonConfigViolations(pkgPath, pkgText, homeFilesPosix))
+  }
+  violations.push(...findNextConfigAliasViolations(host, homeFilesPosix))
+
   // RULING V1: "every non-node_modules, non-.d.ts source file IN THE PROGRAM, not only src/
   // rootNames" — the compiler pulls in any file it can resolve an import to, home-module or not,
   // inside `src/` or not (the z9/z9b "outside src/" shapes); scanning `program.getSourceFiles()`
@@ -1488,6 +1731,14 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
     }
     visit(sf)
   }
+  // RULING U1 (fix round B9b, spec §2i point 3): the `.d.ts` files EXCLUDED from `scanSourceFiles`
+  // above — scanned ONLY for a value re-export, per `checkDtsValueReExports`'s own comment. Same
+  // node_modules exclusion (this also drops every `lib.*.d.ts`, which ships from inside
+  // `node_modules/typescript/lib/`, out of this loop for free).
+  const dtsSourceFiles = program.getSourceFiles().filter((f) => !/[\\/]node_modules[\\/]/.test(f.fileName) && f.fileName.endsWith('.d.ts'))
+  for (const sf of dtsSourceFiles) {
+    checkDtsValueReExports(sf, path.relative(process.cwd(), sf.fileName).replace(/\\/g, '/'))
+  }
   return { violations, ms: Date.now() - t0 }
 }
 
@@ -1502,7 +1753,7 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
  *  Nothing is ever written to disk; `cleanup` is a no-op kept only so every existing call site's
  *  `const { inputs, cleanup } = scratchCopy(...); try { ... } finally { cleanup() }` shape still
  *  compiles and runs unchanged. */
-function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: string }; extra?: { relPath: string; content: string; notRoot?: boolean } | readonly { relPath: string; content: string; notRoot?: boolean }[]; packageJson?: Record<string, unknown> }): { inputs: EnumerationProgramInputs; cleanup: () => void } {
+function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: string }; extra?: { relPath: string; content: string; notRoot?: boolean } | readonly { relPath: string; content: string; notRoot?: boolean }[]; packageJson?: Record<string, unknown>; pathsOverlay?: Record<string, string[]> }): { inputs: EnumerationProgramInputs; cleanup: () => void } {
   const listingPipelineAbs = path.join(SRC_ROOT, 'lib/fba/listingPipeline.ts')
   const composerAbs = path.join(SRC_ROOT, 'lib/fba/itemHighlightComposer.ts')
   const overlay = new Map<string, string>()
@@ -1533,7 +1784,15 @@ function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: 
   if (opts.packageJson) {
     overlay.set(toPosix(path.join(process.cwd(), 'package.json')), JSON.stringify(opts.packageJson))
   }
-  const inputs: EnumerationProgramInputs = { rootNames, options: REAL_OPTIONS, listingPipelineAbs, composerAbs, overlay }
+  // RULING U1 (fix round B9b): a NEW tsconfig `paths` entry (n1/n2's "~ih", n18's "@ih/*" fallback
+  // array) is expressed by merging onto the REAL, cached tsconfig options in plain JS — never by
+  // writing a synthetic tsconfig.json for the overlay host to serve (the committed file is never
+  // touched, and `getRealCompilerOptionsCached` deliberately reads it straight off disk — see its
+  // own comment above).
+  const options: ts.CompilerOptions = opts.pathsOverlay
+    ? { ...getRealCompilerOptionsCached(), paths: { ...(getRealCompilerOptionsCached().paths ?? {}), ...opts.pathsOverlay } }
+    : getRealCompilerOptionsCached()
+  const inputs: EnumerationProgramInputs = { rootNames, options, listingPipelineAbs, composerAbs, overlay }
   return { inputs, cleanup: () => {} }
 }
 
@@ -1825,4 +2084,298 @@ export function composeItemHighlight(pool: unknown, titles: string[]) {
     console.log(`[K8] findEnumerationViolations over the real tree: ${ms}ms${ms > 60_000 ? ' — EXCEEDS 60s' : ''}`)
     expect(violations, JSON.stringify(violations)).toEqual([])
   }, 120_000)
+})
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// RULING U1 (fix round B9b, controller ruling on wire review B8's Blocking B1, SCOPED by spec §2i)
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// TEST FILE HEADER NOTE (per this round's own instruction — "record the accepted residual... citing
+// §2i"). Spec §2i decided the guard's THREAT MODEL: it stops ACCIDENTAL path divergence — a future
+// call site that reaches the sync producers through the repo's ORDINARY import mechanisms. It is
+// NOT a sandbox against a developer who deliberately edits build CONFIGURATION or hand-writes a
+// type stub to hide an import from the compiler — both are changes visible in code review. Per
+// §2i, this round:
+//   1. builds the program from the repo's REAL tsconfig, not a literal option set
+//      (`getRealCompilerOptionsCached`, above);
+//   2. refuses any CONFIGURATION entry that points at a producer module outside the allowlist:
+//      tsconfig `paths` (`findTsconfigPathsConfigViolations`), every package.json's
+//      main/module/exports/imports/types (`findPackageJsonConfigViolations`), and next.config
+//      aliases including `turbopack.resolveAlias` (`findNextConfigAliasViolations`);
+//   3. refuses VALUE re-exports of the producer modules from `.d.ts` files (`checkDtsValueReExports`);
+//   4. keeps every existing AST and reference rule (K8, V1, W6/G7) unchanged.
+//
+// THE ACCEPTED RESIDUAL, per §2i: a HAND-WRITTEN TYPE DECLARATION that lies about a module's
+// runtime identity — an ambient `declare module` block, or a bare `declare function`, naming a
+// restricted function where nothing in the program's own CONFIGURATION or AST re-exports or
+// aliases the real implementation. Its worst case, per §2i, is the composer's already-vetted line
+// shipping on that one path. n5, n6, n7 and n19 below are exactly this shape. n10 and n15 are a
+// DIFFERENT, narrower kind of residual — not a type declaration at all, but a construct with no
+// statically resolvable specifier for the scanner to see, independently confirmed runtime-inert
+// under this repo's actual Turbopack/Node runtime by the prior review (not re-measured by this
+// round; cited, not re-verified, per this round's own "not measured" discipline for anything this
+// round did not itself execute).
+//
+// REPRODUCED FIRST (this round's own preliminary step, run against the PRE-FIX code, pasted into
+// the round's report rather than committed as a test): n1 (a new tsconfig `paths` alias to the home
+// file) and n3 (a package.json "imports" entry whose "types" condition points at a stub) were both
+// confirmed GREEN (undetected) under the prior `REAL_OPTIONS` literal before any production code
+// in this file changed.
+describe('RULING U1 (fix round B9b, wire Blocking B1 scoped by spec §2i): CONFIGURATION entries and .d.ts value re-exports', () => {
+  // U1 point 1's own, independently mutation-provable fact: the program is built from options READ
+  // off the real, committed tsconfig.json, not the prior hand-copied `REAL_OPTIONS` literal. The
+  // committed file sets `"strict": true`; the deleted literal hard-coded `strict: false`. Chosen
+  // because it isolates "did this read the real file" from the `paths`-specific redundancy the n1/
+  // n2/n18 shape pins below have with `findTsconfigPathsConfigViolations` (mutation-proved in the
+  // round's report: disabling the paths-CONFIG check alone leaves n1/n2 GREEN, because K8's own
+  // reference walk independently resolves "~ih" once `options` carries it — only n18 depends on
+  // the CONFIG check alone, since its actual per-specifier resolution lands on a stub, not home).
+  it('the real tsconfig is genuinely read off disk, not a hand-copied literal (its own "strict": true, which the deleted REAL_OPTIONS literal hard-coded to false)', () => {
+    expect(getRealCompilerOptionsCached().strict).toBe(true)
+  })
+
+  // ─── REFUSED: the CONFIGURATION-level checks (tsconfig paths / package.json fields / next.config
+  // aliases) and the new .d.ts value-re-export rule. Each shape is the reviewer's own r11-wire
+  // fixture, reproduced verbatim (paths/package.json/next.config content included). ─────────────
+
+  it('sensitivity ("n1", tsconfig paths alias, named import) — REFUSED: a brand-new "~ih" paths entry pointing at the home file is caught once the program is built from the real tsconfig', () => {
+    const { inputs, cleanup } = scratchCopy({
+      pathsOverlay: { '~ih': ['./src/lib/fba/listingPipeline.ts'] },
+      extra: { relPath: 'app/api/fba/probe-u1-n1/route.ts', content: `import { /* x */ buildItemHighlights as b } from '~ih'\nexport async function POST() { return Response.json(b({} as never)) }` },
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n1" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  it('sensitivity ("n2", tsconfig paths alias, namespace import) — REFUSED: same new alias, reached through a namespace property instead of a named import', () => {
+    const { inputs, cleanup } = scratchCopy({
+      pathsOverlay: { '~ih': ['./src/lib/fba/listingPipeline.ts'] },
+      extra: { relPath: 'app/api/fba/probe-u1-n2/route.ts', content: `import * as lp from '~ih'\nexport async function POST() { const f = lp.buildItemHighlights; return Response.json(f({} as never)) }` },
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n2" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  // Mutation-tested (round's report): disabling the package.json FIELD scan alone leaves this
+  // shape flagged too — WITHIN a full program build (as opposed to this round's own standalone
+  // `ts.resolveModuleName` reproduction script, run before any fix, which showed the "types"
+  // condition winning outside program-building context), resolving "#ihp" for a file that is
+  // actually PART OF the program resolves to the "default" condition (home), so the pre-existing
+  // namespace-import declaration rule already sees a plain resolved-to-home import. The package.json
+  // field scan (mechanism C) still independently refuses this CONFIGURATION entry regardless of
+  // downstream use, and remains the ONLY protection if a future TypeScript version's condition
+  // resolution for program-internal files ever prefers "types" the way the standalone probe did.
+  it('sensitivity ("n3", package.json "imports" with a "types" condition stub) — REFUSED (redundantly, within a full program build; the package.json field scan is the non-redundant backstop — see n4)', () => {
+    const { inputs, cleanup } = scratchCopy({
+      packageJson: { name: 'u1-scratch', private: true, imports: { '#ihp': { types: './src/lib/fba/u1IhpStub.d.ts', default: './src/lib/fba/listingPipeline.ts' } } },
+      extra: [
+        { relPath: 'u1IhpStub.d.ts', content: 'export declare function buildItemHighlights(input: unknown): { value: string }\n' },
+        { relPath: 'app/api/fba/probe-u1-n3/route.ts', content: `import * as ih from '#ihp'\nexport async function POST() { const f = ih.buildItemHighlights; return Response.json(f({})) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n3" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  it('sensitivity ("n4", nested directory package.json, "types"+"main") — REFUSED: a package.json living INSIDE src/, not just the repo root, is scanned too ("nested ones included")', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: 'lib/fba/u1ihdir/package.json', content: '{"types":"./stub.d.ts","main":"../listingPipeline.ts"}' },
+        { relPath: 'lib/fba/u1ihdir/stub.d.ts', content: 'export declare function buildItemHighlights(input: unknown): { value: string }\n' },
+        { relPath: 'app/api/fba/probe-u1-n4/route.ts', content: `import * as ih from '@/lib/fba/u1ihdir'\nexport async function POST() { const f = ih.buildItemHighlights; return Response.json(f({})) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n4" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      expect(violations.some((v) => v.includes('u1ihdir/package.json')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+
+  it('sensitivity ("n9", .d.ts value re-export via a ".d" specifier) — REFUSED: a declaration file whose OWN export clause re-exports a restricted name is no longer silent', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: 'lib/fba/u1Barrel.d.ts', content: `export { /* x */ buildItemHighlights as bih } from './listingPipeline'\n` },
+        { relPath: 'app/api/fba/probe-u1-n9/route.ts', content: `import { bih } from '@/lib/fba/u1Barrel.d'\nexport async function POST() { return Response.json(bih({} as never)) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n9" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      expect(violations.some((v) => v.includes('(.d.ts)')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+
+  it('sensitivity ("n11", next.config.ts turbopack.resolveAlias) — REFUSED: the route imports an innocuous stub file, but next.config.ts aliases that exact specifier onto home at bundle time', () => {
+    const stubContent = `export function buildItemHighlights(input: unknown): { value: string } { void input; return { value: 'stub' } }\n`
+    const nextConfigOverlay = `import type { NextConfig } from 'next'\nconst nextConfig: NextConfig = { turbopack: { resolveAlias: { '@/lib/fba/u1Stub': './src/lib/fba/listingPipeline.ts' } } }\nexport default nextConfig\n`
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: 'lib/fba/u1Stub.ts', content: stubContent },
+        { relPath: '../next.config.ts', content: nextConfigOverlay, notRoot: true },
+        { relPath: 'app/api/fba/probe-u1-n11/route.ts', content: `import * as s from '@/lib/fba/u1Stub'\nexport async function POST() { const f = s.buildItemHighlights; return Response.json(f({})) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n11" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      expect(violations.some((v) => v.includes('next.config.ts')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+
+  it('sensitivity ("n12", triple-slash reference to an outside namespace import) — REFUSED (unaffected by this round; re-verified for no regression)', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: '../ihx/u1ref.ts', content: `import * as lp from '../src/lib/fba/listingPipeline'\n;(globalThis as { __u1?: unknown }).__u1 = lp\n`, notRoot: true },
+        { relPath: 'app/api/fba/probe-u1-n12/route.ts', content: `/// <reference path="../../../../../ihx/u1ref.ts" />\nexport async function POST() { return Response.json({ ok: true }) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n12" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  it('sensitivity ("n13", three-hop re-export chain entirely outside src/) — REFUSED (unaffected by this round; re-verified for no regression)', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: '../ihx/u1a.ts', content: `export { /* x */ buildItemHighlights as a1 } from '../src/lib/fba/listingPipeline'\n`, notRoot: true },
+        { relPath: '../ihx/u1b.ts', content: `export { a1 as b1 } from './u1a'\n`, notRoot: true },
+        { relPath: '../ihx/u1c.ts', content: `export * from './u1b'\n`, notRoot: true },
+        { relPath: 'app/api/fba/probe-u1-n13/route.ts', content: `import { b1 } from '../../../../../ihx/u1c'\nexport async function POST() { return Response.json(b1({} as never)) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n13" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  // Mutation-tested (round's report): disabling the package.json FIELD scan alone leaves this
+  // shape flagged — `ts.resolveModuleName` resolves the package self-reference NATIVELY (via the
+  // package.json's own "exports" field, a standard bundler-resolution feature, not new code this
+  // round wrote), so the EXISTING namespace-import declaration rule (`checkModuleBoundaryDeclarations`,
+  // pre-dating this round) already sees a plain resolved-to-home import. Redundant with the field
+  // scan for THIS shape (disclosed, not hidden — the same posture the round's own V11 finding took).
+  it('sensitivity ("n14", package.json self-reference via "exports") — REFUSED: resolved NATIVELY by the compiler\'s own self-reference resolution, caught by the pre-existing namespace-import declaration rule', () => {
+    const { inputs, cleanup } = scratchCopy({
+      packageJson: { name: 'u1self', private: true, exports: { './ihp': './src/lib/fba/listingPipeline.ts' } },
+      extra: { relPath: 'app/api/fba/probe-u1-n14/route.ts', content: `import * as lp from 'u1self/ihp'\nexport async function POST() { const f = lp.buildItemHighlights; return Response.json(f({} as never)) }` },
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n14" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  it('sensitivity ("n17", package.json "imports" -> an outside barrel) — REFUSED: not by the config scan itself (the "imports" leaf targets the barrel, not home directly) but by the EXISTING export* rule, once the real resolution reaches the barrel', () => {
+    const { inputs, cleanup } = scratchCopy({
+      packageJson: { name: 'u1', private: true, imports: { '#ihx': './ihx/u1x.js' } },
+      extra: [
+        { relPath: '../ihx/u1x.js', content: `export * from '../src/lib/fba/listingPipeline'\n`, notRoot: true },
+        { relPath: 'app/api/fba/probe-u1-n17/route.ts', content: `import * as x from '#ihx'\nexport async function POST() { const f = x.buildItemHighlights; return Response.json(f({} as never)) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n17" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
+  it('sensitivity ("n18", tsconfig paths FALLBACK array) — REFUSED: the array\'s SECOND target resolves to home even though the FIRST target (a stub dir) wins for this one specifier today', () => {
+    const { inputs, cleanup } = scratchCopy({
+      pathsOverlay: { '@ih/*': ['./ihtypes/*', './src/lib/fba/*'] },
+      extra: [
+        { relPath: '../ihtypes/listingPipeline.d.ts', content: 'export declare function buildItemHighlights(input: unknown): { value: string }\n', notRoot: true },
+        { relPath: 'app/api/fba/probe-u1-n18/route.ts', content: `import * as lp from '@ih/listingPipeline'\nexport async function POST() { const f = lp.buildItemHighlights; return Response.json(f({})) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"n18" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      expect(violations.some((v) => v.includes(`paths['@ih/*']`)), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+
+  // ─── ACCEPTED-RESIDUAL, per spec §2i: a hand-written type declaration that lies about a module's
+  // runtime identity, or (n10/n15) a construct with no statically resolvable specifier at all. Each
+  // pin documents the reason it is NOT refused, so a reader never mistakes "no test" for "not
+  // considered". ──────────────────────────────────────────────────────────────────────────────
+
+  it('ACCEPTED-RESIDUAL ("n5", ambient `declare module` for a query-suffixed specifier, fully typed, no suppression) — the specifier is genuinely unresolvable to a file (a query suffix is not a real path segment); the ambient module is a hand-written type that lies about runtime identity, per §2i', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: 'types/u1ihq.d.ts', content: `declare module '*?ih' { export function buildItemHighlights(input: unknown): { value: string } }\n` },
+        { relPath: 'app/api/fba/probe-u1-n5/route.ts', content: `import { /* x */ buildItemHighlights as b } from '@/lib/fba/listingPipeline?ih'\nexport async function POST() { return Response.json(b({})) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations, JSON.stringify(violations)).toEqual([])
+    } finally { cleanup() }
+  })
+
+  it('ACCEPTED-RESIDUAL ("n6", `@ts-ignore` + query-suffixed namespace import, no stub at all) — same unresolvable-specifier residual as n5, without even a type declaration', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: { relPath: 'app/api/fba/probe-u1-n6/route.ts', content: `// @ts-ignore\nimport * as lp from '@/lib/fba/listingPipeline?x'\nexport async function POST() { const f = lp.buildItemHighlights; return Response.json(f({})) }` },
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations, JSON.stringify(violations)).toEqual([])
+    } finally { cleanup() }
+  })
+
+  it('ACCEPTED-RESIDUAL ("n7", outside-src .js+.d.ts pair, resolution picks the .d.ts) — the .d.ts is a bare `declare function`, not a re-export, so U1\'s narrower ".d.ts VALUE re-export" rule does not reach it; a hand-written type lying about the sibling .js\'s real re-export, per §2i', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: '../ihx/u1shim.d.ts', content: 'export declare function bih(input: unknown): { value: string }\n', notRoot: true },
+        { relPath: '../ihx/u1shim.js', content: `export { buildItemHighlights as bih } from '../src/lib/fba/listingPipeline'\n`, notRoot: true },
+        { relPath: 'app/api/fba/probe-u1-n7/route.ts', content: `import { bih } from '../../../../../ihx/u1shim'\nexport async function POST() { return Response.json(bih({})) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations, JSON.stringify(violations)).toEqual([])
+    } finally { cleanup() }
+  })
+
+  it('ACCEPTED-RESIDUAL ("n10", `import.meta.webpackContext`) — no statically resolvable specifier exists anywhere in this shape for the scanner to see; the prior review measured it runtime-inert (500, Turbopack has no `webpackContext`) — cited, not re-measured by this round', () => {
+    const content = `export async function POST() {\n  const ctx = (import.meta as any).webpackContext('../../../../lib/fba', { recursive: false, regExp: /listingPipeline\\.ts$/ })\n  const mod = ctx('./listingPipeline.ts')\n  const f = mod.buildItemHighlights\n  return Response.json(f({}))\n}\n`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'app/api/fba/probe-u1-n10/route.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations, JSON.stringify(violations)).toEqual([])
+    } finally { cleanup() }
+  })
+
+  it('ACCEPTED-RESIDUAL ("n15", bracket-string `(module as ...)[\'require\']`) — a distinct AST shape from the existing property-access `module.require` rule (out of this round\'s scope, kept, not widened); the prior review measured it runtime-inert (500, "Cannot find module") — cited, not re-measured by this round', () => {
+    const content = `export async function POST() {\n  const r = (module as unknown as Record<string, (s: string) => Record<string, (i: unknown) => unknown>>)['require']\n  const m = r('@/lib/fba/listingPipeline')\n  const f = m.buildItemHighlights\n  return Response.json(f({}))\n}\n`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'app/api/fba/probe-u1-n15/route.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations, JSON.stringify(violations)).toEqual([])
+    } finally { cleanup() }
+  })
+
+  it('ACCEPTED-RESIDUAL ("n19", dynamic import, query suffix, `@ts-ignore`) — the specifier is unresolvable to a file, same class as n5/n6', () => {
+    const content = `export async function POST() {\n  // @ts-ignore\n  const m = await import('@/lib/fba/listingPipeline?dyn')\n  const f = m.buildItemHighlights\n  return Response.json(f({}))\n}\n`
+    const { inputs, cleanup } = scratchCopy({ extra: { relPath: 'app/api/fba/probe-u1-n19/route.ts', content } })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations, JSON.stringify(violations)).toEqual([])
+    } finally { cleanup() }
+  })
+
+  // n8 (control: the SAME .js+.d.ts pair as n7, but INSIDE src/) is not re-tested here — it was
+  // already REFUSED before this round (the .js is pushed as its own ROOT by `scratchCopy`, so its
+  // OWN `export { buildItemHighlights as bih } from './listingPipeline'` statement is caught by the
+  // pre-existing declaration scan regardless of what a route's import happens to resolve to), and
+  // RULING K8's own "barrel" sensitivity test above already covers the identical re-export-in-a-
+  // helper-file shape. No regression: the whole-file run below includes that pin.
 })
