@@ -325,9 +325,29 @@ const ENUMERATION_TEST_TIMEOUT_MS = 20_000
 // from inside a `beforeAll` callback runs too late to change the timeout `it()` already captured at
 // registration time (measured: it had no effect on the failures below when it lived there).
 vi.setConfig({ testTimeout: ENUMERATION_TEST_TIMEOUT_MS })
+// RULING C8 (fix round C1, CI risk, truth minor; phase-b9-review-truth.md §Verify): this hook timed
+// out at the 20s the file's OTHER hooks/tests share, under a reviewer's whole-suite run competing
+// with several other heavy processes on the same machine — every one of this file's 82 tests then
+// SKIPPED (not failed), because a vitest `beforeAll` failure skips the rest of its file. Measured
+// (fix round C1, this worktree): a solo `npx vitest run` gives 6.4s cold-cache; a WHOLE-REPO
+// `npx vitest run` (this repo's own default parallelism, ~140 files) gives 11.55s — both real
+// numbers, not the reviewer's own heavier multi-process load, which this round did not reproduce.
+// The cost is `ts.createProgram` binding+checking ~400+ real files ONCE, from a cold cache — see the
+// `RULING W4` comment above `sharedBaseProgram` for why caching alone cannot go much lower. A
+// beforeAll's ONLY job is to warm that ONE cache before any shape test runs; there is no scenario
+// where slower here means anything is wrong, so headroom costs nothing but hook-timeout risk avoided.
+// Given a real ~1.8x contention multiplier already measured on this machine between solo and
+// whole-repo, and the reviewer's own report of far heavier contention elsewhere, this hook gets its
+// OWN, more generous budget — 90s, comfortably above every number measured so far — never the 20s
+// the per-test `ENUMERATION_TEST_TIMEOUT_MS` uses (that budget is sized for a single ~5-6.5s shape
+// test with its own headroom, not a 400+-file cold parse).
+const ENUMERATION_BEFORE_ALL_TIMEOUT_MS = 90_000
 beforeAll(() => {
+  const t0 = Date.now()
   findEnumerationViolations(realTreeInputs())
-}, 20_000)
+  // eslint-disable-next-line no-console
+  console.log(`[C8] beforeAll cold-cache findEnumerationViolations: ${Date.now() - t0}ms`)
+}, ENUMERATION_BEFORE_ALL_TIMEOUT_MS)
 
 describe('Item Highlights writer (B4/G7): namespace imports, re-exports, and dynamic imports of a restricted name', () => {
   it('sensitivity (G7 shape 1, "lower-namespace") — a namespace import combined with a property-access call is flagged on BOTH', () => {
@@ -855,17 +875,49 @@ function listTsFilesFlat(dir: string): string[] {
 // glob expansion (non-trivial cost) on every one of this file's many calls. Cached once, like
 // `cachedRealRootNames` beside it.
 let cachedRealCompilerOptions: ts.CompilerOptions | null = null
-function getRealCompilerOptionsCached(): ts.CompilerOptions {
-  if (!cachedRealCompilerOptions) {
-    const configPath = path.join(process.cwd(), 'tsconfig.json')
-    const configFile = ts.readConfigFile(configPath, ts.sys.readFile)
-    if (configFile.error || !configFile.config) {
-      throw new Error(`RULING U1: could not read the real tsconfig.json at ${configPath}: ${JSON.stringify(configFile.error)}`)
-    }
-    const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, process.cwd())
-    cachedRealCompilerOptions = parsed.options
+// RULING C3 (fix round C1, wire Important I1; phase-b9-review-wire.md §I1): `parsed.fileNames` — the
+// REAL include set `tsc`'s own program build resolves from this SAME parse — used to be discarded
+// here (only `.options` was kept), while `getRealRootNamesCached` below built its root list from a
+// hand-rolled directory walk of `src/` ALONE (`listTsFilesFlat`). U1 point 1 asked for "the program
+// built from the real tsconfig", not only its OPTIONS; the include set is 409 files, 12 of them
+// OUTSIDE `src/` (`next-env.d.ts`, `next.config.ts`, `vitest.config.ts`, 9 `scripts/*.ts`), and none
+// of them was ever a root of THIS scanner's program, so a restricted-name call inside any of them
+// compiled clean and went unscanned (`a1`, the review's `scripts/r12IhBackfill.ts` shape). Cached
+// ONCE, alongside the options, from the SAME `parseJsonConfigFileContent` call — never parsed twice.
+let cachedRealFileNames: readonly string[] | null = null
+function parseRealTsconfigOnce(): void {
+  if (cachedRealCompilerOptions && cachedRealFileNames) return
+  const configPath = path.join(process.cwd(), 'tsconfig.json')
+  const configFile = ts.readConfigFile(configPath, ts.sys.readFile)
+  if (configFile.error || !configFile.config) {
+    throw new Error(`RULING U1: could not read the real tsconfig.json at ${configPath}: ${JSON.stringify(configFile.error)}`)
   }
-  return cachedRealCompilerOptions
+  const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, process.cwd())
+  cachedRealCompilerOptions = parsed.options
+  cachedRealFileNames = parsed.fileNames
+}
+/** RULING C5 (fix round C1, wire Important I3; phase-b9-review-wire.md §I3): U1 point 1's own words
+ *  are "the program is built from the repo's REAL tsconfig" — until now the ONLY way a shape test
+ *  could add a NEW entry was `scratchCopy`'s `pathsOverlay`, a plain-JS merge onto the ALREADY-
+ *  cached options object. Nothing in the suite ever exercised "a new entry in the COMMITTED
+ *  tsconfig.json is honoured" — the shape pins never went through `ts.readConfigFile` /
+ *  `parseJsonConfigFileContent` at all. Reading through THIS overlay (the same `ReadonlyMap` every
+ *  other CONFIGURATION check already reads package.json/next.config.ts through) lets a shape test
+ *  overlay `tsconfig.json` ITSELF — real disk content, parsed for real, exactly as `tsc` would parse
+ *  a genuinely edited file — never a hand-copied option literal. When no overlay names
+ *  `tsconfig.json`, behaviour is UNCHANGED: the real, cached options, read once. */
+function getRealCompilerOptionsCached(overlay?: ReadonlyMap<string, string>): ts.CompilerOptions {
+  const configPath = path.join(process.cwd(), 'tsconfig.json')
+  const overlaidText = overlay?.get(toPosix(configPath))
+  if (overlaidText !== undefined) {
+    const configFile = ts.parseConfigFileTextToJson(configPath, overlaidText)
+    if (configFile.error || !configFile.config) {
+      throw new Error(`RULING C5: could not parse the overlaid tsconfig.json: ${JSON.stringify(configFile.error)}`)
+    }
+    return ts.parseJsonConfigFileContent(configFile.config, ts.sys, process.cwd()).options
+  }
+  parseRealTsconfigOnce()
+  return cachedRealCompilerOptions!
 }
 
 // ─── RULING U1 (fix round B9b, spec §2i point 2): CONFIGURATION entries ─────────────────────────
@@ -882,6 +934,38 @@ function getRealCompilerOptionsCached(): ts.CompilerOptions {
  *  reviewed diff, never a wildcard. */
 const TSCONFIG_PATHS_CONFIG_ALLOWLIST: readonly string[] = ['@/*']
 
+// RULING C6 (fix round C1, wire Important I4; phase-b9-review-wire.md §I4): every CONFIGURATION
+// target below used to be compared to `homeAbsSet` as an EXACT string — a `paths`/package.json/
+// next.config entry that names the SAME home file WITHOUT its `.ts` extension (c1/c2/c3, the exact
+// shape a real bundler resolver still resolves onto home) went unrefused. Before comparing, resolve
+// the target the way a resolver actually would.
+const RESOLVER_IMPLEMENTATION_EXTENSIONS: readonly string[] = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts']
+/** Every path a resolver could land on for `targetAbsNoExt`, a STATIC property of the CONFIGURATION
+ *  entry (independent of which candidate a real resolver picks first for any ONE specifier today —
+ *  the same "any live path is live" posture `pathsTargetHitsHome`'s wildcard branch already takes):
+ *  the bare path as written (already extension-complete entries match here, unchanged); each
+ *  implementation extension appended (c1/c2/c3's own shape: an extensionless target); `/index` +
+ *  each extension (a directory-style target); and, when the target already ends `.js` (a common
+ *  compiled-output convention), the same path with `.ts` substituted — the source file such a
+ *  target usually really names. */
+function resolverCandidatePaths(targetAbsNoExt: string): string[] {
+  const candidates = [targetAbsNoExt]
+  for (const ext of RESOLVER_IMPLEMENTATION_EXTENSIONS) candidates.push(targetAbsNoExt + ext)
+  for (const ext of RESOLVER_IMPLEMENTATION_EXTENSIONS) candidates.push(`${targetAbsNoExt}/index${ext}`)
+  if (targetAbsNoExt.endsWith('.js')) candidates.push(`${targetAbsNoExt.slice(0, -3)}.ts`)
+  return candidates
+}
+/** Resolver-aware replacement for a bare `homeAbsSet.has(abs)` — returns the home path actually hit,
+ *  or `null`. Used by all three CONFIGURATION checks (tsconfig `paths`, package.json fields,
+ *  next.config aliases) so a target spelled without its implementation extension is refused exactly
+ *  like the same target spelled WITH it. */
+function resolverHitsHome(targetAbs: string, homeAbsSet: ReadonlySet<string>): string | null {
+  for (const candidate of resolverCandidatePaths(targetAbs)) {
+    if (homeAbsSet.has(candidate)) return candidate
+  }
+  return null
+}
+
 /** Does `targetPattern` (one entry of a `paths[key]` array, e.g. `'./src/lib/fba/*'` or a literal
  *  `'./src/lib/fba/listingPipeline.ts'`) resolve — for SOME wildcard substitution, if it has one —
  *  onto a restricted home file? Deliberately independent of any ONE specifier's actual resolution
@@ -892,8 +976,7 @@ function pathsTargetHitsHome(targetPattern: string, baseDir: string, homeAbsSet:
   const starIdx = targetPattern.indexOf('*')
   if (starIdx === -1) {
     const abs = toPosix(path.resolve(baseDir, targetPattern))
-    for (const home of homeAbsSet) if (abs === home) return home
-    return null
+    return resolverHitsHome(abs, homeAbsSet)
   }
   const prefix = targetPattern.slice(0, starIdx)
   const suffix = targetPattern.slice(starIdx + 1)
@@ -954,8 +1037,9 @@ function findPackageJsonConfigViolations(pkgJsonAbsPosix: string, text: string, 
     for (const leaf of leaves) {
       if (!leaf.startsWith('.') && !leaf.startsWith('/')) continue
       const abs = toPosix(path.resolve(pkgDir, leaf))
-      if (homeAbsSet.has(abs)) {
-        violations.push(`${rel || 'package.json'}: "${field}" targets '${leaf}' — resolves to a restricted home module (${abs}); refused as a CONFIGURATION entry regardless of which condition a resolver actually picks`)
+      const hit = resolverHitsHome(abs, homeAbsSet)
+      if (hit) {
+        violations.push(`${rel || 'package.json'}: "${field}" targets '${leaf}' — resolves to a restricted home module (${hit}); refused as a CONFIGURATION entry regardless of which condition a resolver actually picks`)
       }
     }
   }
@@ -1019,7 +1103,8 @@ function findNextConfigAliasViolations(host: ts.CompilerHost, homeAbsSet: Readon
   const sf = ts.createSourceFile(nextConfigAbs, text, ts.ScriptTarget.ES2017, true)
   const checkTarget = (spec: string, label: string): void => {
     const abs = toPosix(path.resolve(configDir, spec))
-    if (homeAbsSet.has(abs)) violations.push(`next.config.ts: ${label} '${spec}' resolves to a restricted home module (${abs}); refused as a CONFIGURATION entry regardless of downstream use`)
+    const hit = resolverHitsHome(abs, homeAbsSet)
+    if (hit) violations.push(`next.config.ts: ${label} '${spec}' resolves to a restricted home module (${hit}); refused as a CONFIGURATION entry regardless of downstream use`)
   }
   const visit = (node: ts.Node): void => {
     if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name) && node.name.text === 'resolveAlias' && ts.isObjectLiteralExpression(node.initializer)) {
@@ -1045,10 +1130,29 @@ function findNextConfigAliasViolations(host: ts.CompilerHost, homeAbsSet: Readon
 }
 
 let cachedRealRootNames: string[] | null = null
-/** The real tree's root file list, computed once and returned as a fresh array each call so a
- *  caller may safely append extra (synthetic) paths without mutating the shared cache. */
+/** RULING C3 (fix round C1, wire Important I1): the root list is now `tsc`'s OWN include set —
+ *  `parsed.fileNames` from the SAME parse `getRealCompilerOptionsCached` reads its options from
+ *  (`parseRealTsconfigOnce`) — filtered to drop `node_modules` (should never appear, kept as a
+ *  belt-and-braces guard), test files (`COMPILED_TEST_RE`, unchanged from the old walk's own
+ *  exclusion), and `.d.ts` files (handled separately by `checkDtsValueReExports`'s own program-wide
+ *  `.d.ts` loop below — a `.d.ts` in `rootNames` would add nothing that loop does not already see,
+ *  and TypeScript root-listing a declaration file is redundant, never wrong, but excluded here to
+ *  match the OLD walk's own semantics exactly). This is a STRICT superset of the old
+ *  `listTsFilesFlat(SRC_ROOT)` walk: every file the old walk found is also in `tsc`'s include set
+ *  (verified: `tsc12.cjs`, review B9/wire, 409 files, 397 inside `src/`), PLUS the 12 include-set
+ *  files outside `src/` the old walk could never reach at all (`next-env.d.ts`, `next.config.ts`,
+ *  `vitest.config.ts`, 9 `scripts/*.ts`) — `a1`'s shape (below) is exactly one of those 9. The real
+ *  tree's root file list, computed once and returned as a fresh array each call so a caller may
+ *  safely append extra (synthetic) paths without mutating the shared cache. */
 function getRealRootNamesCached(): string[] {
-  if (!cachedRealRootNames) cachedRealRootNames = listTsFilesFlat(SRC_ROOT)
+  if (!cachedRealRootNames) {
+    parseRealTsconfigOnce()
+    cachedRealRootNames = cachedRealFileNames!
+      .map((f) => toPosix(f))
+      .filter((f) => !f.includes('/node_modules/'))
+      .filter((f) => !COMPILED_TEST_RE.test(path.posix.basename(f)))
+      .filter((f) => !/\.d\.ts$/.test(f))
+  }
   return [...cachedRealRootNames]
 }
 /** Passed as `oldProgram` to every `ts.createProgram` call below (see `findEnumerationViolations`) —
@@ -1753,7 +1857,7 @@ function findEnumerationViolations(inputs: EnumerationProgramInputs): { violatio
  *  Nothing is ever written to disk; `cleanup` is a no-op kept only so every existing call site's
  *  `const { inputs, cleanup } = scratchCopy(...); try { ... } finally { cleanup() }` shape still
  *  compiles and runs unchanged. */
-function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: string }; extra?: { relPath: string; content: string; notRoot?: boolean } | readonly { relPath: string; content: string; notRoot?: boolean }[]; packageJson?: Record<string, unknown>; pathsOverlay?: Record<string, string[]> }): { inputs: EnumerationProgramInputs; cleanup: () => void } {
+function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: string }; extra?: { relPath: string; content: string; notRoot?: boolean } | readonly { relPath: string; content: string; notRoot?: boolean }[]; packageJson?: Record<string, unknown>; pathsOverlay?: Record<string, string[]>; tsconfigOverlay?: string }): { inputs: EnumerationProgramInputs; cleanup: () => void } {
   const listingPipelineAbs = path.join(SRC_ROOT, 'lib/fba/listingPipeline.ts')
   const composerAbs = path.join(SRC_ROOT, 'lib/fba/itemHighlightComposer.ts')
   const overlay = new Map<string, string>()
@@ -1784,14 +1888,20 @@ function scratchCopy(opts: { homeAppend?: { rel: 'pipeline' | 'composer'; text: 
   if (opts.packageJson) {
     overlay.set(toPosix(path.join(process.cwd(), 'package.json')), JSON.stringify(opts.packageJson))
   }
-  // RULING U1 (fix round B9b): a NEW tsconfig `paths` entry (n1/n2's "~ih", n18's "@ih/*" fallback
-  // array) is expressed by merging onto the REAL, cached tsconfig options in plain JS — never by
-  // writing a synthetic tsconfig.json for the overlay host to serve (the committed file is never
-  // touched, and `getRealCompilerOptionsCached` deliberately reads it straight off disk — see its
-  // own comment above).
-  const options: ts.CompilerOptions = opts.pathsOverlay
-    ? { ...getRealCompilerOptionsCached(), paths: { ...(getRealCompilerOptionsCached().paths ?? {}), ...opts.pathsOverlay } }
-    : getRealCompilerOptionsCached()
+  // RULING C5 (fix round C1, wire Important I3): `tsconfigOverlay` (n1's own pin, below) overlays
+  // `tsconfig.json` ITSELF through the same `overlay` map every other CONFIGURATION check already
+  // reads through — genuinely PARSED, never a hand-copied literal. The committed file on disk is
+  // never touched either way. `pathsOverlay` (n2, n18) stays as its OWN, separate mechanism: a
+  // plain-JS merge onto the real, cached options — still real options underneath, just expressed
+  // without round-tripping through a synthetic JSON text.
+  if (opts.tsconfigOverlay !== undefined) {
+    overlay.set(toPosix(path.join(process.cwd(), 'tsconfig.json')), opts.tsconfigOverlay)
+  }
+  const options: ts.CompilerOptions = opts.tsconfigOverlay !== undefined
+    ? getRealCompilerOptionsCached(overlay)
+    : opts.pathsOverlay
+      ? { ...getRealCompilerOptionsCached(), paths: { ...(getRealCompilerOptionsCached().paths ?? {}), ...opts.pathsOverlay } }
+      : getRealCompilerOptionsCached()
   const inputs: EnumerationProgramInputs = { rootNames, options, listingPipelineAbs, composerAbs, overlay }
   return { inputs, cleanup: () => {} }
 }
@@ -2134,13 +2244,58 @@ describe('RULING U1 (fix round B9b, wire Blocking B1 scoped by spec §2i): CONFI
     expect(getRealCompilerOptionsCached().strict).toBe(true)
   })
 
+  // RULING C3 (fix round C1, wire Important I1; phase-b9-review-wire.md §I1): U1 point 1 says "the
+  // program is built from the repo's REAL tsconfig" — the OLD root list was `listTsFilesFlat(SRC_ROOT)`,
+  // a hand-rolled directory walk of `src/` ALONE, so a call site OUTSIDE `src/` but INSIDE the real
+  // tsconfig's own `include` set (the committed `"**/*.ts"` glob covers `scripts/*.ts` too) compiled
+  // clean and was never a root of THIS scanner's program at all — unreachable, regardless of what it
+  // called. `getRealRootNamesCached` now derives from `parsed.fileNames`, the SAME include-set parse
+  // `getRealCompilerOptionsCached` reads its options from.
+  it('the real root list is a STRICT SUPERSET of the old src/-only walk — it includes real scripts/*.ts files outside src/', () => {
+    const roots = getRealRootNamesCached()
+    const scriptsRoots = roots.filter((r) => /\/scripts\//.test(r))
+    expect(scriptsRoots.length, JSON.stringify(roots.filter((r) => !r.includes('/src/')))).toBeGreaterThan(0)
+    // every file the OLD walk found is still here (a strict superset, never a replacement)
+    for (const abs of listTsFilesFlat(SRC_ROOT)) expect(roots.includes(toPosix(abs)), abs).toBe(true)
+  })
+  // RULING C3 ("a1"-style, executed against the REAL scripts/ tree, never a synthetic root): overlays
+  // a REAL scripts/*.ts file's OWN path with content that calls `buildItemHighlights` directly — the
+  // overlay is `notRoot: true` (scratchCopy's own auto-push into `rootNames` for a synthetic `extra`
+  // is deliberately NOT used here), so this shape is refused ONLY if `getRealRootNamesCached` itself
+  // already carries this exact real path as a root; it proves THIS mechanism, not the generic extra
+  // machinery every other shape in this file also relies on.
+  it('sensitivity ("a1", a real scripts/*.ts call site, reached ONLY via the real include-set root list, never scratchCopy\'s synthetic-extra auto-push) — REFUSED', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: {
+        relPath: '../scripts/stress-trademark-proximity.ts',
+        notRoot: true,
+        content: `import { buildItemHighlights } from '../src/lib/fba/listingPipeline'\nbuildItemHighlights({} as never)\n`,
+      },
+    })
+    try {
+      const scriptAbs = toPosix(path.join(SRC_ROOT, '..', 'scripts', 'stress-trademark-proximity.ts'))
+      expect(inputs.rootNames.includes(scriptAbs), 'the real scripts/ file must already be a root').toBe(true)
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"a1" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+    } finally { cleanup() }
+  })
+
   // ─── REFUSED: the CONFIGURATION-level checks (tsconfig paths / package.json fields / next.config
   // aliases) and the new .d.ts value-re-export rule. Each shape is the reviewer's own r11-wire
   // fixture, reproduced verbatim (paths/package.json/next.config content included). ─────────────
 
-  it('sensitivity ("n1", tsconfig paths alias, named import) — REFUSED: a brand-new "~ih" paths entry pointing at the home file is caught once the program is built from the real tsconfig', () => {
+  // RULING C5 (fix round C1, wire Important I3): the OLD n1 pin used `pathsOverlay`, a JS merge onto
+  // ALREADY-cached options — it could never have caught a regression back to a hand-copied literal
+  // option set, because it never read `tsconfig.json` at all. This pin overlays the COMMITTED
+  // tsconfig.json's OWN text (read off disk, JSON-parsed, the "~ih" key added, re-stringified — never
+  // hand-typed) through `getRealCompilerOptionsCached`'s overlay parameter, so it genuinely exercises
+  // "a new entry in the committed tsconfig.json is honoured".
+  it('sensitivity ("n1", tsconfig paths alias, named import, via a COMMITTED-tsconfig OVERLAY) — REFUSED: a brand-new "~ih" paths entry, added to the REAL tsconfig.json\'s own text and re-parsed, is caught once the program is built from it', () => {
+    const realTsconfigText = fs.readFileSync(path.join(process.cwd(), 'tsconfig.json'), 'utf8')
+    const realTsconfigJson = JSON.parse(realTsconfigText) as { compilerOptions: { paths?: Record<string, string[]> } }
+    realTsconfigJson.compilerOptions.paths = { ...realTsconfigJson.compilerOptions.paths, '~ih': ['./src/lib/fba/listingPipeline.ts'] }
     const { inputs, cleanup } = scratchCopy({
-      pathsOverlay: { '~ih': ['./src/lib/fba/listingPipeline.ts'] },
+      tsconfigOverlay: JSON.stringify(realTsconfigJson),
       extra: { relPath: 'app/api/fba/probe-u1-n1/route.ts', content: `import { /* x */ buildItemHighlights as b } from '~ih'\nexport async function POST() { return Response.json(b({} as never)) }` },
     })
     try {
@@ -2160,26 +2315,29 @@ describe('RULING U1 (fix round B9b, wire Blocking B1 scoped by spec §2i): CONFI
     } finally { cleanup() }
   })
 
-  // Mutation-tested (round's report): disabling the package.json FIELD scan alone leaves this
-  // shape flagged too — WITHIN a full program build (as opposed to this round's own standalone
-  // `ts.resolveModuleName` reproduction script, run before any fix, which showed the "types"
-  // condition winning outside program-building context), resolving "#ihp" for a file that is
-  // actually PART OF the program resolves to the "default" condition (home), so the pre-existing
-  // namespace-import declaration rule already sees a plain resolved-to-home import. The package.json
-  // field scan (mechanism C) still independently refuses this CONFIGURATION entry regardless of
-  // downstream use, and remains the ONLY protection if a future TypeScript version's condition
-  // resolution for program-internal files ever prefers "types" the way the standalone probe did.
-  it('sensitivity ("n3", package.json "imports" with a "types" condition stub) — REFUSED (redundantly, within a full program build; the package.json field scan is the non-redundant backstop — see n4)', () => {
+  // RULING C4 (fix round C1, wire Important I2; phase-b9-review-wire.md §I2): the OLD fixture
+  // overlaid its stub at `relPath: 'u1IhpStub.d.ts'`, which `scratchCopy` joins onto `SRC_ROOT` as
+  // `src/u1IhpStub.d.ts` — but the package.json "types" condition below names
+  // `./src/lib/fba/u1IhpStub.d.ts`, a DIFFERENT path that never existed. TypeScript's own module
+  // resolution therefore never found a "types" file to prefer at all, fell straight through to
+  // "default" (home), and the shape was refused by the ordinary resolved-to-home import rule — the
+  // SAME rule that refuses a plain import with no package.json trickery whatsoever, never the
+  // package.json FIELD scan this pin's title claims to isolate. The stub now sits exactly where the
+  // "types" condition points, so a future TypeScript version that ever DOES prefer "types" for a
+  // program-internal file has something real to resolve to, and the mutation proof below (U2/U10)
+  // shows the field scan is what actually catches it.
+  it('sensitivity ("n3", package.json "imports" with a "types" condition stub) — REFUSED by the package.json FIELD scan (mechanism C): the stub sits exactly where the "types" condition points, so this is the shape the scan exists for, not a resolved-to-home import that would be caught anyway', () => {
     const { inputs, cleanup } = scratchCopy({
       packageJson: { name: 'u1-scratch', private: true, imports: { '#ihp': { types: './src/lib/fba/u1IhpStub.d.ts', default: './src/lib/fba/listingPipeline.ts' } } },
       extra: [
-        { relPath: 'u1IhpStub.d.ts', content: 'export declare function buildItemHighlights(input: unknown): { value: string }\n' },
+        { relPath: 'lib/fba/u1IhpStub.d.ts', content: 'export declare function buildItemHighlights(input: unknown): { value: string }\n' },
         { relPath: 'app/api/fba/probe-u1-n3/route.ts', content: `import * as ih from '#ihp'\nexport async function POST() { const f = ih.buildItemHighlights; return Response.json(f({})) }` },
       ],
     })
     try {
       const { violations } = findEnumerationViolations(inputs)
       expect(violations.length, `"n3" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      expect(violations.some((v) => v.includes('"imports" targets')), JSON.stringify(violations)).toBe(true)
     } finally { cleanup() }
   })
 
@@ -2195,6 +2353,24 @@ describe('RULING U1 (fix round B9b, wire Blocking B1 scoped by spec §2i): CONFI
       const { violations } = findEnumerationViolations(inputs)
       expect(violations.length, `"n4" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
       expect(violations.some((v) => v.includes('u1ihdir/package.json')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+
+  // RULING C6 (fix round C1, wire Important I4; phase-b9-review-wire.md §I4): n4 with its own "main"
+  // spelled WITHOUT the ".ts" extension ("../listingPipeline", the shape a hand-written package.json
+  // commonly uses) — the exact-string comparison used to miss this; `resolverHitsHome` now tries the
+  // implementation extensions before giving up.
+  it('sensitivity ("c2", nested package.json "main" WITHOUT its ".ts" extension) — REFUSED: a resolver would still land on the SAME home file', () => {
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: 'lib/fba/u1c2dir/package.json', content: '{"main":"../listingPipeline"}' },
+        { relPath: 'app/api/fba/probe-u1-c2/route.ts', content: `import * as ih from '@/lib/fba/u1c2dir'\nexport async function POST() { const f = ih.buildItemHighlights; return Response.json(f({})) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"c2" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      expect(violations.some((v) => v.includes('u1c2dir/package.json')), JSON.stringify(violations)).toBe(true)
     } finally { cleanup() }
   })
 
@@ -2225,6 +2401,25 @@ describe('RULING U1 (fix round B9b, wire Blocking B1 scoped by spec §2i): CONFI
     try {
       const { violations } = findEnumerationViolations(inputs)
       expect(violations.length, `"n11" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      expect(violations.some((v) => v.includes('next.config.ts')), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+
+  // RULING C6 (fix round C1, wire Important I4): n11 with its `resolveAlias` target spelled WITHOUT
+  // its ".ts" extension — the exact same over-narrow comparison as c1/c2.
+  it('sensitivity ("c3", next.config.ts turbopack.resolveAlias target WITHOUT its ".ts" extension) — REFUSED: a resolver would still land on the SAME home file', () => {
+    const stubContent = `export function buildItemHighlights(input: unknown): { value: string } { void input; return { value: 'stub' } }\n`
+    const nextConfigOverlay = `import type { NextConfig } from 'next'\nconst nextConfig: NextConfig = { turbopack: { resolveAlias: { '@/lib/fba/u1c3Stub': './src/lib/fba/listingPipeline' } } }\nexport default nextConfig\n`
+    const { inputs, cleanup } = scratchCopy({
+      extra: [
+        { relPath: 'lib/fba/u1c3Stub.ts', content: stubContent },
+        { relPath: '../next.config.ts', content: nextConfigOverlay, notRoot: true },
+        { relPath: 'app/api/fba/probe-u1-c3/route.ts', content: `import * as s from '@/lib/fba/u1c3Stub'\nexport async function POST() { const f = s.buildItemHighlights; return Response.json(f({})) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"c3" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
       expect(violations.some((v) => v.includes('next.config.ts')), JSON.stringify(violations)).toBe(true)
     } finally { cleanup() }
   })
@@ -2300,6 +2495,26 @@ describe('RULING U1 (fix round B9b, wire Blocking B1 scoped by spec §2i): CONFI
       const { violations } = findEnumerationViolations(inputs)
       expect(violations.length, `"n18" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
       expect(violations.some((v) => v.includes(`paths['@ih/*']`)), JSON.stringify(violations)).toBe(true)
+    } finally { cleanup() }
+  })
+
+  // RULING C6 (fix round C1, wire Important I4; phase-b9-review-wire.md §I4): the SAME "fallback
+  // array, first target wins today, second target is still a live path onto home" shape as n18, but
+  // through the NON-wildcard branch (neither the key nor either target carries a "*"), and with the
+  // SECOND target spelled WITHOUT its ".ts" extension — c1's `pathsTargetHitsHome` exact-string
+  // comparison used to miss this even though a real resolver still lands on the same home file.
+  it('sensitivity ("c1", tsconfig paths NON-WILDCARD fallback array, SECOND target WITHOUT its ".ts" extension) — REFUSED: the array\'s second target resolves to home even though the first target (a stub file) wins for this one specifier today', () => {
+    const { inputs, cleanup } = scratchCopy({
+      pathsOverlay: { '~ihb': ['./ihtypes/listingPipeline', './src/lib/fba/listingPipeline'] },
+      extra: [
+        { relPath: '../ihtypes/listingPipeline.d.ts', content: 'export declare function buildItemHighlights(input: unknown): { value: string }\n', notRoot: true },
+        { relPath: 'app/api/fba/probe-u1-c1/route.ts', content: `import * as lp from '~ihb'\nexport async function POST() { const f = lp.buildItemHighlights; return Response.json(f({})) }` },
+      ],
+    })
+    try {
+      const { violations } = findEnumerationViolations(inputs)
+      expect(violations.length, `"c1" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      expect(violations.some((v) => v.includes(`paths['~ihb']`)), JSON.stringify(violations)).toBe(true)
     } finally { cleanup() }
   })
 

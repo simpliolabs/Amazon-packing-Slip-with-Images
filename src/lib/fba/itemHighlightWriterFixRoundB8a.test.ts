@@ -292,7 +292,12 @@ describe('RULING S1: a garment-head unit is offered only when an identity unit w
       expect(calls.length).toBeGreaterThan(0) // the writer DID run (eligible; identity-null alone is not a skip)
       for (const c of calls) {
         expect(c.user).not.toMatch(/DESIGN NAME/)
-        expect(JSON.parse(c.user.match(/(\{"identity":.*\})/)?.[1] ?? '{}')['garment-head'] ?? []).toEqual([])
+        // RULING C9 (fix round C1, value minor m3): the OLD `?? '{}'` silent fallback made this pin
+        // compare `[]` to `[]` and pass even if the grouped-units JSON were missing entirely (a
+        // change to the prompt's own shape would go undetected) — assert the match exists FIRST.
+        const m = c.user.match(/(\{"identity":.*\})/)
+        expect(m, c.user).not.toBeNull()
+        expect(JSON.parse(m![1])['garment-head'] ?? []).toEqual([])
       }
     } finally { delete process.env.IH_WRITER }
   })
@@ -327,7 +332,11 @@ describe('RULING S1: a garment-head unit is offered only when an identity unit w
       const aCallsOnly = calls.filter((c) => !c.user.includes('DESIGN NAME'))
       expect(aCallsOnly.length, JSON.stringify(calls.map((c) => c.user.slice(0, 40)))).toBeGreaterThan(0)
       for (const c of aCallsOnly) {
-        const grouped = JSON.parse(c.user.match(/(\{"identity":.*\})/)?.[1] ?? '{}')
+        // RULING C9 (fix round C1, value minor m3): see the single-design pin above — no silent
+        // `?? '{}'` fallback; the match must exist.
+        const m = c.user.match(/(\{"identity":.*\})/)
+        expect(m, c.user).not.toBeNull()
+        const grouped = JSON.parse(m![1])
         expect(grouped['garment-head'] ?? [], c.user).toEqual([])
       }
     } finally { delete process.env.IH_WRITER }
@@ -361,6 +370,23 @@ describe('RULING S2: the wear fact stands alone in its own comma clause', () => 
       if (!v.ok) expect(v.violation).toMatch(/is a wear-fact unit and must stand ALONE in its own "," comma clause/)
     })
   }
+
+  // RULING C9 (fix round C1, S2/T4 minor 2; phase-b9-review-value.md m2): this message is the ONE
+  // text a model actually receives right after it misplaces the wear fact — T4 already rebuilt the
+  // registry sentence and the relation-wear retry message to teach the END only, but this THIRD text
+  // still said "put it between two commas, or at the very start/end of the line" (a model that took
+  // the START option shipped a true line that opened on the wear fact and pushed the design name off
+  // the front). Now matches T4's own sentence.
+  it('RULING C9: the S2 violation message matches T4\'s sentence — teaches the very END of the line, never the start, and never "between two commas"', () => {
+    const parts: ArrangementPart[] = [{ unit: id('Retro Sunset') }, { unit: garmentHead }, { glue: ',' }, { unit: id('Can be worn as Oversized') }, { glue: 'and' }, { unit: id('Vintage Beach Vibes') }]
+    const v = validateArrangement({ parts }, units)
+    expect(v.ok, JSON.stringify(v)).toBe(false)
+    if (!v.ok) {
+      expect(v.violation, v.violation).toMatch(/very END of the line, never the start/)
+      expect(v.violation, v.violation).not.toMatch(/between two commas/)
+      expect(v.violation, v.violation).not.toMatch(/very start\/end of the line/)
+    }
+  })
 
   it('POSITIVE: alone at the very START of the line (no preceding glue) still ships', () => {
     const parts: ArrangementPart[] = [
@@ -418,21 +444,48 @@ describe('RULING S2: the wear fact stands alone in its own comma clause', () => 
   // shapes 100% of the time. A model that followed that message literally was refused on 4 of the 5
   // joins it named, 98/98 times. Pinned here so neither the taught sentence nor the retry message
   // ever offers and/&/—/| for the wear fact again.
-  it('RULING T4: the rendered GRAMMAR sentence exempts the wear fact from the list-join grant, and no longer calls it "LIST-JOIN ONLY"', () => {
+  // RULING C7 (fix round C1, value Important; phase-b9-review-value.md I-1): the two pins below used
+  // to assert the absence of the OLD, LITERAL wording ("both the brand and the wear fact are
+  // LIST-JOIN ONLY", "list-join only", the exact quoted token string) — re-offering "and"/"&" to the
+  // wear fact in NEW words (T4e/T4f below) left every one of them GREEN, because none of them named
+  // the RULED PROPERTY itself: neither text may grant the wear fact a JOIN other than its own comma.
+  // `NO_QUOTED_WEAR_JOIN_RE` looks for a QUOTED "and"/"&"/"—"/"|" token — the shape a model actually
+  // reads as an offered glue choice — never a bare em-dash or the word "and" used as ordinary English
+  // prose (both appear, correctly, elsewhere in this same text at HEAD).
+  const NO_QUOTED_WEAR_JOIN_RE = /"(?:and|&|—|\|)"/
+  it('RULING T4: the rendered GRAMMAR sentence\'s wear-fact EXEMPTION clause grants it no JOIN except the comma its own rule below requires — no quoted "and"/"&"/"—"/"|" token, in the EXCEPT clause specifically (rule (2)\'s OWN opening line legitimately quotes all five as the general list-join set; that is not the wear fact\'s clause)', () => {
     const { system } = buildWriterPrompt(units, 'Retro Sunset', [], 'Comfort Colors')
     const grammarSentence = system.slice(system.indexOf('THE GRAMMAR'), system.indexOf('(4) No other glue word exists'))
     expect(grammarSentence, grammarSentence).toMatch(/EXCEPT a garment-head unit.*wear-fact unit/)
-    expect(grammarSentence, grammarSentence).not.toMatch(/both the brand and the wear fact are LIST-JOIN ONLY/)
     expect(grammarSentence, grammarSentence).toMatch(/wear fact STANDS ALONE/)
+    // The wear-fact EXEMPTION clause: from "EXCEPT" (where rule (2) carves the wear fact out of the
+    // list-join grant) to the end of rule (2)'s own prose ("— list joins otherwise …"), just before
+    // rule (3) begins. Scoped narrowly so rule (2)'s OWN opening enumeration of the five list-join
+    // tokens (correct, and unrelated to the wear fact) is never mistaken for a grant.
+    const exceptStart = grammarSentence.indexOf('EXCEPT a garment-head unit')
+    const exceptEnd = grammarSentence.indexOf('— list joins otherwise')
+    expect(exceptStart, grammarSentence).toBeGreaterThan(-1)
+    expect(exceptEnd, grammarSentence).toBeGreaterThan(exceptStart)
+    const exemptionClause = grammarSentence.slice(exceptStart, exceptEnd)
+    expect(exemptionClause, exemptionClause).not.toMatch(NO_QUOTED_WEAR_JOIN_RE)
+    // RULING C9 (fix round C1, value minor m1): the OLD wording ("it is never list-joined to a
+    // neighbour either") denied the wear fact EVERY list join, comma included, contradicting rule
+    // (3)'s own closing ("the wear fact STANDS ALONE in its own comma clause") and the WEAR_RULE
+    // registry sentence's explicit "," instruction below — a literal reader of rule (2) ALONE would
+    // find the wear fact has no legal position at all. The exemption clause must grant it its one
+    // real join, the "," its own rule requires, not deny every list join outright.
+    expect(exemptionClause, exemptionClause).toMatch(/","\s*immediately before it/)
+    expect(exemptionClause, exemptionClause).not.toMatch(/never list-joined to a neighbour either/)
   })
-  it('RULING T4: the relation-wear retry message is rebuilt from the S2 rule\'s own wording, and no longer names "," "and" "&" "—" "|" as the wear fact\'s valid joins', () => {
-    const parts: ArrangementPart[] = [{ unit: id('Retro Sunset') }, { unit: garmentHead }, { glue: 'with' }, { unit: id('Can be worn as Oversized') }]
-    const v = validateArrangement({ parts }, units)
-    expect(v.ok, JSON.stringify(v)).toBe(false)
-    if (!v.ok) {
-      expect(v.violation, v.violation).toMatch(/cannot introduce the wear-fact unit '.*' — the wear fact must stand ALONE in its own "," comma clause/)
-      expect(v.violation, v.violation).not.toMatch(/list-join only/)
-      expect(v.violation, v.violation).not.toMatch(/"," "and" "&" "—" "\|"/)
+  it('RULING T4: the relation-wear retry message — for BOTH "with" and "in" — offers no quoted "and"/"&"/"—"/"|" token for the wear fact; its only legal join is the comma its own rule requires', () => {
+    for (const relation of ['with', 'in'] as const) {
+      const parts: ArrangementPart[] = [{ unit: id('Retro Sunset') }, { unit: garmentHead }, { glue: relation }, { unit: id('Can be worn as Oversized') }]
+      const v = validateArrangement({ parts }, units)
+      expect(v.ok, `${relation}: ${JSON.stringify(v)}`).toBe(false)
+      if (!v.ok) {
+        expect(v.violation, `${relation}: ${v.violation}`).toMatch(/cannot introduce the wear-fact unit '.*' — the wear fact must stand ALONE in its own "," comma clause/)
+        expect(v.violation, `${relation}: ${v.violation}`).not.toMatch(NO_QUOTED_WEAR_JOIN_RE)
+      }
     }
   })
   it('RULING T4: the wear-fact-list-only registry sentence teaches the END of the line only, never the start', () => {
@@ -914,6 +967,63 @@ describe('RULING S6: R1\'s produce*-path brand pins, committed through BOTH prod
       expect(aLog?.accepted).toBe(false)
     } finally { delete process.env.IH_WRITER }
   })
+
+  // RULING C2 (fix round C1, compliance Important; phase-b9-review-compliance.md §2): the T3.4
+  // exact-brand-count pin above (SINGLE-design and PER-DESIGN sweeps) never actually reaches a cell
+  // where a SECOND brand carrier is OFFERED — every accepted cell in both sweeps is a
+  // `needBrand=false` identity-carries name (`ComfortColors Club`/`Comfort-Colors Crew`), whose sole
+  // carrier is the identity itself, placed first by `autoArrange` before any pool unit ever competes
+  // for room. `n !== 1` can therefore never fire either way: not `n === 2` (a second carrier is never
+  // even placed), and not `n === 0` (the identity always carries it). This cell is `needBrand=true`
+  // (a brandless title, a non-colliding, non-brand-carrying name — the SAME shape as the q8two test
+  // above) with the pool carrying TWO independent "Comfort Colors" phrases: the composer's own
+  // brand waterfall (`itemHighlightComposer.ts:524-528`) PICKS the higher-volume one as `brandPick`
+  // (`brandOrigin: 'pool'`), and the lower-volume one stays an ordinary member of
+  // `composed.candidates` — a genuine SECOND carrier OFFERED to `buildAdmittedUnits`. Admission's Q8
+  // drop (`itemHighlightWriter.ts:326-336`) removes it before the writer ever sees it, so the
+  // accepted line still carries the brand EXACTLY once — this is the cell the mutation-proof below
+  // needs to fail the pin on.
+  it('T3.4 exact-brand-count reaches a cell where a SECOND brand carrier is OFFERED (needBrand=true, a non-colliding, non-brand-carrying name, TWO independent pool phrases carrying the brand) — Q8 drops the second at admission, so the accepted line carries the brand exactly once', async () => {
+    process.env.IH_WRITER = 'on'
+    try {
+      const name = 'Retro Sunset' // non-colliding, does NOT itself carry "Comfort Colors"
+      const title = 'THE CEO Tee' // carries neither the design name nor the brand -> needBrand=true
+      const SECOND_BRAND_PHRASE = 'Comfort Colors Weekend Crew'
+      const pool = [...POOL.map((k, i) => kw(k, 5000 - i * 10)), kw(POOL_BRAND_PHRASE, 9999), kw(SECOND_BRAND_PHRASE, 9000)]
+      const input = {
+        finalTitle: title, pool, apparelProduct: true,
+        blankBrand: CC, netTitles: [title], designTokens: [name], capacityFamily: false, brandName: 'THE CEO',
+      }
+      const composerBaseline = buildItemHighlights(input)
+      expect(composerBaseline.composed?.needBrand, JSON.stringify(composerBaseline.composed)).toBe(true)
+      expect(composerBaseline.composed?.brandPick).toBe(POOL_BRAND_PHRASE) // the waterfall picked the higher-volume phrase
+      expect(composerBaseline.composed?.candidates).toContain(SECOND_BRAND_PHRASE) // the SECOND carrier IS offered to admission
+      const units = buildAdmittedUnits(composerBaseline.composed!, { designName: name, truthCtx: composerBaseline.truthCtx! })
+      // A hand-built arrangement, never `autoArrange` (which fills spec-facts BEFORE pool units and
+      // so never even TRIES the second carrier while it has room to spare) — this is the "place that
+      // carrier in-band" the ruling asks for: whenever the second carrier IS admitted (only possible
+      // under the brand-twice mutant below; at HEAD it never is), it is placed early, right after the
+      // primary brand unit, while the line still has budget.
+      const idU = units.find((u) => u.kind === 'identity')!
+      const relU = units.find((u) => u.text === '100% Ring-Spun Cotton')!
+      const brandU = units.find((u) => u.isBrand)!
+      const secondU = units.find((u) => u.text === SECOND_BRAND_PHRASE)
+      const relaxedU = units.find((u) => u.text === 'Relaxed Fit')!
+      const neckU = units.find((u) => u.text === 'Crew Neck')!
+      const sleeveU = units.find((u) => u.text === 'Short Sleeve')!
+      const parts: ArrangementPart[] = [{ unit: idU.id }, { glue: 'with' }, { unit: relU.id }, { glue: ',' }, { unit: brandU.id }]
+      if (secondU) parts.push({ glue: ',' }, { unit: secondU.id }, { glue: ',' }, { unit: relaxedU.id })
+      else parts.push({ glue: ',' }, { unit: relaxedU.id }, { glue: ',' }, { unit: neckU.id }, { glue: ',' }, { unit: sleeveU.id })
+      const arrangement = { parts }
+      const { client } = stubClient(arrangement)
+      const result = await produceItemHighlights(input, { openai: client })
+      expect(result.writerLog?.accepted, JSON.stringify(result.writerLog)).toBe(true)
+      // RULING T3.4: the accepted line carries the brand EXACTLY once — this is what the brand-twice
+      // mutant (Q8's admission-time drop AND the judge's own P1 "more than one carrier" check, both
+      // disabled) turns RED: with both live, the second carrier never reaches the rendered line.
+      expect(BRAND_COUNT(result.value), result.value).toBe(1)
+    } finally { delete process.env.IH_WRITER }
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1023,14 +1133,59 @@ describe('RULING S9: word-bounded identity strip; the readability verdict shares
     expect(v.ok, JSON.stringify(v)).toBe(false)
     if (!v.ok) expect(v.reason).toBe('states a gender audience beside "Unisex"')
   })
-  it('RULING T6: a comma the renderer attaches with NO SPACE ("Business B*tch,") still matches the identity token "B*tch" — trailing punctuation trimmed for comparison, never the char embedded inside the token', () => {
+  // RULING C1 (fix round C1, truth Important; phase-b9-review-truth.md I-1): the ORIGINAL version of
+  // this pin used "Business B*tch" as the identity — a phrase with NO LEAN_FEM/LEAN_MASC core word at
+  // all (`contentTruth.ts`), so `writerReadabilityVerdict` returned `ok:true` whether or not the trim
+  // (or the strip itself) ever ran; the pin stayed GREEN under the `t6trim` mutant (`foldTokenCore`
+  // without the leading/trailing punctuation trim) and even under `t6none` (`stripIdentityWords`
+  // deleted outright). "Boss Lady" DOES carry a gender-core word ("Lady"), so this is the SAME
+  // comma-attached-with-no-space shape ("Boss Lady," — the renderer's own no-space comma, exactly as
+  // `identityPairViolation` builds it at `:1023`, and as `PUNCTUATION_ATTACH_LEFT` renders it), but now
+  // one where the trim's absence is actually observable: without it, "Lady," (trailing comma, no
+  // trim) never matches identity token "lady", so it stays UN-stripped, and it then reads as an
+  // outside gender-audience word beside the bare "Unisex Fit" spec-fact.
+  it('RULING T6: a comma the renderer attaches with NO SPACE ("Boss Lady,") still matches the identity token "Lady" — trailing punctuation trimmed for comparison, never a char embedded inside a token; "Lady" IS a gender-core word, so the trim/strip actually being applied is what keeps this GREEN', () => {
     const units: AdmittedUnit[] = [
-      { id: 'u0', text: 'Business B*tch', kind: 'identity', numberable: false },
+      { id: 'u0', text: 'Boss Lady', kind: 'identity', numberable: false },
       { id: 'u1', text: 'Unisex Fit', kind: 'spec-fact', numberable: false },
       { id: 'u2', text: 'Vintage Beach Vibes', kind: 'pool', numberable: false },
     ]
-    const line = 'Business B*tch, Unisex Fit, Vintage Beach Vibes with a Relaxed Fit'
+    const line = 'Boss Lady, Unisex Fit, Vintage Beach Vibes with a Relaxed Fit'
     const v = writerReadabilityVerdict(line, units)
     expect(v.ok, JSON.stringify(v)).toBe(true)
+  })
+  // RULING C1 (fix round C1, truth Important, the ADMISSION-level half): the SAME shape, but through
+  // `buildAdmittedUnits`'s own identity-collision filter (`identityPairViolation`, `:412`) rather than
+  // the readability verdict — R2's own docstring (`itemHighlightWriter.ts:1020-1021`) names this exact
+  // pairing ("Unisex Fit" beside "Crazy Cat Lady") as the case the strip is FOR; until now nothing
+  // pinned it directly.
+  it('RULING T6 (admission): buildAdmittedUnits keeps "Unisex Fit" beside identity "Crazy Cat Lady" — stripping the identity leaves no gendered word, so the pair is clean and the unit is NOT dropped as identity-collision', () => {
+    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: CC.spec as never, allowedBrand: null, audience: 'adult', field: 'highlights' }
+    const units = buildAdmittedUnits(
+      { candidates: [], specFacts: ['Unisex Fit'], brandPick: null, wearFact: null },
+      { designName: 'Crazy Cat Lady', truthCtx },
+    )
+    expect(units.some((u) => u.text === 'Unisex Fit'), JSON.stringify(units)).toBe(true)
+  })
+
+  // RULING C9 (fix round C1, truth minor m11; phase-b9-review-truth.md): T6's own motivating identity,
+  // "Boss Lady!", is stripped correctly at both readability and admission — but the RENDERED line
+  // still trips the tail's push-seam content rule (`ihContentRuleViolations`'s sentence-punctuation
+  // check, `productDetailAttrs.ts:886`), because the identity's OWN trailing "!" is real text in the
+  // line, not something the model chose. The writer previously mapped every 'sentence-shape' tail
+  // refusal to the SAME "needs at least one ',' between phrases" message — wrong here, since the
+  // line already has four commas; the real problem is the "!" the model cannot remove (it arranges
+  // unit IDs, never edits unit text). The retry now names the RIGHT rule.
+  it('RULING C9: a tail refusal on "Boss Lady!" (real sentence punctuation, not a missing comma) is reported with the ACCURATE message, not the comma-count one', () => {
+    const { units, runTail, truthCtx: ctx } = setup({ name: 'Boss Lady!', pool: ['Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'], blank: PURE_TEE })
+    const arrangement = autoArrange(units)!
+    const line = renderArrangement(arrangement.parts, units)
+    expect(line, line).toMatch(/^Boss Lady! /) // the "!" is followed by whitespace — this is the shape that trips it
+    const v = judgeWriterArrangement(arrangement, units, { truthCtx: ctx, runTail })
+    expect(v.ok, JSON.stringify(v)).toBe(false)
+    if (!v.ok) {
+      expect(v.violations[0], v.violations[0]).toMatch(/NO sentence punctuation/)
+      expect(v.violations[0], v.violations[0]).not.toMatch(/needs at least one ','/)
+    }
   })
 })

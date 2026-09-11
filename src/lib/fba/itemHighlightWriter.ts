@@ -39,7 +39,7 @@ import {
 import { PERFORMANCE_CLAIM_RE } from '@/lib/fba/blankSpecs'
 import {
   ihFoldWord, IH_GARMENT_HEAD_FOLDED, lineHasSignificantRepeat, classifyStoredIhLine,
-  significantWordsWithSurface, ihRepeatBudget, IH_MAX_WORD_REPEATS,
+  significantWordsWithSurface, ihRepeatBudget, IH_MAX_WORD_REPEATS, ihContentRuleViolations,
 } from '@/lib/fba/productDetailAttrs'
 import { titleCasePhrase } from '@/lib/fba/titleBand'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
@@ -737,7 +737,13 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
     const prevOk = !prev || (glueRole(prev) !== 'unit' && (prev as ArrangementGluePart).glue === ',')
     const nextOk = !next || (glueRole(next) !== 'unit' && (next as ArrangementGluePart).glue === ',')
     if (!prevOk || !nextOk) {
-      return `'${u.text}' is a wear-fact unit and must stand ALONE in its own "," comma clause — joined to a neighbour by "and"/"&"/"—"/"|" (or abutting one directly), it asserts a fit/cut claim this blank does not back; put it between two commas, or at the very start/end of the line`
+      // RULING C9 (fix round C1, S2/T4 minor 2): this message used to end "put it between two
+      // commas, or at the very start/end of the line" — a model that followed the START option
+      // literally shipped a true line whose design name was pushed off the front (S2 message m2,
+      // review B9's value lens). T4 already retired that ambiguity in the registry sentence and the
+      // relation-wear retry message (both now teach the END only); this is the third and last text
+      // that still offered START/MID — rebuilt from the SAME wear-rule wording those two use.
+      return `'${u.text}' is a wear-fact unit and must stand ALONE in its own "," comma clause — joined to a neighbour by "and"/"&"/"—"/"|" (or abutting one directly), it asserts a fit/cut claim this blank does not back; put a "," immediately before it, then end the line there — it belongs at the very END of the line, never the start`
     }
   }
   return null
@@ -1246,7 +1252,20 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
     // coarser hold bucket). RULING P7 (fix round B5, value Important): a `sentence-shape` reason
     // code names nothing the model was TAUGHT — map it to the plain-language rule it actually is.
     const rawReason = tail.reason ?? tail.hold ?? 'refused'
-    const reasonLabel = TAIL_REASON_MESSAGES[rawReason] ?? rawReason
+    let reasonLabel = TAIL_REASON_MESSAGES[rawReason] ?? rawReason
+    // RULING C9 (fix round C1, truth minor m11): `productDetailAttrs.ts`'s `'sentence-shape'` reason
+    // covers TWO genuinely different violations — a comma-less line (TAUGHT, via the registry's own
+    // "at least one ',' between phrases" rule, kept above unchanged) and a line carrying real
+    // sentence punctuation (".", "!" or "?"), e.g. a persona identity like "Boss Lady!" whose own
+    // trailing "!" trips this even when commas are plentiful. The flat map above always said "needs
+    // a comma" for BOTH, so a model refused for punctuation was told to add something it already
+    // had. Ask the ONE source (`ihContentRuleViolations`, never a copy) which sub-case actually fired
+    // on THIS line, and use its own message only for the punctuation case — the comma-count case
+    // keeps the taught wording untouched.
+    if (rawReason === 'sentence-shape') {
+      const real = ihContentRuleViolations(line).find((viol) => viol.reason === 'sentence-shape' && /sentence punctuation/.test(viol.message))
+      if (real) reasonLabel = real.message
+    }
     return { ok: false, violations: [`tail: refused (${reasonLabel})`] }
   }
   // RULING K1 (compliance B1; value I2): the tail must return the rendered bytes UNCHANGED. Any
@@ -1387,7 +1406,7 @@ export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
     // check it never got taught). Rule (3)'s closing parenthetical now says the wear fact STANDS
     // ALONE, superseding the stale "both the brand and the wear fact are LIST-JOIN ONLY" — the wear
     // fact is NOT list-join-only any more (S2); only the brand still is.
-    sentence: 'THE GRAMMAR (the only legal ways two units may sit next to each other): (1) two units may touch with NO glue between them ONLY when the RIGHT-hand one is a garment-head unit AND the LEFT-hand one is the IDENTITY unit (e.g. "<design name> Sweatshirt") — a garment-head unit may appear ONLY in that ONE position, directly after the identity, and NEVER anywhere else: never abutting a pool/spec/brand unit, and never reached by a list or relation join either ("Tee and Top", "Sweatshirt, Crewneck" are both illegal — a garment-head unit names the garment ONCE, right after the identity, or not at all). (2) "," "and" "&" "—" "|" are LIST joins and may join ANY two units EXCEPT a garment-head unit OR a wear-fact unit (rule 1 covers the garment-head unit\'s one legal position, it is never list-joined; the wear-fact unit has its own rule below and STANDS ALONE — it is never list-joined to a neighbour either) — list joins otherwise assert nothing between the items, exactly like a plain list. (3) "with" and "in" open a RELATION CLAUSE that stays open until the next "," — EVERY unit inside it (the one right after the join, and any later unit reached by a list join before the next ",") must be a spec-fact unit, and NEVER a pool, identity, wear-fact, or BRAND unit (a relation clause may only ever attach TRUE facts of this product; "with Deep Pockets" or "in Pink Lemonade" invent a feature/colour, and "with a Classic Fit and Deep Pockets" invents the SAME thing one join further out — start a NEW comma clause instead of adding a list join inside an open relation; "with Comfort Colors Tee" reads as a second garment and "with Can be worn as Oversized" is ungrammatical English — the brand unit is LIST-JOIN ONLY, and the wear fact STANDS ALONE in its own comma clause; see their own rules below). (4) No other glue word exists — do not use "for", "of", "to", "your", "on", "from", "that", "this" or "the"; they are not in the closed set above. No glue or punctuation may open or close the line, and no two glue tokens may sit next to each other except exactly one join immediately followed by "a"/"an".',
+    sentence: 'THE GRAMMAR (the only legal ways two units may sit next to each other): (1) two units may touch with NO glue between them ONLY when the RIGHT-hand one is a garment-head unit AND the LEFT-hand one is the IDENTITY unit (e.g. "<design name> Sweatshirt") — a garment-head unit may appear ONLY in that ONE position, directly after the identity, and NEVER anywhere else: never abutting a pool/spec/brand unit, and never reached by a list or relation join either ("Tee and Top", "Sweatshirt, Crewneck" are both illegal — a garment-head unit names the garment ONCE, right after the identity, or not at all). (2) "," "and" "&" "—" "|" are LIST joins and may join ANY two units EXCEPT a garment-head unit OR a wear-fact unit (rule 1 covers the garment-head unit\'s one legal position, it is never list-joined; the wear-fact unit\'s own rule below allows it exactly one join — a "," immediately before it — and no list join to a neighbour of any other kind) — list joins otherwise assert nothing between the items, exactly like a plain list. (3) "with" and "in" open a RELATION CLAUSE that stays open until the next "," — EVERY unit inside it (the one right after the join, and any later unit reached by a list join before the next ",") must be a spec-fact unit, and NEVER a pool, identity, wear-fact, or BRAND unit (a relation clause may only ever attach TRUE facts of this product; "with Deep Pockets" or "in Pink Lemonade" invent a feature/colour, and "with a Classic Fit and Deep Pockets" invents the SAME thing one join further out — start a NEW comma clause instead of adding a list join inside an open relation; "with Comfort Colors Tee" reads as a second garment and "with Can be worn as Oversized" is ungrammatical English — the brand unit is LIST-JOIN ONLY, and the wear fact STANDS ALONE in its own comma clause; see their own rules below). (4) No other glue word exists — do not use "for", "of", "to", "your", "on", "from", "that", "this" or "the"; they are not in the closed set above. No glue or punctuation may open or close the line, and no two glue tokens may sit next to each other except exactly one join immediately followed by "a"/"an".',
   },
   { id: 'article', sentence: '"a"/"an" may appear ONLY directly after a list or relation join, AND directly before a spec-fact unit whose own last word is "Fit" or "Neck" (e.g. "with a Classic Fit", "and a Crew Neck") — never before a pool/identity unit, never before the brand unit, never before a different kind of spec/wear-fact unit, and NEVER standing alone with no join immediately before it. Write "a"/"an" as you see fit; the correct spelling for the following word is chosen for you automatically.' },
   { id: 'band', sentence: `The rendered line must be ${CONTENT_CONTRACT.itemHighlights.min}-${CONTENT_CONTRACT.itemHighlights.max} characters.` },
