@@ -621,7 +621,13 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
     // fall through to the generic "must introduce a spec fact" message below) so the retry names the
     // SAME rule the prompt teaches.
     if (role === 'relation' && right.kind === 'wear-fact') {
-      return `relation '${run[0].glue}' cannot introduce the wear-fact unit '${right.text}' — the wear fact is list-join only ("," "and" "&" "—" "|"), never after "with"/"in"`
+      // RULING T4 (fix round B9a, value Important): rebuilt from the S2 stand-alone rule's OWN
+      // wording ("must stand ALONE in its own ',' comma clause") — the OLD message here still said
+      // "list-join only" and named "," "and" "&" "—" "|" as the wear fact's valid joins, exactly the
+      // pre-S2 rule this message was supposed to have been retired with. A model that followed THIS
+      // message literally (review B8's value lens measured it) was refused on 4 of those 5 joins
+      // 100% of the time by the S2 check it was never told about.
+      return `relation '${run[0].glue}' cannot introduce the wear-fact unit '${right.text}' — the wear fact must stand ALONE in its own "," comma clause, never after "with"/"in"`
     }
     if (role === 'relation' && !SPEC_KINDS.has(right.kind)) {
       return `relation '${run[0].glue}' must introduce a spec fact; '${right.text}' is a ${unitClassName(right.kind)} unit`
@@ -956,34 +962,42 @@ function countListSectionsFromShapes(shapes: readonly boolean[]): number {
   return sections
 }
 
-/** RULING S9 (fix round B8a, truth minor m6): escapes every regex-special character in `s` so it
- *  can be embedded literally inside a `RegExp` — a design name can contain any of them ("Ladies?!",
- *  "Cat (Person)"). */
-function escapeRegExpLiteral(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** RULING T6 (fix round B9a, truth m9, superseding S9's `\b`-regex approach entirely — never a
+ *  patch on top of it). Splits `text` on whitespace into tokens, and compares each token against the
+ *  identity's own tokens (also whitespace-split) CASE-FOLDED — never a `\b` word-boundary regex.
+ *  Review B8's truth lens (m9) measured exactly why `\b` cannot do this job: `\b` requires a
+ *  transition between a word character and a non-word character, so an identity phrase that STARTS
+ *  or ENDS in punctuation, followed/preceded by whitespace ("Boss Lady!", "#Girl Gang Lady"), has NO
+ *  boundary to match at its own non-word edge — the whole phrase silently failed to strip, and "Boss
+ *  Lady!" then read as carrying "Lady" beside a "Unisex" unit, wrongly refusing a line that should
+ *  have shipped. Token comparison sidesteps this: each token is trimmed of its own LEADING/TRAILING
+ *  punctuation before the fold-compare (so a comma the renderer attaches with no space — "Business
+ *  B*tch," — still matches the identity token "B*tch"), but punctuation EMBEDDED inside a token
+ *  ("B*tch" itself) is never touched, and the matched span's tokens are removed only as a whole
+ *  contiguous run — the identical semantics S9's docstring claimed but delivered only for the
+ *  word-boundary-safe case. */
+function tokenizeOnWhitespace(text: string): string[] {
+  return text.split(/\s+/).filter(Boolean)
 }
-/** RULING R2 (fix round B7a, value Blocking B2): "The design name is a PERSONA, not an audience
- *  claim." Removes the identity unit(s)' OWN rendered text from `text` before a gender/Unisex check
- *  reads it, so a design named "Ladies Man" or "Crazy Cat Lady" is judged on what OTHER units say,
- *  never on its own name. Units render verbatim (Q2) and each is used at most once, so the identity's
- *  exact stored text is always a contiguous substring of the rendered line when it is present.
- *  RULING S9 (fix round B8a, truth Minor m6, superseding R2's own docstring claim): the ORIGINAL
- *  `text.split(t).join(' ')` removed `t` as a RAW substring, not on word boundaries — so an
- *  identity ONE WORD long that happens to be a PREFIX of a gender-core word ("Lad") cut that word out
- *  of an entirely DIFFERENT unit's text ("Ladies Night Out" -> " ies Night Out", stripping the "Lad"
- *  that also starts "Ladies" and silently removing the gender signal readability exists to catch —
- *  the review's own A33/A34 control pair). `\b…\b` requires a WORD BOUNDARY on both sides of the
- *  matched span, so "Lad" no longer matches inside "Ladies" (there is no boundary between the 'd' of
- *  "Lad" and the 'i' of "Ladies" — both are word characters) while the exact phrase "Crazy Cat Lady"
- *  still matches only its own contiguous occurrence, unchanged from before. This is exact, not an
- *  approximation, in the sense the old docstring claimed but the old implementation did not deliver. */
+function foldTokenCore(token: string): string {
+  return token.replace(/^[^A-Za-z0-9]+/, '').replace(/[^A-Za-z0-9]+$/, '').toLowerCase()
+}
 function stripIdentityWords(text: string, identityTexts: readonly string[]): string {
-  let out = text
+  const textTokens = tokenizeOnWhitespace(text)
+  const removed = new Array<boolean>(textTokens.length).fill(false)
   for (const t of identityTexts) {
     if (!t) continue
-    out = out.replace(new RegExp(`\\b${escapeRegExpLiteral(t)}\\b`, 'g'), ' ')
+    const idTokens = tokenizeOnWhitespace(t).map(foldTokenCore)
+    if (!idTokens.length) continue
+    for (let i = 0; i <= textTokens.length - idTokens.length; i++) {
+      let match = true
+      for (let j = 0; j < idTokens.length; j++) {
+        if (removed[i + j] || foldTokenCore(textTokens[i + j]) !== idTokens[j]) { match = false; break }
+      }
+      if (match) { for (let j = 0; j < idTokens.length; j++) removed[i + j] = true }
+    }
   }
-  return out
+  return textTokens.map((tok, i) => (removed[i] ? '' : tok)).join(' ')
 }
 /** RULING R2: the SAME gender/Unisex violation `writerReadabilityVerdict`'s B6.2 half returns,
  *  factored out so `identityPairViolation` below can reuse it — one function, never a copy. Callers
@@ -1366,7 +1380,14 @@ export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
     // now list-join-only too, so rule (3)'s "spec-fact or wear-fact unit" narrows to "spec-fact unit"
     // — the dedicated `wear-fact-list-only` rule (below) teaches the wear fact's OWN restriction, the
     // same way the brand rule teaches the brand's.
-    sentence: 'THE GRAMMAR (the only legal ways two units may sit next to each other): (1) two units may touch with NO glue between them ONLY when the RIGHT-hand one is a garment-head unit AND the LEFT-hand one is the IDENTITY unit (e.g. "<design name> Sweatshirt") — a garment-head unit may appear ONLY in that ONE position, directly after the identity, and NEVER anywhere else: never abutting a pool/spec/brand unit, and never reached by a list or relation join either ("Tee and Top", "Sweatshirt, Crewneck" are both illegal — a garment-head unit names the garment ONCE, right after the identity, or not at all). (2) "," "and" "&" "—" "|" are LIST joins and may join ANY two units EXCEPT a garment-head unit (rule 1 covers its one legal position; it is never list-joined) — list joins assert nothing between the items, exactly like a plain list. (3) "with" and "in" open a RELATION CLAUSE that stays open until the next "," — EVERY unit inside it (the one right after the join, and any later unit reached by a list join before the next ",") must be a spec-fact unit, and NEVER a pool, identity, wear-fact, or BRAND unit (a relation clause may only ever attach TRUE facts of this product; "with Deep Pockets" or "in Pink Lemonade" invent a feature/colour, and "with a Classic Fit and Deep Pockets" invents the SAME thing one join further out — start a NEW comma clause instead of adding a list join inside an open relation; "with Comfort Colors Tee" reads as a second garment and "with Can be worn as Oversized" is ungrammatical English — both the brand and the wear fact are LIST-JOIN ONLY, see their own rules below). (4) No other glue word exists — do not use "for", "of", "to", "your", "on", "from", "that", "this" or "the"; they are not in the closed set above. No glue or punctuation may open or close the line, and no two glue tokens may sit next to each other except exactly one join immediately followed by "a"/"an".',
+    // RULING T4 (fix round B9a, value Important): rule (2) now EXEMPTS the wear fact from the list-
+    // join grant explicitly (it used to say only "EXCEPT a garment-head unit", so a literal reading
+    // of THIS sentence alone still offered "and"/"&"/"—"/"|" for the wear fact — review B8's value
+    // lens measured a model that followed that offer refused 100% of the time by the S2 grammar
+    // check it never got taught). Rule (3)'s closing parenthetical now says the wear fact STANDS
+    // ALONE, superseding the stale "both the brand and the wear fact are LIST-JOIN ONLY" — the wear
+    // fact is NOT list-join-only any more (S2); only the brand still is.
+    sentence: 'THE GRAMMAR (the only legal ways two units may sit next to each other): (1) two units may touch with NO glue between them ONLY when the RIGHT-hand one is a garment-head unit AND the LEFT-hand one is the IDENTITY unit (e.g. "<design name> Sweatshirt") — a garment-head unit may appear ONLY in that ONE position, directly after the identity, and NEVER anywhere else: never abutting a pool/spec/brand unit, and never reached by a list or relation join either ("Tee and Top", "Sweatshirt, Crewneck" are both illegal — a garment-head unit names the garment ONCE, right after the identity, or not at all). (2) "," "and" "&" "—" "|" are LIST joins and may join ANY two units EXCEPT a garment-head unit OR a wear-fact unit (rule 1 covers the garment-head unit\'s one legal position, it is never list-joined; the wear-fact unit has its own rule below and STANDS ALONE — it is never list-joined to a neighbour either) — list joins otherwise assert nothing between the items, exactly like a plain list. (3) "with" and "in" open a RELATION CLAUSE that stays open until the next "," — EVERY unit inside it (the one right after the join, and any later unit reached by a list join before the next ",") must be a spec-fact unit, and NEVER a pool, identity, wear-fact, or BRAND unit (a relation clause may only ever attach TRUE facts of this product; "with Deep Pockets" or "in Pink Lemonade" invent a feature/colour, and "with a Classic Fit and Deep Pockets" invents the SAME thing one join further out — start a NEW comma clause instead of adding a list join inside an open relation; "with Comfort Colors Tee" reads as a second garment and "with Can be worn as Oversized" is ungrammatical English — the brand unit is LIST-JOIN ONLY, and the wear fact STANDS ALONE in its own comma clause; see their own rules below). (4) No other glue word exists — do not use "for", "of", "to", "your", "on", "from", "that", "this" or "the"; they are not in the closed set above. No glue or punctuation may open or close the line, and no two glue tokens may sit next to each other except exactly one join immediately followed by "a"/"an".',
   },
   { id: 'article', sentence: '"a"/"an" may appear ONLY directly after a list or relation join, AND directly before a spec-fact unit whose own last word is "Fit" or "Neck" (e.g. "with a Classic Fit", "and a Crew Neck") — never before a pool/identity unit, never before the brand unit, never before a different kind of spec/wear-fact unit, and NEVER standing alone with no join immediately before it. Write "a"/"an" as you see fit; the correct spelling for the following word is chosen for you automatically.' },
   { id: 'band', sentence: `The rendered line must be ${CONTENT_CONTRACT.itemHighlights.min}-${CONTENT_CONTRACT.itemHighlights.max} characters.` },
@@ -1394,7 +1415,13 @@ export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
   // "stands ALONE in its own comma clause" — R6's own sentence still invited "and"/"&"/"—"/"|" onto
   // the wear fact, and every one of those joins was refused 100% of the time (the wear fact asserts a
   // fit/cut claim only on ITSELF, never paired with a neighbour any other way).
-  { id: 'wear-fact-list-only', sentence: 'A wear-fact unit (e.g. "Can be worn as Oversized") must stand ALONE in its own "," comma clause — never after "with"/"in" (like the brand unit, it is never the subject of a relation), and never joined to a NEIGHBOUR by "and" "&" "—" or "|" either: put a "," immediately before it and a "," immediately after it (or the very start/end of the line), with no other unit in between.', when: (ctx) => ctx.units.some((u) => u.kind === 'wear-fact') },
+  // RULING T4 (fix round B9a, value Important): the OLD wording taught THREE legal positions (mid-
+  // line between two commas, the very start, or the very end) — review B8's value lens (n2) measured
+  // that teaching the START buries the design name behind a clause fragment, exactly the opposite of
+  // what an Item Highlight is read for. Now teaches ONE position: the very END of the line, never the
+  // start, so the design name keeps the front. The mechanism itself (`validateGrammar`'s stand-alone
+  // check) is unchanged — this is a change to what is TAUGHT, not to what is enforced.
+  { id: 'wear-fact-list-only', sentence: 'A wear-fact unit (e.g. "Can be worn as Oversized") must stand ALONE in its own "," comma clause — never after "with"/"in" (like the brand unit, it is never the subject of a relation), and never joined to a NEIGHBOUR by "and" "&" "—" or "|" either: put a "," immediately before it, then end the line there. The wear fact belongs at the very END of the line, never the start — the design name keeps the front of the Item Highlight.', when: (ctx) => ctx.units.some((u) => u.kind === 'wear-fact') },
   { id: 'sentence-shape', sentence: 'The arrangement must contain AT LEAST ONE "," (comma) glue token somewhere between two units — "—", "|" and "&" alone do NOT satisfy this, and an arrangement with zero commas will be rejected even if it otherwise reads well.' },
   // RULING Q4 (fix round B6, value Blocking B1): split OUT of `unisex-gender` — this half of the
   // check has no dependency on a Unisex unit and fires on EVERY family, so it is taught

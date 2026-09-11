@@ -417,7 +417,9 @@ describe('RULING R6: the wear fact is list-join only', () => {
     const parts: ArrangementPart[] = [{ unit: id('Retro Sunset') }, { unit: garmentHead }, { glue: 'with' }, { unit: id('Can be worn as Oversized') }]
     const v = validateArrangement({ parts }, units)
     expect(v.ok).toBe(false)
-    if (!v.ok) expect(v.violation).toMatch(/cannot introduce the wear-fact unit .* the wear fact is list-join only/)
+    // RULING T4 (fix round B9a): the message wording was rebuilt from the S2 stand-alone rule's own
+    // wording ("must stand ALONE ... comma clause") — superseding the stale "list-join only" phrase.
+    if (!v.ok) expect(v.violation).toMatch(/cannot introduce the wear-fact unit .* the wear fact must stand ALONE in its own "," comma clause/)
   })
 
   it('the wear fact reached by a LIST join INSIDE a still-open relation ("with a Relaxed Fit and Can be worn as Oversized") is also rejected — Q1\'s clause-scope pass, now covering wear-fact too', () => {
