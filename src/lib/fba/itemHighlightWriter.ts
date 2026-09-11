@@ -147,6 +147,34 @@ function isNumberable(text: string): boolean {
   return !!last && GARMENT_HEAD_WORDS.has(last.word.toLowerCase())
 }
 
+/** RULING R1 (fix round B7a, compliance Blocking `q6brand`, Important `q8two`): classifies the
+ *  relationship between the design's identity text and the composer's mandatory brand pick, using
+ *  the SAME owner predicates the rest of this module reads (`lineCarriesBrand`, imported from
+ *  `itemHighlightComposer.ts`; `lineHasSignificantRepeat`, imported from `productDetailAttrs.ts`) —
+ *  never a new rule. Both mandatory units are exempt from every OTHER admission filter (see
+ *  `buildAdmittedUnits`'s final `units.filter`); this function decides the ONE thing that is not a
+ *  filter — whether a SECOND, dedicated brand unit is even offered alongside the identity, or
+ *  whether the family cannot produce a compliant writer line at all:
+ *  - `'none'`: no brand is mandatory here (no `brandPick`), or there is no identity — the two units
+ *    do not interact; a dedicated brand unit (if any) is offered normally.
+ *  - `'identity-carries'`: the identity text ITSELF carries the brand — it is the ONE mandatory
+ *    carrier, so the dedicated brand unit must be WITHHELD (never pushed) to keep exactly one
+ *    carrier offered. Offering both used to make every arrangement unsatisfiable (Q8's "more than
+ *    one unit carries the brand" check fires on identity+brandUnit together, burning the whole retry
+ *    budget for nothing — `q8two.mts`'s "ComfortColors Club" shape).
+ *  - `'collision'`: the two mandatory units collide some OTHER way (they share a significant word —
+ *    `lineHasSignificantRepeat` — without the identity actually carrying the brand text) — no
+ *    arrangement could ever legally carry BOTH mandatory units, so the design must skip the writer
+ *    entirely before any call is spent (`runWriterForDesign`'s own eligibility check, B8-shaped: 0
+ *    calls, the composer ships). */
+export type MandatoryBrandStatus = 'none' | 'identity-carries' | 'collision'
+export function mandatoryBrandStatus(identityText: string | null, brandPick: string | null, allowedBrand: string | null): MandatoryBrandStatus {
+  if (!identityText || !brandPick) return 'none'
+  if (allowedBrand && lineCarriesBrand(identityText, allowedBrand)) return 'identity-carries'
+  if (lineHasSignificantRepeat(`${identityText}, ${brandPick}`)) return 'collision'
+  return 'none'
+}
+
 /** W1: builds the writer's admitted set FROM the composer's own additively-exposed fields
  *  (`ComposerResult.candidates`/`specFacts`/`brandPick`/`wearFact`) plus the design's own identity,
  *  PLUS the family's own garment head noun(s) (so an arrangement can NAME the garment even when the
@@ -196,6 +224,11 @@ export function buildAdmittedUnits(
   const designNameText = (opts.designName ?? '').trim() || null
   const identityTexts = designNameText ? [designNameText] : []
   const seenIdentity = new Set<string>()
+  // RULING R1 (fix round B7a, compliance Blocking, `q6brand`/`q8two`): tracked so the dedicated
+  // brand unit below can be WITHHELD (never pushed at all) when the identity itself already carries
+  // the brand — see the `push(composed.brandPick, ...)` block below. Set only when the identity was
+  // actually admitted (inside the loop, after its own truth/trademark/celebrity gate passed).
+  let identityCarriesBrand = false
   for (const text of identityTexts) {
     const key = text.toLowerCase()
     if (seenIdentity.has(key)) continue
@@ -219,8 +252,11 @@ export function buildAdmittedUnits(
     // most DEMOTE it — log the collision, still admit it. `judgeWriterArrangement`'s own "more than
     // one unit carries the brand" check (below) still refuses any arrangement that uses it ALONGSIDE
     // the dedicated brand unit, so brand-once still holds; the identity is simply never unreachable.
-    if (composed.brandPick && opts.truthCtx.allowedBrand && lineCarriesBrand(text, opts.truthCtx.allowedBrand) && text !== composed.brandPick) {
-      console.warn(JSON.stringify({ tag: 'IH_WRITER_IDENTITY_BRAND_COLLISION', phrase: text, brandPick: composed.brandPick }))
+    if (composed.brandPick && opts.truthCtx.allowedBrand && lineCarriesBrand(text, opts.truthCtx.allowedBrand)) {
+      identityCarriesBrand = true
+      if (text !== composed.brandPick) {
+        console.warn(JSON.stringify({ tag: 'IH_WRITER_IDENTITY_BRAND_COLLISION', phrase: text, brandPick: composed.brandPick }))
+      }
     }
     push(text, 'identity')
   }
@@ -244,8 +280,21 @@ export function buildAdmittedUnits(
   // brand) stays `'brand'` (SPEC-class, relation-joinable — it is a true fact of the product: this
   // blank's own brand). EITHER WAY `isBrand: true` marks it as the mandatory unit (G4), so the
   // required-brand rule never depends on which grammar class won.
+  // RULING R1 (fix round B7a, compliance Blocking `q6brand`, Important `q8two`): when the IDENTITY
+  // itself already carries the brand, it satisfies the requirement on its own (it is the ONE
+  // mandatory carrier) — the dedicated brand unit is WITHHELD (never pushed at all) so exactly ONE
+  // carrier is ever offered. Offering BOTH used to make every arrangement unsatisfiable (Q8's
+  // "more than one unit carries the brand" check fires on identity+brandUnit together, burning the
+  // whole retry budget — `q8two.mts`'s "ComfortColors Club" shape). The judge's own brand-required
+  // check (`judgeWriterArrangement`'s K2, below) is keyed on the composer's `needBrand` explicitly,
+  // never on `units.find(isBrand)`, so withholding this unit here never silently drops the
+  // requirement — it is verified on the FINAL rendered bytes regardless of which unit carried it.
   if (composed.brandPick) {
-    push(composed.brandPick, composed.brandOrigin === 'pool' ? 'pool' : 'brand', { isBrand: true })
+    if (identityCarriesBrand) {
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_BRAND_CARRIER_WITHHELD', phrase: composed.brandPick, reason: 'identity-carries-brand' }))
+    } else {
+      push(composed.brandPick, composed.brandOrigin === 'pool' ? 'pool' : 'brand', { isBrand: true })
+    }
   }
   if (composed.wearFact) push(composed.wearFact, 'wear-fact')
   // RULING P1 (fix round B5, compliance Blocking): admit AT MOST ONE brand-carrying unit across
@@ -318,15 +367,35 @@ export function buildAdmittedUnits(
   const identityUnitForCollision = units.find((u) => u.kind === 'identity')
   const identityTextForCollision = identityUnitForCollision?.text ?? null
   return units.filter((u) => {
+    // RULING R1 (fix round B7a, compliance Blocking): MANDATORY units (the identity and the isBrand
+    // unit) are exempt from EVERY admission filter below — never self-repeat, never identity-
+    // collision, never untrue. The B6 escape was exactly this: the identity-collision filter (below)
+    // dropped the isBrand unit whenever a design name shared a word with the brand, and the judge's
+    // brand-required check (keyed, at the time, on `units.find(isBrand)`) then silently required
+    // nothing. `identityCarriesBrand` already withholds the dedicated unit ABOVE when it is not
+    // needed (R1's other half) — this exemption is the backstop for every other admission filter.
+    if (u.kind === 'identity' || u.isBrand) return true
     if (lineHasSignificantRepeat(u.text)) {
       console.warn(JSON.stringify({ tag: 'IH_WRITER_UNIT_DROPPED', phrase: u.text, kind: u.kind, reason: 'self-repeat' }))
       return false
     }
-    if (u.kind !== 'identity' && identityTextForCollision && lineHasSignificantRepeat(`${identityTextForCollision}, ${u.text}`)) {
-      console.warn(JSON.stringify({ tag: 'IH_WRITER_UNIT_DROPPED', phrase: u.text, kind: u.kind, reason: 'identity-collision' }))
-      return false
+    // RULING R2 (fix round B7a, value Blocking B2): generalises Q6's admission-time "identity
+    // collision" filter from self-repeat ALONE to EVERY line-level PAIR check the judge itself
+    // applies — repeat, and the gender/Unisex readability checks, persona-excluded (see
+    // `identityPairViolation` below — the SAME function `writerReadabilityVerdict`'s gender half
+    // reads, never a copy). The identity unit is effectively mandatory
+    // (`writerReadabilityVerdict`'s "names or evokes the design" rule), so ANY unit that fails one of
+    // these checks paired with JUST the identity fails it in EVERY arrangement that also carries the
+    // identity — offering it only teaches the model a phrase (or costs a call discovering) it can
+    // never legally use.
+    if (identityTextForCollision) {
+      const violation = identityPairViolation(identityTextForCollision, u.text)
+      if (violation) {
+        console.warn(JSON.stringify({ tag: 'IH_WRITER_UNIT_DROPPED', phrase: u.text, kind: u.kind, reason: violation === 'self-repeat' ? 'identity-collision' : `identity-collision-${violation}` }))
+        return false
+      }
     }
-    if (u.kind !== 'identity' && u.kind !== 'garment-head' && !phraseTruthVerdict(u.text, opts.truthCtx).ok) {
+    if (u.kind !== 'garment-head' && !phraseTruthVerdict(u.text, opts.truthCtx).ok) {
       console.warn(JSON.stringify({ tag: 'IH_WRITER_UNIT_DROPPED', phrase: u.text, kind: u.kind, reason: 'untrue' }))
       return false
     }
@@ -383,10 +452,16 @@ const LIST_GLUE: ReadonlySet<string> = new Set(['and', ',', '—', '|', '&'])
 const RELATION_GLUE: ReadonlySet<string> = new Set(['with', 'in'])
 const ARTICLE_GLUE: ReadonlySet<string> = new Set(['a', 'an'])
 
-/** §2c's unit classes. `SPEC` unions the three "true fact of this product" kinds a relation join
- *  may introduce (a blank spec fact, the brand phrase, the sanctioned wear fact) — `GARMENT` is
- *  `garment-head` alone (rule 1's "garment noun"); every other kind (`identity`, `pool`) is neither. */
-const SPEC_KINDS: ReadonlySet<AdmittedUnitKind> = new Set(['spec-fact', 'brand', 'wear-fact'])
+/** §2c's unit classes, NARROWED by RULING R6 (fix round B7a, value Important): `SPEC` used to union
+ *  three kinds a relation join may introduce (a blank spec fact, the brand phrase, the sanctioned
+ *  wear fact); `'wear-fact'` is REMOVED — the wear fact is a CLAUSE ("Can be worn as Oversized"),
+ *  not an attribute noun, so "with Can be worn as Oversized" is ungrammatical English and was 100%
+ *  of the remaining literal-model rejections (§2f rule 5, B6-review measured). Removing it from
+ *  `SPEC_KINDS` makes it list-join-only EXACTLY like the brand unit, through the SAME two checks
+ *  this set already feeds (the single relation-glue check and the Q1 open-clause scope check below)
+ *  — no new branch, one flag. `GARMENT` is `garment-head` alone (rule 1's "garment noun"); every
+ *  other kind (`identity`, `pool`) is neither. */
+const SPEC_KINDS: ReadonlySet<AdmittedUnitKind> = new Set(['spec-fact', 'brand'])
 
 /** NEVER glue (ruling B2, verbatim, unchanged by W1/§2c): negations, quantifiers, purity words,
  *  gendered pronouns. Not consumed at runtime (they simply are never added to `GLUE_WORDS` above) —
@@ -520,6 +595,14 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
       // attribute of this one ("Retro Sunset Shirt with Comfort Colors Tee").
       return `relation '${run[0].glue}' cannot introduce the brand unit '${right.text}' — the brand unit is list-join only ("," "and" "&" "—" "|"), never after "with"/"in"`
     }
+    // RULING R6 (fix round B7a, value Important): the wear fact is a CLAUSE ("Can be worn as
+    // Oversized"), not an attribute noun a relation can introduce — "with Can be worn as Oversized"
+    // is ungrammatical English, exactly like the brand shape above. Named explicitly (never left to
+    // fall through to the generic "must introduce a spec fact" message below) so the retry names the
+    // SAME rule the prompt teaches.
+    if (role === 'relation' && right.kind === 'wear-fact') {
+      return `relation '${run[0].glue}' cannot introduce the wear-fact unit '${right.text}' — the wear fact is list-join only ("," "and" "&" "—" "|"), never after "with"/"in"`
+    }
     if (role === 'relation' && !SPEC_KINDS.has(right.kind)) {
       return `relation '${run[0].glue}' must introduce a spec fact; '${right.text}' is a ${unitClassName(right.kind)} unit`
     }
@@ -590,6 +673,26 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
     if (RELATION_GLUE.has(part.glue)) { relationOpenGlue = part.glue; continue }
     // A list join, an article, or any other closed-glue token neither opens nor closes the clause.
   }
+  // RULING R5 (fix round B7a, truth Important I-2): a garment-head unit's ONLY legal position, in
+  // the arrangement as a WHOLE, is directly after the identity unit (rule 1's abutment) — its sole
+  // stated purpose is naming the garment once. The abutment pass above only rejects a bare NO-GLUE
+  // pair whose LEFT side is not the identity; it never inspects a garment-head unit reached through
+  // a LIST JOIN instead of a bare abutment ("Retro Sunset Tee and Top", "Farm Life Sweatshirt and
+  // Crewneck" — the SAME "second garment / multi-pack" claim T02b/T14/T18b/T24b/R29 measured,
+  // reached one join further out than the abutment pass looks). Walked over the WHOLE `parts` array
+  // (not clause-scoped) so a garment-head unit is illegal both across a comma and inside/outside a
+  // relation clause — there is no position for a SECOND garment-head unit anywhere in a legal line.
+  for (let k = 0; k < parts.length; k++) {
+    const p = parts[k]
+    if (glueRole(p) !== 'unit') continue
+    const u = unitAt(p)
+    if (u.kind !== 'garment-head') continue
+    const prev = k > 0 ? parts[k - 1] : null
+    const directlyAfterIdentity = !!prev && glueRole(prev) === 'unit' && unitAt(prev).kind === 'identity'
+    if (!directlyAfterIdentity) {
+      return `'${u.text}' is a garment-head unit and may appear ONLY directly after the identity unit with no glue (e.g. '<design name> ${u.text}') — anywhere else, even joined by "," or "and", it names a second garment or a multi-pack`
+    }
+  }
   return null
 }
 
@@ -609,6 +712,12 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
 export function validateArrangement(
   raw: unknown,
   units: readonly AdmittedUnit[],
+  // RULING R1 (fix round B7a, compliance Blocking): when explicitly passed, keys rule (g)'s
+  // required-brand check on THIS — never merely on `units.find(u => u.isBrand)` (the B6 `q6brand`
+  // escape: an admission filter silently removed the isBrand unit, and a `units.find`-only check
+  // then required nothing). `undefined` (every pre-R1 test caller) preserves the OLD behavior — "a
+  // brand unit exists in `units`" — for source compatibility.
+  needBrand?: boolean,
 ): { ok: true; parts: ArrangementPart[] } | { ok: false; violation: string } {
   if (!raw || typeof raw !== 'object' || !Array.isArray((raw as { parts?: unknown }).parts)) {
     return { ok: false, violation: 'malformed: expected {"parts": [...]}' }
@@ -649,9 +758,16 @@ export function validateArrangement(
   // RULING G4 (F3), keyed per RULING K2 on `isBrand` (never `kind === 'brand'` — a pool-sourced
   // brand unit is `kind: 'pool'` but still mandatory): when the composer's brand unit exists in the
   // admitted set, the arrangement MUST carry it — an arrangement that omits it ships unbranded even
-  // though the composer's own line would have carried the brand waterfall (X17).
+  // though the composer's own line would have carried the brand waterfall (X17). RULING R1 (fix
+  // round B7a): gated on `needBrand ?? !!brandUnit` — when `needBrand` is explicitly false (a
+  // needBrand=false family whose title already carries the brand) this rule never fires even if a
+  // stray isBrand unit somehow exists; when `needBrand` is explicitly true but NO isBrand unit
+  // exists at all (the identity itself carries the brand — R1's withhold), there is no specific unit
+  // id to require here, and the requirement is instead re-verified on the FINAL rendered bytes by
+  // `judgeWriterArrangement`'s own K2 check, keyed on the SAME `needBrand`.
   const brandUnit = units.find((u) => u.isBrand)
-  if (brandUnit && !seen.has(brandUnit.id)) {
+  const brandRequired = needBrand ?? !!brandUnit
+  if (brandRequired && brandUnit && !seen.has(brandUnit.id)) {
     return { ok: false, violation: `missing required brand unit '${brandUnit.text}' — the composer's brand is mandatory for this family` }
   }
   return { ok: true, parts: out }
@@ -761,7 +877,85 @@ function countListSections(clauses: readonly string[]): number {
   return sections
 }
 
-export function writerReadabilityVerdict(line: string, units: readonly AdmittedUnit[]): { ok: true } | { ok: false; reason: string } {
+/** RULING R4 (fix round B7a, value Blocking B3): counts relation/list clauses from the
+ *  ARRANGEMENT's own GLUE PARTS, never by re-scanning the rendered TEXT for the words "with"/"in"
+ *  (`clauseIsKeywordShaped` above). A pool phrase whose OWN text happens to contain "in" or "with"
+ *  ("Christmas in July Shirt", "Mom with Attitude") used to count as a relation clause with ZERO
+ *  actual relation JOINS, letting a pure keyword list pass readability and ship. Clause boundaries
+ *  are the SAME characters `READABILITY_CLAUSE_SPLIT_RE` splits on (`GLUE_PUNCTUATION`, defined
+ *  earlier in this file) — matched against the glue PARTS, never the rendered string. Returns one
+ *  boolean per clause: `true` when that clause is keyword-shaped (carries no relation-glue part). */
+function clauseShapesFromParts(parts: readonly ArrangementPart[]): boolean[] {
+  const shapes: boolean[] = []
+  let sawUnit = false
+  let sawRelationGlue = false
+  const closeClause = () => { if (sawUnit) shapes.push(!sawRelationGlue); sawUnit = false; sawRelationGlue = false }
+  for (const part of parts) {
+    if ('unit' in part) { sawUnit = true; continue }
+    // RULING R4: `READABILITY_CLAUSE_SPLIT_RE` splits on EVERY member of `GLUE_PUNCTUATION`
+    // (`,` `—` `|` `&`), not only the comma — the glue-based walk must match that exactly.
+    if (GLUE_PUNCTUATION.has(part.glue)) { closeClause(); continue }
+    if (RELATION_GLUE.has(part.glue)) sawRelationGlue = true
+    // A list-word join (`and`) or an article (`a`/`an`) neither opens nor closes a clause boundary.
+  }
+  closeClause()
+  return shapes
+}
+/** RULING R4: the glue-based mirror of `countListSections` above, over the boolean clause-shape
+ *  array `clauseShapesFromParts` returns — same run-of-2+ rule, same behavior, different input. */
+function countListSectionsFromShapes(shapes: readonly boolean[]): number {
+  let sections = 0
+  let runLen = 0
+  const closeRun = () => { if (runLen >= 2) sections++; runLen = 0 }
+  for (const isKeywordShaped of shapes) {
+    if (isKeywordShaped) runLen++
+    else closeRun()
+  }
+  closeRun()
+  return sections
+}
+
+/** RULING R2 (fix round B7a, value Blocking B2): "The design name is a PERSONA, not an audience
+ *  claim." Removes the identity unit(s)' OWN rendered text from `text` before a gender/Unisex check
+ *  reads it, so a design named "Ladies Man" or "Crazy Cat Lady" is judged on what OTHER units say,
+ *  never on its own name. Units render verbatim (Q2) and each is used at most once, so the identity's
+ *  exact stored text is always a contiguous substring of the rendered line when it is present —
+ *  removing that substring (never word-by-word, which could not distinguish the identity's OWN
+ *  occurrence from another unit's) is exact, not an approximation. */
+function stripIdentityWords(text: string, identityTexts: readonly string[]): string {
+  let out = text
+  for (const t of identityTexts) {
+    if (t) out = out.split(t).join(' ')
+  }
+  return out
+}
+/** RULING R2: the SAME gender/Unisex violation `writerReadabilityVerdict`'s B6.2 half returns,
+ *  factored out so `identityPairViolation` below can reuse it — one function, never a copy. Callers
+ *  pass an ALREADY persona-excluded `text` (via `stripIdentityWords`). */
+function genderAudienceViolation(text: string): 'unisex-gender' | 'gender-mix' | null {
+  const hasFem = LEAN_FEM_RE.test(text)
+  const hasMasc = LEAN_MASC_RE.test(text)
+  if (/\bunisex\b/i.test(text) && (hasFem || hasMasc)) return 'unisex-gender'
+  if (hasFem && hasMasc) return 'gender-mix'
+  return null
+}
+/** RULING R2 (fix round B7a): generalises Q6's admission-time "identity collision" filter from
+ *  self-repeat ALONE to EVERY line-level PAIR check the judge itself applies at pair scope — repeat,
+ *  and the gender/Unisex readability checks, persona-excluded. The identity unit is effectively
+ *  mandatory (`writerReadabilityVerdict`'s "names or evokes the design" rule), so ANY unit that
+ *  fails one of these checks paired with JUST the identity fails it in EVERY arrangement that also
+ *  carries the identity — reused by `buildAdmittedUnits`'s final filter, never a copy. Returns the
+ *  SPECIFIC violation (never a bare boolean) so the caller can log a specific reason (R2's own
+ *  requirement), and `null` when the pair is clean — which also means the unit is now REACHABLE
+ *  beside a persona identity that itself carries a gender-core word ("Unisex Fit" beside "Crazy Cat
+ *  Lady": stripping "Crazy Cat Lady" leaves no gendered word at all, so the pair is clean). */
+function identityPairViolation(identityText: string, unitText: string): 'self-repeat' | 'gender-mix' | 'unisex-gender' | null {
+  const pair = `${identityText}, ${unitText}`
+  if (lineHasSignificantRepeat(pair)) return 'self-repeat'
+  return genderAudienceViolation(stripIdentityWords(pair, [identityText]))
+}
+
+export function writerReadabilityVerdict(line: string, units: readonly AdmittedUnit[], parts?: readonly ArrangementPart[]): { ok: true } | { ok: false; reason: string } {
   // RULING P5 (fix round B5, value Blocking 1, superseding K7/W7's "at most one keyword-shaped
   // clause"): ONE readability shape, taught from the SAME constants this check reads
   // (`READABILITY_CLAUSE_SPLIT_RE`, `RELATION_WORDS_FOLDED`) — a line needs AT LEAST ONE relation
@@ -770,12 +964,24 @@ export function writerReadabilityVerdict(line: string, units: readonly AdmittedU
   // spanned 2+ clauses after the required relation clause — the exact regression the B4 value lens
   // measured on 2 of its own 10 reference lines (Dino Squad, Spreadsheet Queen). This rule still
   // refuses a bare keyword dump: zero relation clauses is exactly the PO's original complaint.
-  const clauses = line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean)
-  const relationClauses = countRelationClauses(clauses)
+  // RULING R4 (fix round B7a, value Blocking B3): when the caller supplies the ARRANGEMENT's own
+  // `parts` (every production caller does, via `judgeWriterArrangement`), clause shape is read from
+  // the GLUE, never by re-scanning the rendered text for "with"/"in" — a pool phrase whose own text
+  // happens to contain those letters ("Christmas in July Shirt") no longer counts as a relation
+  // clause with zero actual relation joins. `parts` is OPTIONAL only for source compatibility with
+  // callers that hand-type a rendered line with no arrangement at all (every such existing caller
+  // types a line whose relation words really do come from a "with"/"in" GLUE choice, so the two
+  // mechanisms agree on every one of them).
+  const clauseCount = parts ? clauseShapesFromParts(parts).length : line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean).length
+  const relationClauses = parts
+    ? clauseShapesFromParts(parts).filter((keywordShaped) => !keywordShaped).length
+    : countRelationClauses(line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean))
   if (relationClauses < 1) {
-    return { ok: false, reason: `reads as a keyword list (0 of ${clauses.length} clauses contain a "with"/"in" relation — at least one relation clause is required)` }
+    return { ok: false, reason: `reads as a keyword list (0 of ${clauseCount} clauses contain a "with"/"in" relation — at least one relation clause is required)` }
   }
-  const listSections = countListSections(clauses)
+  const listSections = parts
+    ? countListSectionsFromShapes(clauseShapesFromParts(parts))
+    : countListSections(line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean))
   if (listSections > 1) {
     return { ok: false, reason: `reads as ${listSections} separate keyword lists (clauses with no "with"/"in" relation, split apart by another relation clause) — at most one list section is allowed` }
   }
@@ -788,19 +994,24 @@ export function writerReadabilityVerdict(line: string, units: readonly AdmittedU
   // gated on a Unisex unit, per RULING K4/P7): bundling them meant the fem+masc sentence vanished on
   // precisely the gendered-lean families where a Unisex unit is never offered at all, and the check
   // fired UNTAUGHT on exactly the families it governs (B5 review, finding B1).
-  const hasFem = LEAN_FEM_RE.test(line)
-  const hasMasc = LEAN_MASC_RE.test(line)
-  if (/\bunisex\b/i.test(line) && (hasFem || hasMasc)) {
+  // RULING R2 (fix round B7a, value Blocking B2): "The design name is a PERSONA, not an audience
+  // claim." The identity unit's OWN words are excluded from this pair of checks (both here on the
+  // full line, and in `identityPairViolation`'s admission-time pair check) — a design named "Ladies
+  // Man" or "Crazy Cat Lady" is judged on what OTHER units say, never on its own name.
+  const identityUnitsForGender = units.filter((u) => u.kind === 'identity')
+  const genderProbeLine = identityUnitsForGender.length ? stripIdentityWords(line, identityUnitsForGender.map((u) => u.text)) : line
+  const hasFem = LEAN_FEM_RE.test(genderProbeLine)
+  const hasMasc = LEAN_MASC_RE.test(genderProbeLine)
+  if (/\bunisex\b/i.test(genderProbeLine) && (hasFem || hasMasc)) {
     return { ok: false, reason: 'states a gender audience beside "Unisex"' }
   }
   if (hasFem && hasMasc) {
     return { ok: false, reason: 'states both a feminine and a masculine audience word in the same line' }
   }
   // B6.3 — names or evokes the design whenever an identity unit exists.
-  const identityUnits = units.filter((u) => u.kind === 'identity')
-  if (identityUnits.length > 0) {
+  if (identityUnitsForGender.length > 0) {
     const lineFold = foldedContentWords(line)
-    const namesDesign = identityUnits.some((u) => {
+    const namesDesign = identityUnitsForGender.some((u) => {
       const uWords = [...foldedContentWords(u.text)]
       return uWords.length > 0 && uWords.every((w) => lineFold.has(w))
     })
@@ -818,6 +1029,15 @@ export interface JudgeWriterLineCtx {
    *  RULING W4: `reason` additively carries the REAL refusal (e.g. `material-lie`), not only the
    *  coarser `hold` bucket every non-repeat refusal used to collapse onto (`under-floor`). */
   runTail: (line: string) => { value: string; hold: string | null; reason?: string | null }
+  /** RULING R1 (fix round B7a, compliance Blocking): the composer's OWN `needBrand`, passed in
+   *  EXPLICITLY — the brand-required check below (K2) is keyed on THIS, never on
+   *  `units.find(u => u.isBrand)` (which silently passed once an admission filter removed the
+   *  isBrand unit — the B6 `q6brand` escape). Omitted (every pre-R1 test caller): falls back to "a
+   *  brand unit exists in `units`", source-compatible with every existing pin. Production callers
+   *  (`runWriterForDesign`) always pass it, so a FUTURE admission bug that drops the isBrand unit can
+   *  never again silently disable the requirement — it is re-verified on the FINAL rendered bytes
+   *  regardless of which unit (if any) carried it. */
+  needBrand?: boolean
 }
 
 export type JudgeWriterLineResult = { ok: true; value: string } | { ok: false; violations: string[] }
@@ -854,7 +1074,7 @@ const SPAN_REASON_MESSAGES: Readonly<Record<string, string>> = {
  *  one of these gates by construction — nothing here re-parses the RENDERED text, so idempotence
  *  needs no special case. */
 export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUnit[], ctx: JudgeWriterLineCtx): JudgeWriterLineResult {
-  const v = validateArrangement(raw, units)
+  const v = validateArrangement(raw, units, ctx.needBrand)
   if (!v.ok) return { ok: false, violations: [`arrangement: ${v.violation}`] }
   const line = renderArrangement(v.parts, units).trim()
   if (!line) return { ok: false, violations: ['arrangement: rendered to an empty line'] }
@@ -955,7 +1175,9 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
   if (tail.value !== line) {
     return { ok: false, violations: [`the tail changed the line: ${tail.reason ?? 'edited by the post-compose net'}`] }
   }
-  const read = writerReadabilityVerdict(tail.value, units)
+  // RULING R4 (fix round B7a): pass the arrangement's own `parts` so relation/list clauses are
+  // counted from GLUE, never by re-scanning `tail.value` for the words "with"/"in".
+  const read = writerReadabilityVerdict(tail.value, units, v.parts)
   if (!read.ok) return { ok: false, violations: [`readability: ${read.reason}`] }
   // RULING K1 (compliance B1): the accepted line must ALSO be pushable by the push seam's OWN
   // classifier (`classifyStoredIhLine`, imported — never a copy) — "accepted" and "pushable" are the
@@ -964,14 +1186,18 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
   if (pushClass !== 'ok') {
     return { ok: false, violations: [`push-seam: ${pushClass}`] }
   }
-  // RULING K2 (compliance B2, defense in depth): when this family's brand is mandatory, the FINAL
-  // bytes must carry it through the composer's OWN carries-brand test (imported, never a copy) —
-  // `validateArrangement`'s G4 rule already requires the brand UNIT's id in the arrangement; this
-  // catches the residual case where the unit was present but the rendered/tailed bytes somehow do
-  // not carry the brand text (a future tail edit, or a unit whose text itself does not literally
-  // carry the brand — should not happen by construction, but this is defense in depth, not trust).
-  const brandUnit = units.find((u) => u.isBrand)
-  if (brandUnit && ctx.truthCtx.allowedBrand && !lineCarriesBrand(tail.value, ctx.truthCtx.allowedBrand)) {
+  // RULING K2 (compliance B2, defense in depth), keyed per RULING R1 (fix round B7a) on the
+  // composer's OWN `needBrand` — NEVER on `units.find(u => u.isBrand)` — when this family's brand
+  // is mandatory, the FINAL bytes must carry it through the composer's OWN carries-brand test
+  // (imported, never a copy). This is the backstop for BOTH shapes R1 introduces: the identity
+  // itself carries the brand (no dedicated isBrand unit exists at all — `units.find` would find
+  // nothing to require, yet the requirement still holds and is verified HERE), and the residual case
+  // where a unit was present but the rendered/tailed bytes somehow do not carry the brand text (a
+  // future tail edit, or admission gap) — `ctx.needBrand` undefined (every pre-R1 test caller) falls
+  // back to "a brand unit exists in `units`", source-compatible with every existing pin.
+  const brandUnitFallback = units.find((u) => u.isBrand)
+  const brandRequired = ctx.needBrand ?? !!brandUnitFallback
+  if (brandRequired && ctx.truthCtx.allowedBrand && !lineCarriesBrand(tail.value, ctx.truthCtx.allowedBrand)) {
     return { ok: false, violations: ['brand: rendered line does not carry the required brand'] }
   }
   return { ok: true, value: tail.value }
@@ -1029,7 +1255,23 @@ function unitsByKind(units: readonly AdmittedUnit[]): Record<AdmittedUnitKind, {
  *  following the prompt literally still failed on the first call. `id` is referenced by
  *  `itemHighlightWriterRuleRegistry.test.ts`'s completeness pin: every id here must appear in the
  *  rendered prompt, so a rule can never be enforced without being taught. */
-export interface WriterRuleSpec { id: string; sentence: string }
+/** RULING R3 (fix round B7a, value Blocking): the inputs a `WriterRuleSpec.when` predicate may
+ *  read — the SAME inputs the check it teaches reads (`units`, and the brand/allowedBrand context
+ *  `buildWriterPrompt` already threads through), never a hand-maintained condition list that can
+ *  drift narrower than the check (Q4's own ruled class: the B1 escape was exactly a `when`-shaped
+ *  condition, hand-typed as `CONDITIONAL_RULE_IDS` + a bespoke filter clause, that read a NARROWER
+ *  test — `kind === 'spec-fact'` — than the check it was supposed to teach, which fires on ANY
+ *  offered unit's text). */
+export interface WriterRuleWhenCtx { units: readonly AdmittedUnit[]; brandUnit: AdmittedUnit | null; allowedBrand: string | null }
+export interface WriterRuleSpec {
+  id: string
+  sentence: string
+  /** A predicate over `WriterRuleWhenCtx` — `undefined` means "always rendered" (most rules).
+   *  `buildWriterPrompt` renders this entry's sentence IF AND ONLY IF `when` is absent or returns
+   *  true. Declaring the condition HERE, beside the sentence it gates, is the whole fix: there is no
+   *  second place for the two to drift apart. */
+  when?: (ctx: WriterRuleWhenCtx) => boolean
+}
 export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
   { id: 'shape', sentence: 'You arrange ONE Amazon Item Highlight line for a t-shirt/apparel listing out of ADMITTED UNITS — you do NOT write free text.' },
   // RULING Q2 (fix round B6, truth Important TR-2): the "number" field is GONE — a unit renders its
@@ -1049,7 +1291,15 @@ export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
     // smuggle a pool unit (or the brand) back in ("with a Classic Fit and Deep Pockets" invents the
     // SAME feature X5 already named, one join further out).
     id: 'grammar',
-    sentence: 'THE GRAMMAR (the only legal ways two units may sit next to each other): (1) two units may touch with NO glue between them ONLY when the RIGHT-hand one is a garment-head unit AND the LEFT-hand one is the IDENTITY unit (e.g. "<design name> Sweatshirt") — never any other pairing (a pool phrase may NOT abut a garment-head noun directly; join it with "," or "and" instead), and never two garment-head units chained together. (2) "," "and" "&" "—" "|" are LIST joins and may join ANY two units — they assert nothing between the items, exactly like a plain list. (3) "with" and "in" open a RELATION CLAUSE that stays open until the next "," — EVERY unit inside it (the one right after the join, and any later unit reached by a list join before the next ",") must be a spec-fact or wear-fact unit, and NEVER a pool, identity, or BRAND unit (a relation clause may only ever attach TRUE facts of this product; "with Deep Pockets" or "in Pink Lemonade" invent a feature/colour, and "with a Classic Fit and Deep Pockets" invents the SAME thing one join further out — start a NEW comma clause instead of adding a list join inside an open relation; "with Comfort Colors Tee" reads as a second garment — the brand unit is LIST-JOIN ONLY, see the brand rule below). (4) No other glue word exists — do not use "for", "of", "to", "your", "on", "from", "that", "this" or "the"; they are not in the closed set above. No glue or punctuation may open or close the line, and no two glue tokens may sit next to each other except exactly one join immediately followed by "a"/"an".',
+    // RULING R5 (fix round B7a, truth Important I-2): a garment-head unit's ONLY legal position, in
+    // the WHOLE arrangement, is directly after the identity — the OLD wording's own parenthetical
+    // ("join it with ',' or 'and' instead") was actively WRONG advice under this ruling, since a
+    // garment-head unit reached that way ("Tee and Top") names a second garment exactly like a bare
+    // abutment does; corrected below. RULING R6 (fix round B7a, value Important): the wear fact is
+    // now list-join-only too, so rule (3)'s "spec-fact or wear-fact unit" narrows to "spec-fact unit"
+    // — the dedicated `wear-fact-list-only` rule (below) teaches the wear fact's OWN restriction, the
+    // same way the brand rule teaches the brand's.
+    sentence: 'THE GRAMMAR (the only legal ways two units may sit next to each other): (1) two units may touch with NO glue between them ONLY when the RIGHT-hand one is a garment-head unit AND the LEFT-hand one is the IDENTITY unit (e.g. "<design name> Sweatshirt") — a garment-head unit may appear ONLY in that ONE position, directly after the identity, and NEVER anywhere else: never abutting a pool/spec/brand unit, and never reached by a list or relation join either ("Tee and Top", "Sweatshirt, Crewneck" are both illegal — a garment-head unit names the garment ONCE, right after the identity, or not at all). (2) "," "and" "&" "—" "|" are LIST joins and may join ANY two units EXCEPT a garment-head unit (rule 1 covers its one legal position; it is never list-joined) — list joins assert nothing between the items, exactly like a plain list. (3) "with" and "in" open a RELATION CLAUSE that stays open until the next "," — EVERY unit inside it (the one right after the join, and any later unit reached by a list join before the next ",") must be a spec-fact unit, and NEVER a pool, identity, wear-fact, or BRAND unit (a relation clause may only ever attach TRUE facts of this product; "with Deep Pockets" or "in Pink Lemonade" invent a feature/colour, and "with a Classic Fit and Deep Pockets" invents the SAME thing one join further out — start a NEW comma clause instead of adding a list join inside an open relation; "with Comfort Colors Tee" reads as a second garment and "with Can be worn as Oversized" is ungrammatical English — both the brand and the wear fact are LIST-JOIN ONLY, see their own rules below). (4) No other glue word exists — do not use "for", "of", "to", "your", "on", "from", "that", "this" or "the"; they are not in the closed set above. No glue or punctuation may open or close the line, and no two glue tokens may sit next to each other except exactly one join immediately followed by "a"/"an".',
   },
   { id: 'article', sentence: '"a"/"an" may appear ONLY directly after a list or relation join, AND directly before a spec-fact unit whose own last word is "Fit" or "Neck" (e.g. "with a Classic Fit", "and a Crew Neck") — never before a pool/identity unit, never before the brand unit, never before a different kind of spec/wear-fact unit, and NEVER standing alone with no join immediately before it. Write "a"/"an" as you see fit; the correct spelling for the following word is chosen for you automatically.' },
   { id: 'band', sentence: `The rendered line must be ${CONTENT_CONTRACT.itemHighlights.min}-${CONTENT_CONTRACT.itemHighlights.max} characters.` },
@@ -1059,13 +1309,34 @@ export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
   // inside a still-open relation clause either); WHICH unit id is required is named separately in
   // the user message below (`buildWriterPrompt`), keyed on `isBrand` — never on grammar `kind`,
   // since a pool-origin brand unit's `kind` is `'pool'` and used to render as an EMPTY "brand" group.
-  { id: 'brand', sentence: 'When a REQUIRED BRAND UNIT is named below (by id), your arrangement MUST use that exact unit id somewhere, or it will be rejected. The brand unit is LIST-JOIN ONLY — join it with "," "and" "&" "—" or "|" — never after "with"/"in", never anywhere inside a relation clause that is still open (before the next ","), and never after an article. At most ONE unit in your whole arrangement may carry the brand text — using two different units that both name the brand is rejected even if neither is the required brand unit.' },
+  {
+    id: 'brand',
+    sentence: 'When a REQUIRED BRAND UNIT is named below (by id), your arrangement MUST use that exact unit id somewhere, or it will be rejected. The brand unit is LIST-JOIN ONLY — join it with "," "and" "&" "—" or "|" — never after "with"/"in", never anywhere inside a relation clause that is still open (before the next ","), and never after an article. At most ONE unit in your whole arrangement may carry the brand text — using two different units that both name the brand is rejected even if neither is the required brand unit.',
+    // RULING R3 (fix round B7a): declared HERE — `judgeWriterArrangement`'s "more than one unit
+    // carries the brand" check fires whenever `allowedBrand` is set at ALL (RULING Q8), including a
+    // `needBrand=false` family with no dedicated brand unit at all (its title already carries the
+    // brand). `buildWriterPrompt` computes `brandUnit`/`allowedBrand` from the SAME `ctx` shape.
+    when: (ctx) => !!ctx.brandUnit || !!ctx.allowedBrand,
+  },
+  // RULING R6 (fix round B7a, value Important): the wear fact is a CLAUSE ("Can be worn as
+  // Oversized"), not an attribute noun — "with Can be worn as Oversized" is ungrammatical English,
+  // and it was 100% of the remaining literal-model rejections (§2f rule 5). Taught the SAME shape as
+  // the brand rule (list-join only), gated on whether a wear-fact unit is even offered — pointless
+  // prompt weight otherwise (the same reasoning as `unisex-gender`'s own gate, below).
+  { id: 'wear-fact-list-only', sentence: 'A wear-fact unit (e.g. "Can be worn as Oversized") is LIST-JOIN ONLY, exactly like the brand unit above — join it with "," "and" "&" "—" or "|", never after "with"/"in", and never anywhere inside a relation clause that is still open (before the next ",").', when: (ctx) => ctx.units.some((u) => u.kind === 'wear-fact') },
   { id: 'sentence-shape', sentence: 'The arrangement must contain AT LEAST ONE "," (comma) glue token somewhere between two units — "—", "|" and "&" alone do NOT satisfy this, and an arrangement with zero commas will be rejected even if it otherwise reads well.' },
   // RULING Q4 (fix round B6, value Blocking B1): split OUT of `unisex-gender` — this half of the
   // check has no dependency on a Unisex unit and fires on EVERY family, so it is taught
   // unconditionally, by its own id, never bundled with a sentence that is withheld on gendered leans.
-  { id: 'gender-mix', sentence: 'Never state both a feminine audience word (e.g. "Women", "Ladies") and a masculine audience word (e.g. "Men", "Mens") in the same line — the combination contradicts itself and will be rejected.' },
-  { id: 'unisex-gender', sentence: 'Never put a gendered audience word (e.g. "Women", "Men", "Ladies") in the same line as a "Unisex" unit — the combination contradicts itself and will be rejected.' },
+  // RULING R2 (fix round B7a, value Blocking B2): the design name is EXCLUDED from this check — a
+  // design named "Ladies Man" or "Crazy Cat Lady" is a persona, not an audience claim.
+  { id: 'gender-mix', sentence: 'Never state both a feminine audience word (e.g. "Women", "Ladies") and a masculine audience word (e.g. "Men", "Mens") in the same line, OTHER than the design\'s own name (its name is a persona, not an audience claim) — the combination contradicts itself and will be rejected.' },
+  // RULING R3 (fix round B7a, value Blocking): `when` reads "does ANY offered unit's text contain
+  // 'unisex'" — the SAME condition `writerReadabilityVerdict`'s check reads (it scans the whole
+  // rendered LINE for the word, which can only ever have come from an offered unit) — no longer
+  // narrowed to a spec-fact unit alone, which let a POOL-sourced "Unisex" phrase teach nothing (the
+  // B1 escape this closes).
+  { id: 'unisex-gender', sentence: 'Never put a gendered audience word (e.g. "Women", "Men", "Ladies"), OTHER than the design\'s own name, in the same line as a "Unisex" unit — the combination contradicts itself and will be rejected.', when: (ctx) => ctx.units.some((u) => /\bunisex\b/i.test(u.text)) },
   // RULING P5 (fix round B5, value Blocking 1): rendered from the SAME constants the check reads
   // (`READABILITY_CLAUSE_SPLIT_RE`, `RELATION_WORDS_FOLDED`) — see `writerReadabilityFidelitySentence`
   // below, which BUILDS this sentence text so the two can never drift silently.
@@ -1080,16 +1351,13 @@ export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
   { id: 'closing', sentence: 'If you cannot honestly build a good line from only the admitted units, still return your best attempt as {"parts": [...]} — do not apologize or explain, only the JSON.' },
 ]
 
-/** Every id in `WRITER_RULE_REGISTRY` whose sentence should render UNCONDITIONALLY — the
- *  exceptions are rendered separately below: `brand` (RULING Q8, fix round B6: gated on whether
- *  `allowedBrand` is set at ALL — not merely on whether a brand UNIT exists, because
- *  `judgeWriterArrangement`'s "more than one unit carries the brand" check fires whenever
- *  `truthCtx.allowedBrand` is set, including a `needBrand=false` family with no brand unit) and
- *  `unisex-gender` (RULING P7/M1: rendering it even when no "Unisex" unit is offered at all is
- *  harmless but pointless prompt weight — gated on whether a Unisex spec-fact unit exists).
- *  `gender-mix` and `pair-truth` (RULING Q4/Q5) are deliberately NOT in this set — both checks are
- *  unconditional, so both sentences render unconditionally too. */
-const CONDITIONAL_RULE_IDS: ReadonlySet<string> = new Set(['brand', 'unisex-gender'])
+/** RULING R3 (fix round B7a, value Blocking): the ruled class guard. Sweeps EVERY entry whose
+ *  `when` is declared and asserts it is never NARROWER than the check it teaches — a registry-level
+ *  fidelity test (`itemHighlightWriterFixRoundB7a.test.ts`) drives real admitted units through the
+ *  REAL judge/readability refusals and asserts the matching entry's `when` was true for that unit
+ *  set. Superseded `CONDITIONAL_RULE_IDS` (a hand-typed id set plus a bespoke filter clause in
+ *  `buildWriterPrompt`) — THAT was the B1 escape's own shape: a condition living apart from the
+ *  check it was supposed to mirror, free to drift narrower. */
 
 /** RULING P5 (fix round B5): builds the `names-design` registry sentence FROM the same constants
  *  `writerReadabilityVerdict` reads, so the taught rule and the enforced rule cannot drift apart —
@@ -1124,12 +1392,12 @@ function writerReadabilityFidelitySentence(): string {
 export function buildWriterPrompt(units: readonly AdmittedUnit[], designName: string | null, priorViolations: readonly string[], allowedBrand: string | null = null): { system: string; user: string } {
   const grouped = unitsByKind(units)
   const brandUnit = units.find((u) => u.isBrand) ?? null
-  // RULING P7 (fix round B5, value M1): the unisex-gender sentence is pointless prompt weight when
-  // no "Unisex" spec-fact unit is even offered (K4's own condition on `hasBrand` did not extend the
-  // same gating to this rule) — gate it the same way.
-  const hasUnisexUnit = units.some((u) => u.kind === 'spec-fact' && /\bunisex\b/i.test(u.text))
+  // RULING R3 (fix round B7a, value Blocking): each registry entry's OWN `when` decides whether its
+  // sentence renders — never a second, hand-maintained condition here. `whenCtx` carries exactly the
+  // inputs a `when` predicate may read (`WriterRuleWhenCtx`).
+  const whenCtx: WriterRuleWhenCtx = { units, brandUnit, allowedBrand }
   const system = WRITER_RULE_REGISTRY
-    .filter((r) => !CONDITIONAL_RULE_IDS.has(r.id) || (r.id === 'brand' && (!!brandUnit || !!allowedBrand)) || (r.id === 'unisex-gender' && hasUnisexUnit))
+    .filter((r) => !r.when || r.when(whenCtx))
     .map((r) => r.sentence)
     .join(' ')
   // RULING K4 (value I3): each unit's character length and the join costs, so the model can COUNT
@@ -1239,7 +1507,11 @@ export class WriterPartialCallsError extends Error {
 }
 
 export async function runWriterForDesign(args: {
-  composed: Pick<ComposerResult, 'candidates' | 'specFacts' | 'brandPick' | 'wearFact'>
+  // RULING R1 (fix round B7a): `needBrand` added, OPTIONAL (never required, so no existing literal
+  // test fixture that omits it becomes a type error) — the judge's brand-required check is keyed on
+  // it EXPLICITLY (below) when present. Every existing production caller already passes the full
+  // `ComposerResult`, which carries this field (required, `boolean`) on every exit.
+  composed: Pick<ComposerResult, 'candidates' | 'specFacts' | 'brandPick' | 'wearFact'> & { needBrand?: boolean }
   fallbackHold: string | null
   designName: string | null
   identityPhrases?: readonly string[]
@@ -1261,6 +1533,16 @@ export async function runWriterForDesign(args: {
   if (pool.length === 0) return { accepted: false, value: '', reasons: ['skip: zero admitted pool units'], calls: 0 }
   // W8: non-apparel families never write (the field composes no garment vocabulary for them either).
   if (args.truthCtx.garmentFamily === 'none') return { accepted: false, value: '', reasons: ['skip: non-apparel family'], calls: 0 }
+  // RULING R1 (fix round B7a, compliance Blocking): if the identity and the composer's mandatory
+  // brand pick collide in a way neither unit's own admission can resolve (the identity does NOT
+  // itself carry the brand, yet shares a significant word with it), no arrangement could ever
+  // legally carry BOTH mandatory units (`buildAdmittedUnits` never filters either one — R1's other
+  // half). Skip the writer entirely, 0 calls, named reason — the composer ships.
+  const identityTextForBrand = (args.designName ?? '').trim() || null
+  if (mandatoryBrandStatus(identityTextForBrand, args.composed.brandPick ?? null, args.truthCtx.allowedBrand ?? null) === 'collision') {
+    console.warn(JSON.stringify({ tag: 'IH_WRITER_SKIP', design: identityTextForBrand, reason: 'mandatory-collision' }))
+    return { accepted: false, value: '', reasons: ['skip: mandatory-collision (identity and required brand collide)'], calls: 0 }
+  }
 
   const units = buildAdmittedUnits(args.composed, { designName: args.designName, identityPhrases: args.identityPhrases, truthCtx: args.truthCtx })
   // W8: fewer than 2 admitted units, or the best possible join of every unit (no writer could ever
@@ -1291,7 +1573,7 @@ export async function runWriterForDesign(args: {
       }
       const draft = await askWriter(openai, model, units, args.designName, priorViolations, args.deadlineAt, args.truthCtx.allowedBrand)
       callsMade = call
-      const verdict = judgeWriterArrangement(draft, units, { truthCtx: args.truthCtx, runTail: args.runTail })
+      const verdict = judgeWriterArrangement(draft, units, { truthCtx: args.truthCtx, runTail: args.runTail, needBrand: args.composed.needBrand })
       if (verdict.ok) return { accepted: true, value: verdict.value, reasons: reasonsAll, calls: call }
       reasonsAll.push(...verdict.violations)
       priorViolations = verdict.violations

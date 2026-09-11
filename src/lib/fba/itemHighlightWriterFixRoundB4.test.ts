@@ -333,7 +333,7 @@ describe('RULING P5: at least one relation clause, at most one list section (sup
 describe('RULING P7: a tail sentence-shape refusal names the taught rule, not the bare reason code', () => {
   const truthCtx: PhraseTruthCtx = { garmentFamily: 'sweatshirt', spec: { material: '52% Cotton / 48% Polyester', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }
   const composed = {
-    candidates: ['Graphic Crewneck', 'Fall Sweatshirts for Women'], specFacts: ['Classic Fit'], brandPick: null, wearFact: null,
+    candidates: ['Graphic Crewneck', 'Fall Sweatshirts for Women', 'Great for Weekend Road Trips'], specFacts: ['Classic Fit'], brandPick: null, wearFact: null,
   } as unknown as ComposerResult
   const units = buildAdmittedUnits(composed, { designName: "Don't Quit", truthCtx })
   const id = (text: string) => units.find((u) => u.text === text)!.id
@@ -345,14 +345,19 @@ describe('RULING P7: a tail sentence-shape refusal names the taught rule, not th
   // longer isolate the TAIL's sentence-shape mapping this test exists to pin. The relation clause is
   // moved to the END (nothing list-joined after "with Classic Fit") so the arrangement stays
   // otherwise grammar-legal while remaining comma-less throughout.
+  // RULING R5 (fix round B7a, truth Important I-2): the ORIGINAL fixture's trailing `id('Crewneck')`
+  // — a SECOND garment-head unit, list-joined — is now itself a grammar violation (a garment-head
+  // unit's only legal position is directly after the identity), which would fire BEFORE the tail is
+  // ever reached and mask the sentence-shape mapping this test isolates. Swapped for a third pool
+  // phrase of similar length so the arrangement stays comma-less and in-band without a second head.
   it('T1: a comma-less arrangement ("—"/"&" only) is refused for "needs at least one \',\' between phrases", not "sentence-shape"', () => {
     const parts: ArrangementPart[] = [
       { unit: id("Don't Quit") }, { unit: id('Sweatshirt') }, { glue: '—' }, { unit: id('Graphic Crewneck') },
-      { glue: '&' }, { unit: id('Fall Sweatshirts for Women') }, { glue: '&' }, { unit: id('Crewneck') },
+      { glue: '&' }, { unit: id('Fall Sweatshirts for Women') }, { glue: '&' }, { unit: id('Great for Weekend Road Trips') },
       { glue: 'with' }, { unit: id('Classic Fit') },
     ]
     const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail })
-    expect(v.ok).toBe(false)
+    expect(v.ok, JSON.stringify(v)).toBe(false)
     if (!v.ok) {
       expect(v.violations[0]).toContain("needs at least one ',' between phrases")
       expect(v.violations[0]).not.toContain('(sentence-shape)')
@@ -361,11 +366,11 @@ describe('RULING P7: a tail sentence-shape refusal names the taught rule, not th
   it('T1b: a comma-less "and"-only arrangement gets the SAME taught message', () => {
     const parts: ArrangementPart[] = [
       { unit: id("Don't Quit") }, { unit: id('Sweatshirt') }, { glue: 'and' }, { unit: id('Graphic Crewneck') },
-      { glue: 'and' }, { unit: id('Fall Sweatshirts for Women') }, { glue: 'and' }, { unit: id('Crewneck') },
+      { glue: 'and' }, { unit: id('Fall Sweatshirts for Women') }, { glue: 'and' }, { unit: id('Great for Weekend Road Trips') },
       { glue: 'with' }, { unit: id('Classic Fit') },
     ]
     const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail })
-    expect(v.ok).toBe(false)
+    expect(v.ok, JSON.stringify(v)).toBe(false)
     if (!v.ok) expect(v.violations[0]).toContain("needs at least one ',' between phrases")
   })
 })
@@ -376,10 +381,14 @@ describe('RULING K4: the prompt is rendered from WRITER_RULE_REGISTRY — every 
   it('every UNCONDITIONAL-OR-APPLICABLE rule\'s sentence appears in the rendered system prompt', () => {
     // RULING P7 (fix round B5): a "Unisex Fit" spec-fact unit must be present for the (now
     // conditional, per M1) unisex-gender rule to render at all — include one so this fixture
-    // exercises every rule id, brand included.
-    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic', unisex: true } as never, allowedBrand: 'Comfort Colors', audience: 'adult', field: 'highlights' }
+    // exercises every rule id, brand included. RULING R6 (fix round B7a): a wear-fact unit must ALSO
+    // be present for the `wear-fact-list-only` rule (conditional, same shape as `unisex-gender`).
+    // RULING R6's own wear-fact unit is truthful only for the PO-sanctioned Comfort Colors brand
+    // (`sanctionedWearFact`, contentTruth.ts) — `spec.brand` must actually say so, or
+    // `buildAdmittedUnits` drops it as untrue before this fixture ever exercises the rule.
+    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic', unisex: true, brand: 'Comfort Colors' } as never, allowedBrand: 'Comfort Colors', audience: 'adult', field: 'highlights' }
     const units = buildAdmittedUnits(
-      { candidates: ['Cozy Graphic Tee'], specFacts: ['Classic Fit', 'Unisex Fit'], brandPick: 'Comfort Colors Tee', brandOrigin: 'spec', wearFact: null },
+      { candidates: ['Cozy Graphic Tee'], specFacts: ['Classic Fit', 'Unisex Fit'], brandPick: 'Comfort Colors Tee', brandOrigin: 'spec', wearFact: 'Can be worn as Oversized' },
       { designName: 'Retro Sunset', truthCtx },
     )
     const { system } = buildWriterPrompt(units, 'Retro Sunset', [])

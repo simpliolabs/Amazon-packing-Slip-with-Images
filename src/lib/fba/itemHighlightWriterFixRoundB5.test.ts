@@ -84,18 +84,23 @@ describe('RULING P1: at most ONE brand-carrying unit, across every kind', () => 
 
   // RULING Q9 (fix round B6, wire Blocking W8): the identity unit is NEVER dropped for carrying the
   // brand any more — the identity is effectively mandatory (the "names or evokes the design" rule),
-  // and dropping it left the writer with no subject to name at all (attack8 §A8's mechanism is
-  // superseded: it is demoted — still admitted, just no longer eligible to sit alongside the
-  // dedicated brand unit, which the judge's own "more than one unit carries the brand" check
-  // enforces — see the next test).
-  it('an identity text that ALSO carries the brand ("ComfortColors Club") is DEMOTED, not dropped, at admission', () => {
+  // and dropping it left the writer with no subject to name at all.
+  // SUPERSEDED by RULING R1 (fix round B7a, compliance Blocking/Important, `q6brand`/`q8two`): B5's
+  // "demoted, still admitted alongside a dedicated isBrand unit" shape made EVERY such arrangement
+  // unsatisfiable (the judge's own brand-once check refuses identity+isBrand together, burning the
+  // whole retry budget for nothing — `q8two.mts`'s exact finding). R1 corrected this: when the
+  // identity ITSELF carries the brand, it is the ONE mandatory carrier and the dedicated brand unit
+  // is WITHHELD entirely (never admitted at all) — so `isBrand` units drop to ZERO here, and the
+  // brand requirement is instead satisfied (and re-verified) through the identity.
+  it('an identity text that ALSO carries the brand ("ComfortColors Club") is the ONE carrier — the dedicated brand unit is withheld', () => {
     const units = buildAdmittedUnits(
       { candidates: ['Vintage Beach Vibes'], specFacts: ['100% Ring-Spun Cotton'], brandPick: 'Comfort Colors Tee', brandOrigin: 'spec', wearFact: null },
       { designName: 'ComfortColors Club', truthCtx },
     )
     const identity = units.find((u) => u.kind === 'identity')
     expect(identity?.text).toBe('ComfortColors Club')
-    expect(units.filter((u) => u.isBrand)).toHaveLength(1)
+    expect(units.filter((u) => u.isBrand)).toHaveLength(0)
+    expect(units.some((u) => u.text === 'Comfort Colors Tee')).toBe(false)
   })
 
   it('defense in depth: the judge rejects an arrangement using two units that BOTH carry the brand, even if admission somehow let both through', () => {
@@ -133,9 +138,16 @@ describe('RULING P3: a POOL unit may no longer abut a garment-head noun directly
     const v = validateArrangement({ parts: [{ unit: id('Harvest Moon') }, { unit: units.find((u) => u.kind === 'garment-head')!.id }] }, units)
     expect(v.ok).toBe(true)
   })
-  it('a pool unit CAN still precede a garment head — with a list join', () => {
+  // SUPERSEDED by RULING R5 (fix round B7a, truth Important I-2): a list-joined garment head reaches
+  // the SAME "second garment / multi-pack" claim a bare abutment does, one join further out
+  // ("Retro Sunset Tee and Top", T02b's exact shape) — the abutment pass alone never inspected a
+  // garment-head unit reached through a list join, only a bare no-glue pair. A garment-head unit's
+  // ONLY legal position, full stop, is directly after the identity; B5's "still fine with a list
+  // join" premise no longer holds.
+  it('a pool unit list-joined to a garment head is now ALSO rejected (RULING R5) — a garment-head unit has exactly one legal position', () => {
     const v = validateArrangement({ parts: [{ unit: id('Cream of the Crop') }, { glue: 'and' }, { unit: units.find((u) => u.kind === 'garment-head')!.id }] }, units)
-    expect(v.ok).toBe(true)
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.violation).toMatch(/garment-head unit and may appear ONLY directly after the identity/)
   })
 })
 
@@ -153,14 +165,16 @@ describe('RULING P4: span truth is judged per comma clause, over every contiguou
       { designName: 'Barn Yard', truthCtx },
     )
     const id = (t: string) => units.find((u) => u.text === t)!.id
-    const garmentHead = units.find((u) => u.kind === 'garment-head' && u.text !== 'Crewneck')?.id ?? units.find((u) => u.kind === 'garment-head')!.id
-    // "100% Awesome and Sweatshirt & Soft Poly Feel with 52% Cotton / 48% Polyester, Farm Life
-    // Crewneck in a Classic Fit" — a list join (not abutment, per P3) between the pool unit and
-    // the garment head, so this pin isolates P4's span-truth fix rather than P3's abutment fix.
+    // "100% Awesome and Farm Life Crewneck & Soft Poly Feel with 52% Cotton / 48% Polyester" — a
+    // list join between the two lying units' pair, with an INTERVENING pool unit (not a garment
+    // head — RULING R5, fix round B7a, made a garment-head unit's only legal position directly
+    // after the identity, so the ORIGINAL fixture's "and <garment head> &" insertion is now itself
+    // grammar-illegal and would reject at the grammar stage before ever reaching the span-truth
+    // check this pin isolates; a pool unit fills the identical structural role — something sitting
+    // BETWEEN the "%" marker and the fibre, inside the SAME comma-free clause).
     const parts: ArrangementPart[] = [
-      { unit: id('100% Awesome') }, { glue: 'and' }, { unit: garmentHead }, { glue: '&' }, { unit: id('Soft Poly Feel') },
-      { glue: 'with' }, { unit: id('52% Cotton / 48% Polyester') }, { glue: ',' },
-      { unit: id('Farm Life Crewneck') }, { glue: 'in' }, { glue: 'a' }, { unit: id('Classic Fit') },
+      { unit: id('100% Awesome') }, { glue: 'and' }, { unit: id('Farm Life Crewneck') }, { glue: '&' }, { unit: id('Soft Poly Feel') },
+      { glue: 'with' }, { unit: id('52% Cotton / 48% Polyester') },
     ]
     const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail: runTailFor('THE CEO Barn Yard', GILDAN, truthCtx) })
     expect(v.ok).toBe(false)

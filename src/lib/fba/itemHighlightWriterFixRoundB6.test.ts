@@ -265,7 +265,22 @@ describe('RULING Q4: the fem+masc rule is taught unconditionally, including on a
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('RULING Q5: span truth (pair-truth) is taught in the prompt, and the "join:" violation is plain language', () => {
-  const s = setup({ name: 'See You Later Alligator', pool: ['Comfort Colors Tee', 'Funny Pun Shirt', 'Cute Gator Shirt'], blank: CC, audienceLean: null as never })
+  // RULING R9 (fix round B7a, value Important): the OLD fixture's 3-keyword pool never contains
+  // "oversized" so `factEligible` (itemHighlightComposer.ts) is never true and no wear-fact unit is
+  // ever admitted — BOTH assertions below returned early before running, which is exactly the
+  // test-proves-the-mock class this round was ruled to end (`b7-rulings.md` HOW THIS ROUND RUNS
+  // DIFFERENTLY, #1). Replaced with the REAL 12-keyword Comfort Colors pool review B5's own value
+  // lens used (`phase-b6-review-value.md` §4's "See You Later Alligator" reference family), which
+  // DOES carry "oversized graphic tee" and yields a real wear-fact unit through the REAL composer.
+  const s = setup({
+    name: 'See You Later Alligator',
+    pool: [
+      'alligator shirt', 'see you later alligator', 'retro alligator graphic tee', 'swamp animal lover gift',
+      'oversized graphic tee', 'comfort colors tee', 'vintage washed tee', 'reptile lover shirt',
+      'cute gator shirt', 'summer beach tee', 'soft cotton tee', 'funny pun shirt',
+    ],
+    blank: CC, audienceLean: null as never,
+  })
 
   it('the rendered prompt contains the pair-truth sentence, unconditionally', () => {
     const { system } = buildWriterPrompt(s.units, 'See You Later Alligator', [])
@@ -275,23 +290,50 @@ describe('RULING Q5: span truth (pair-truth) is taught in the prompt, and the "j
   it('a rejected draft (the wear fact paired with a true spec fact) is REJECTED for a PLAIN-LANGUAGE reason, not a bare code', () => {
     const wearUnit = s.units.find((u) => u.kind === 'wear-fact')
     const specUnit = s.units.find((u) => u.kind === 'spec-fact')
-    if (!wearUnit || !specUnit) return // this fixture carries no wear fact — nothing to pin
+    // RULING R9: NO early-return guard — the 12-keyword pool is REAL and DOES yield both units;
+    // an early return here would silently skip the assertions again, the exact defect being fixed.
+    expect(wearUnit, JSON.stringify(s.units.map((u) => u.text))).toBeDefined()
+    expect(specUnit, JSON.stringify(s.units.map((u) => u.text))).toBeDefined()
     const identity = s.units.find((u) => u.kind === 'identity')!.id
     const garmentHead = s.units.find((u) => u.kind === 'garment-head')!.id
+    // RULING R6 (fix round B7a): the wear fact is now list-join-only, so the OLD shape ("with
+    // <spec> and <wear-fact>", the wear fact reached via a list join INSIDE the still-open "with"
+    // relation clause) is rejected at the GRAMMAR stage now (Q1's clause-scope pass), never
+    // reaching span truth at all — the exact shape R6 exists to forbid, since "with Can be worn as
+    // Oversized" is ungrammatical English by itself. The span-truth ("join:") class this test
+    // isolates needs the pairing reached through LIST glue only, with NO relation open in that
+    // clause: "<spec>, <wear-fact> and <brand>" — a pure list clause where the spec+wear-fact
+    // adjacency itself is the lie.
+    // The mandatory brand unit (`needBrand=true` on this Comfort Colors family) must also be
+    // carried — list-joined, in its OWN trailing clause, so it never disturbs the span-truth pair
+    // this test isolates.
     const parts = [
-      { unit: identity }, { unit: garmentHead }, { glue: 'with' }, { unit: specUnit.id },
-      { glue: 'and' }, { unit: wearUnit.id }, { glue: ',' }, { unit: s.units.find((u) => u.text === 'Comfort Colors Tee')!.id },
+      { unit: identity }, { unit: garmentHead }, { glue: ',' }, { unit: specUnit!.id },
+      { glue: 'and' }, { unit: wearUnit!.id }, { glue: ',' }, { unit: s.units.find((u) => u.text === 'Comfort Colors Tee')!.id },
     ]
     const v = judgeWriterArrangement({ parts }, s.units, { truthCtx: s.truthCtx, runTail: s.runTail })
-    if (v.ok) return // this exact pairing happens to be true on this fixture — not the class under test
+    expect(v.ok, JSON.stringify(v)).toBe(false)
+    if (v.ok) return // unreachable given the assertion above; keeps TS's control-flow narrowing happy
     expect(v.violations.join(' ')).toMatch(/^join:/)
-    expect(v.violations.join(' ')).not.toMatch(/fit-claim-lie|material-lie/)
-    // Repair A: drop the offending neighbour.
-    const repairA = [{ unit: identity }, { unit: garmentHead }, { glue: 'with' }, { unit: specUnit.id }, { glue: ',' }, { unit: s.units.find((u) => u.text === 'Comfort Colors Tee')!.id }, { glue: 'and' }, { unit: s.units.find((u) => u.text === 'Funny Pun Shirt')!.id }]
+    // RULING R9 (fix round B6 value Blocking B2, made REAL by this round): the PLAIN-LANGUAGE
+    // mapping (`SPAN_REASON_MESSAGES`) is load-bearing, not decorative — mutation-proven in
+    // `itemHighlightWriterFixRoundB7a.test.ts` (RULING R9): removing the lookup turns this exact
+    // assertion red (the message falls back to the bare internal reason code).
+    expect(v.violations.join(' ')).toMatch(/fabric\/material claim this blank does not back|fit\/cut claim this blank does not back/)
+    // Repair A: drop the offending neighbour (an extra pool phrase clears the 97-char floor).
+    const repairA = [
+      { unit: identity }, { unit: garmentHead }, { glue: 'with' }, { unit: specUnit!.id }, { glue: ',' },
+      { unit: s.units.find((u) => u.text === 'Comfort Colors Tee')!.id }, { glue: 'and' }, { unit: s.units.find((u) => u.text === 'Funny Pun Shirt')!.id },
+      { glue: ',' }, { unit: s.units.find((u) => u.text === 'Swamp Animal Lover Gift')!.id },
+    ]
     const vA = judgeWriterArrangement({ parts: repairA }, s.units, { truthCtx: s.truthCtx, runTail: s.runTail })
     expect(vA.ok, JSON.stringify(vA)).toBe(true)
-    // Repair B: the offending unit alone, in its own comma clause.
-    const repairB = [{ unit: identity }, { unit: garmentHead }, { glue: 'with' }, { unit: specUnit.id }, { glue: ',' }, { unit: s.units.find((u) => u.text === 'Comfort Colors Tee')!.id }, { glue: 'and' }, { unit: s.units.find((u) => u.text === 'Funny Pun Shirt')!.id }, { glue: ',' }, { unit: wearUnit.id }]
+    // Repair B: the offending unit alone, in its own comma clause (list-joined, never after "with").
+    const repairB = [
+      { unit: identity }, { unit: garmentHead }, { glue: 'with' }, { unit: specUnit!.id }, { glue: ',' },
+      { unit: s.units.find((u) => u.text === 'Comfort Colors Tee')!.id }, { glue: 'and' }, { unit: s.units.find((u) => u.text === 'Funny Pun Shirt')!.id },
+      { glue: ',' }, { unit: wearUnit!.id },
+    ]
     const vB = judgeWriterArrangement({ parts: repairB }, s.units, { truthCtx: s.truthCtx, runTail: s.runTail })
     expect(vB.ok, JSON.stringify(vB)).toBe(true)
   })
