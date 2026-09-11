@@ -13,6 +13,7 @@
 import { NextResponse } from 'next/server'
 import { describeContentReconcileMode } from '@/lib/fba/contentReconcile'
 import { describeVariantDeathAlarm } from '@/lib/fba/variantDeathAlarm'
+import { ihWriterMode, ihWriterModel, ihWriterMaxCallsBudget, ihWriterDeadlineMs } from '@/lib/fba/itemHighlightWriter'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -62,6 +63,10 @@ const BEHAVIOR_FLAGS = [
   'BRAND_SAFETY_JUDGE_MODEL', // brand-safety judge model PIN (listingPipeline.ts:5994, default 'gpt-5') — cost-guard pass 2026-08-22: this and the two below were never echoed, so every judge silently defaulting to gpt-5 was invisible from outside the container
   'TITLE_JUDGE_MODEL', // title-council judge model PIN (listingPipeline.ts:3358, default: TITLE_COUNCIL_MODEL || gpt-5) — separate from the adversary/proposer models by design (see refereeModelPin.test.ts's adversary != judge rationale)
   'VARIANT_DEATH_ALARM', // on (DEFAULT — read-only alarm card) | off — per-family dead-variant detector (variantDeathAlarm.ts): a child SKU whose content_synced_at froze >14d behind its siblings' max (sync_lag) OR whose stored listing_health offer evidence says no live offer (offer_dead; fail-open on a missing row) is surfaced as a revenue-leak card on the listing page, each SKU labelled with its reason (the Later Gator XL/2XL Orchid two-months-unbuyable incident). UNSET = ON, so it is echoed as the EFFECTIVE mode below — a raw null would read as 'off' to the flag census, the opposite of the truth.
+  'IH_WRITER', // off (DEFAULT) | shadow | on — the Item Highlight WRITER (2026-09-10 spec, Part 2): off delegates straight to the deterministic composer, byte-identical, zero calls; shadow makes the writer call(s) and logs/returns IH_WRITER_SHADOW per design but still SHIPS the composer's own result; on ships the accepted writer line, else the composer's own vetted result — never worse than off. UNSET = OFF, the honest raw echo (code default), so no effective-mode wrapper is needed here, unlike CONTENT_RECONCILE_ENABLED's shadow default.
+  'IH_WRITER_MODEL', // model PIN for the Item Highlight writer, default 'gpt-4.1' — echoed as the EFFECTIVE model below (cost-guard pass precedent: a judge/writer silently defaulting to an unnamed model is invisible from outside the container).
+  'IH_WRITER_MAX_CALLS', // FIX ROUND B2 (RULING W8): the PER-REGEN writer call budget across every design (default 18, distinct from the per-design retry cap) — echoed as the EFFECTIVE count below, same convention as MULTI_DESIGN_AUDIT_MAX_GROUPS.
+  'IH_WRITER_DEADLINE_MS', // RULING K10 (fix round B4): the regen-level wall-time deadline for the per-design writer loop, default 45000 — echoed as the EFFECTIVE count below.
 ] as const
 
 export async function GET() {
@@ -113,6 +118,20 @@ export async function GET() {
         // Effective count, not the raw string — code default is 8 (listingPipeline.ts's
         // MULTI_DESIGN_AUDIT_MAX_GROUPS = Number(process.env.MULTI_DESIGN_AUDIT_MAX_GROUPS || 8)).
         MULTI_DESIGN_AUDIT_MAX_GROUPS: Number(process.env.MULTI_DESIGN_AUDIT_MAX_GROUPS || 8),
+        // RULING K10 (fix round B4, compliance/wire m1): echo the EFFECTIVE mode/model, not the raw
+        // env — a raw `IH_WRITER` typo ("shadw") used to echo as "shadw" while the code actually ran
+        // `off`, and a raw `IH_WRITER_MODEL` of "  " echoed as "  " while `gpt-4.1` actually ran. Same
+        // reasoning as `TITLE_SHAPE_JUDGE`/`VARIANT_DEATH_ALARM` above: the raw value stays visible
+        // via the flat `BEHAVIOR_FLAGS` spread above (whenever it differs, both are on the object).
+        IH_WRITER: ihWriterMode(),
+        IH_WRITER_MODEL: ihWriterModel(),
+        // FIX ROUND B2 (RULING W8): the effective per-regen call budget, mirroring
+        // `ihWriterMaxCallsBudget`'s own resolution chain (itemHighlightWriter.ts) — same reasoning
+        // as MULTI_DESIGN_AUDIT_MAX_GROUPS's effective-count echo above.
+        IH_WRITER_MAX_CALLS: ihWriterMaxCallsBudget(),
+        // RULING K10: the effective regen-level writer deadline (ms), mirroring
+        // `ihWriterDeadlineMs`'s own resolution chain.
+        IH_WRITER_DEADLINE_MS: ihWriterDeadlineMs(),
       },
     },
     { headers: { 'Cache-Control': 'no-store, max-age=0' } },

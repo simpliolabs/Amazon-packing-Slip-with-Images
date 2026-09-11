@@ -338,7 +338,14 @@ describe('FIX ROUND 3 (I-1, controller RULING): listingPipeline.ts per-child per
 
   it('computes the scrub ONCE into a named `scrubbed` variable, fed to BOTH the verdict and the kept value', () => {
     expect(pipelineSrc).toMatch(/const scrubbed = scrubPub\(c\.item_highlight, 'per-child-item-highlight'\)/)
-    expect(pipelineSrc).toMatch(/const capResult = capItemHighlightRepeats\(scrubbed\)/)
+    // IH TERMINAL NET PHASE A (2026-09-10): the net call now carries `{ contentCtx: { designSeasons } }`
+    // (BLOCKING 3's real-designSeasons fix, threaded from this same regen's own season policy) — the
+    // invariant this pin actually protects (ONE `scrubbed` variable, read by both the net call and the
+    // refusal's kept value) is unchanged; only the extra options argument is new, so the assertion is
+    // widened to tolerate it rather than pinning zero arguments.
+    // FIX ROUND 2 (RULING I-2/F2, I-2/F3): `contentCtx` now ALSO carries `capacityFamily`/`brandName`
+    // (threaded real signal, never the leaf default) — widened again, same invariant, still `scrubbed`.
+    expect(pipelineSrc).toMatch(/const capResult = capItemHighlightRepeats\(scrubbed, \{ contentCtx: \{ designSeasons, capacityFamily: capacityFamilyTokens\.length >= 2, brandName: input\.brandName \} \}\)/)
   })
 
   it('on refusal, the persisted item_highlight is `scrubbed` -- never the pre-scrub `c.item_highlight` (the reviewer\'s exact reproduced bypass)', () => {

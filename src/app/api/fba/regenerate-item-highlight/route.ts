@@ -24,13 +24,24 @@ import { selectionMode, resolveRankingTargets } from '@/lib/keyword-engine/selec
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
-import { buildItemHighlights, buildItemHighlightsPerDesign, buildPerDesignIhDetailPatch, IH_REASON, IH_HOLD_MESSAGES, type IhHoldReason } from '@/lib/fba/listingPipeline'
+// WRITER SPEC PART 2 (2026-09-10, B4): this route's two producer calls go through the ONE async
+// entry point (produceItemHighlights/produceItemHighlightsPerDesign) — IH_WRITER=off (default)
+// delegates straight to the sync builder, byte-identical. No client is threaded here: when the
+// writer needs one it resolves it itself via `getLlmClientForRequest` (llmGateway.ts, B10) — the
+// same resolution every other production caller uses.
+import { produceItemHighlights, produceItemHighlightsPerDesign, buildPerDesignIhDetailPatch, deriveCapacityFamily, IH_REASON, IH_HOLD_MESSAGES, type IhHoldReason, type buildItemHighlightsPerDesign } from '@/lib/fba/listingPipeline'
 import { normalizeAudienceLean } from '@/lib/fba/contentTruth'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
 import { identityPhrases, readDesignGroupIdentity } from '@/lib/fba/designGroupIdentity'
 import { perDesignIhRows } from '@/lib/fba/perDesignItemHighlights'
+// IH TERMINAL NET PHASE A (2026-09-10, BLOCKING 3 fix): this route bypasses the pipeline entirely
+// (no PipelineInput to hand `deriveDesignSeasons`), so it resolves the design's REAL occasion
+// signal the same way `deriveDesignSeasons` itself does at its core — reading it straight off the
+// title/design-name text this route already has in scope. `seasonsIn` is the zero-import leaf both
+// share. Never a blanket `[]` at this seam either.
+import { seasonsIn } from '@/lib/keyword-engine/seasonalTerms'
 
 function admin() {
   return createClient(
@@ -136,6 +147,11 @@ export async function POST(req: NextRequest) {
     }
 
     const apparel = /\b(shirt|tee|t-?shirts?|hoodie|sweatshirt|tank|apparel|garment)\b/i.test(title)
+    // FIX ROUND 2 (RULING I-2/F3): the ONE seller brand this codebase hardcodes (matches
+    // ai-recommendations/route.ts's own `const brandName = 'THE CEO'` — the same real signal
+    // `PipelineInput.brandName` carries on the full-pipeline path) — threaded explicitly rather than
+    // relying on `ihContentRuleViolations`'s coincidental-matching default.
+    const brandName = 'THE CEO'
 
     // ── BLANK-BRAND WATERFALL (PO 2026-08-08, all-paths invariant): this route bypasses the
     // pipeline, so it resolves its own blank row — via the ONE shared spec-truth resolver
@@ -161,6 +177,12 @@ export async function POST(req: NextRequest) {
     // child (this route never spends a vision call — POST scan-identity {per_design:true}
     // populates it). The broadcast row becomes the per-design MARKER (no line).
     const pct = (Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { sku: string; asin: string; title: string; designName?: string | null; designKey?: string | null }[]
+    // FIX ROUND 2 (RULING I-2/F2): this route bypasses the pipeline entirely (no `PipelineInput.
+    // children` to hand `deriveCapacityFamily`), so it resolves the SAME signal off the one
+    // SKU/title list it already has in scope — `pct`, this family's per-child rows. Best-effort:
+    // an empty/thin `pct` (e.g. a family that never fanned out per-child) degrades to `false`,
+    // the historical default, never a false refusal.
+    const capacityFamily = deriveCapacityFamily(pct.map((p) => ({ sku: p.sku, title: p.title })), apparel)
     // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): two more columns on this SAME existing select —
     // the family's seller-declared audience lean (migration 029) + its per-design override map
     // (migration 070) — listingPipeline.ts:276-289 is the DB-shape source of truth this mirrors, so
@@ -203,12 +225,16 @@ export async function POST(req: NextRequest) {
       // would be the exact lie the ruling forbids (and the push seam would refuse it) — say so.
       return NextResponse.json({ error: 'Multi-design family without per-design titles yet — run a full AI audit first so each design gets its own title, then regenerate the Item Highlight per design.', hold: 'no-design-groups' }, { status: 422 })
     }
+    // IH TERMINAL NET PHASE A (BLOCKING 3 fix): the family's real occasion signal — every title
+    // this design ships (the family title + every per-child title) plus each design's own name.
+    // Resolved ONCE, threaded to both branches below.
+    const designSeasons = seasonsIn([title, ...pct.map((p) => p.title), ...pct.map((p) => p.designName ?? '')].join(' '))
     if (multi && byKey.size >= 2) {
       const groups = await Promise.all([...byKey.values()].map(async (g) => {
         const gi = await readDesignGroupIdentity(g).catch(() => null)
         return { ...g, identityPhrases: identityPhrases(gi?.identity ?? null) }
       }))
-      const built = buildItemHighlightsPerDesign({
+      const built = await produceItemHighlightsPerDesign({
         groups, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow,
         familyTitleText: title,
         // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family/per-design lean source the
@@ -216,6 +242,11 @@ export async function POST(req: NextRequest) {
         // DESIGN inside buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.
         audienceLean: apparel ? storedAudienceLean : null,
         audienceLeanByDesign: storedAudienceLeanByDesign,
+        designSeasons,
+        // FIX ROUND 2 (RULING I-2/F2, I-2/F3): real signal, resolved above the SAME way the
+        // pipeline's own multi-design branch does — never the leaf's coincidental default.
+        capacityFamily,
+        brandName,
       })
       const composed = built.perDesign.filter((d) => d.value)
       // FIX WAVE 2 (I-2a, 2026-09-06, controller RULING — final whole-branch review #2, Important
@@ -239,6 +270,11 @@ export async function POST(req: NextRequest) {
           error: `Item Highlight HELD for every design (${built.perDesign.length}): ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')}${missing.length ? ` (unrated designs: ${missing.join(', ')})` : ''} — the held state has been saved (card shows Held; a stale/pre-ruling stored line can no longer be pushed).`,
           hold: reasons[0] ?? 'under-floor', missing_designs: missing,
           per_design: built.perDesign.map((d) => ({ designKey: d.designKey, designName: d.designName, hold: d.hold })),
+          // RULING K10 (fix round B4, wire Important I1): the SAME per-design shadow block the 200
+          // response carries — the spec's own target case is exactly this all-held family
+          // ("B0DSCDZC6K, where 5 of 6 designs hold"). Absent when IH_WRITER=off (`built.writerLog`
+          // is undefined there).
+          ...(built.writerLog ? { writer: built.writerLog } : {}),
         }, { status: 422 })
       }
       return NextResponse.json({
@@ -247,13 +283,32 @@ export async function POST(req: NextRequest) {
         product_details_improvements: persisted.updated,
         shared: { item_highlight: built.shared.value, designs: built.shared.designKeys, foreignDropped: built.shared.foreignDropped },
         composed: composed.length, held: built.perDesign.length - composed.length,
+        // WRITER SPEC PART 2 (B9): the SAME per-design block IH_WRITER_SHADOW logs — the lead reads
+        // real writer lines from this one POST without touching a flag. Absent when IH_WRITER=off.
+        ...(built.writerLog ? { writer: built.writerLog } : {}),
       })
     }
 
+    // FIX ROUND B2 (RULING W5): the single-design writer's own identity — READ-ONLY, no vision call
+    // (see this file's own header + designGroupIdentity.ts), the SAME resolver the multi-design
+    // branch above already uses, applied to the implicit single group (every `pct` row, or the
+    // resolved child when no per-child rows exist yet). Never fed to the composer (`produceItemHighlights`
+    // threads it only to the writer — see `ItemHighlightsInput.identityDesignName`'s doc).
+    const singleGroupSkus = pct.length
+      ? pct.map((p) => ({ sku: p.sku, asin: p.asin }))
+      : (resolved?.childAsin ? [{ sku: '', asin: resolved.childAsin }] : [])
+    const singleIdentity = singleGroupSkus.length
+      ? await readDesignGroupIdentity({ key: 'single', skus: singleGroupSkus }).catch(() => null)
+      : null
+    const identityDesignName = pct[0]?.designName ?? null
+
     // Path parity (Invariant 1): the SAME inputs the pipeline hands the producer — pool, blank row,
-    // the title the IH will sit beside. Deterministic; no client, no LLM.
-    const built = buildItemHighlights({
+    // the title the IH will sit beside. Deterministic; no client, no LLM (unless IH_WRITER is not
+    // 'off' — see produceItemHighlights).
+    const built = await produceItemHighlights({
       finalTitle: title, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow, netTitles: [title],
+      identityDesignName,
+      identityPhrases: identityPhrases(singleIdentity?.identity ?? null),
       // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family lean the pipeline's own
       // single-design branch now reads (listingPipeline.ts:11901, fixed above in this same round).
       // NORMALIZED, not raw: `buildItemHighlights`'s `audienceLean` is `TruthAudienceLean`
@@ -264,22 +319,42 @@ export async function POST(req: NextRequest) {
       // normalizes the family value inline with the SAME function (contentTruth.ts), never a
       // second rule.
       audienceLean: apparel ? normalizeAudienceLean(storedAudienceLean) : null,
+      designSeasons,
+      // FIX ROUND 2 (RULING I-2/F2, I-2/F3): same real signal the multi-design branch above now
+      // threads — never the leaf's coincidental default.
+      capacityFamily,
+      brandName,
     })
     // FIX ROUND 1 (2026-09-07, controller RULING): `capItemHighlightRepeats` now returns a typed
     // union. A genuine REFUSAL (the net could not net the composer's own output into a compliant
     // line — an edge case, since the composer already floor-checks) maps onto the SAME
     // IhHoldReason vocabulary this route already used (no new hold semantics); the pre-existing
     // "built.value was already empty" HOLD path below is unchanged.
-    const capResult = capItemHighlightRepeats((built.value || '').trim())
+    // FIX ROUND 2 (RULING I-2/F2, I-2/F3): same real contentCtx `buildItemHighlights` above already
+    // netted `built.value` against — idempotent defense-in-depth on these final bytes, never a
+    // second, differently-scoped check.
+    const capResult = capItemHighlightRepeats((built.value || '').trim(), { contentCtx: { designSeasons, capacityFamily, brandName } })
     if (!capResult.ok) {
+      // RULING W5 (fix round B7b, wire minor 3): this is the THIRD distinct 422 shape (alongside
+      // :278 and the `!hl` branch below) — reached only when the composer's OWN already-floor-
+      // checked output is refused by this defense-in-depth net (a repeat/length budget breach that
+      // slipped past composition). Confirmed correct BY READING (`capItemHighlightRepeats`'s own
+      // refusal contract, `productDetailAttrs.ts`), never behaviourally exercised through this real
+      // route this round — reaching it would require constructing a composer output that itself
+      // passes the composer's floor check yet fails this net, which reaches into composer-internals
+      // territory outside this round's wire-only scope (`Do NOT touch writer logic`). Source-pinned
+      // by design, per the round's own ruling.
       const reason: IhHoldReason = built.hold ?? (capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor')
-      return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason }, { status: 422 })
+      // RULING K10 (fix round B4, wire Important I1): the single-design shadow readout, same as the
+      // 200 response and the multi-design 422 above.
+      return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason, ...(built.writerLog ? { writer: [built.writerLog] } : {}) }, { status: 422 })
     }
     const hl = capResult.value
     if (!hl) {
       // HOLD (PO 2026-08-21): name the reason — the PO's next action — never a generic "empty".
       const reason = built.hold ?? 'under-floor'
-      return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason }, { status: 422 })
+      // RULING K10: same shadow readout as the other 422 branches above.
+      return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason, ...(built.writerLog ? { writer: [built.writerLog] } : {}) }, { status: 422 })
     }
 
     // Single-design: the broadcast row carries the line; any stale per-design marker/array is cleared
@@ -296,7 +371,11 @@ export async function POST(req: NextRequest) {
     }
     if (updErr) return NextResponse.json({ error: `Could not save: ${updErr.message}` }, { status: 500 })
 
-    return NextResponse.json({ item_highlight: hl, product_details_improvements: updated })
+    return NextResponse.json({
+      item_highlight: hl, product_details_improvements: updated,
+      // WRITER SPEC PART 2 (B9): same shadow readout as the multi-design branch above.
+      ...(built.writerLog ? { writer: [built.writerLog] } : {}),
+    })
   } catch (e) {
     console.error('[regenerate-item-highlight]', e)
     return NextResponse.json({ error: 'Internal error', details: String(e) }, { status: 500 })

@@ -24,8 +24,13 @@ export interface DesignGroupIdentity {
   identity: ProductIdentity | null
 }
 
-/** The phrases that name a design for the cross-design partition: designTheme + seedKeywords. */
-export function identityPhrases(identity: ProductIdentity | null | undefined): string[] {
+/** The phrases that name a design for the cross-design partition: designTheme + seedKeywords.
+ *  WIDENED (fix round B2, RULING W5) to a `Pick` of just the two fields this function reads — the
+ *  full `ProductIdentity` (vision-scanned) still satisfies it structurally, and it additionally lets
+ *  `PipelineInput.visionDesign`'s narrower shape (no `productType`/`confidence`/`scannedAt`) call
+ *  this SAME resolver directly for the single-design writer path, instead of a second hand-copied
+ *  extraction. */
+export function identityPhrases(identity: Pick<ProductIdentity, 'designTheme' | 'seedKeywords'> | null | undefined): string[] {
   if (!identity) return []
   return [identity.designTheme || '', ...(Array.isArray(identity.seedKeywords) ? identity.seedKeywords : [])]
     .map((s) => (typeof s === 'string' ? s.trim() : ''))

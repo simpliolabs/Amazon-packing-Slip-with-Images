@@ -51,7 +51,21 @@ import { guaranteedIdentitySynonyms, identitySynonymPhrases, getSeedPool, normal
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
-import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck, ihRepeatViolations, IH_MAX_WORD_REPEATS, mergeDetailRowsByPrecedence, type EnumCoercer } from '@/lib/fba/productDetailAttrs'
+import {
+  detailValueToString, capItemHighlightRepeats, collarStyleForNeck, ihRepeatViolations, IH_MAX_WORD_REPEATS, mergeDetailRowsByPrecedence, type EnumCoercer,
+  // IH TERMINAL NET PHASE A (2026-09-10): THIRD_PARTY_BRANDS/findThirdPartyBrands/ownBrandTokenSet/
+  // CAPACITY_RE MOVED to productDetailAttrs.ts (the pure, client-safe leaf `capItemHighlightRepeats`
+  // already lives in) — re-imported here, byte-identical, for this file's ~20 other call sites
+  // (title/bullets/backend brand gates, the keyword-pool capacity filter). Never redefined here
+  // again. `ihContentRuleViolations` is the ONE moved-five-rules predicate `validateItemHighlights`
+  // below now delegates to instead of re-implementing.
+  THIRD_PARTY_BRANDS, findThirdPartyBrands, ownBrandTokenSet, CAPACITY_RE, ihContentRuleViolations,
+  type IhContentRuleCtx,
+} from '@/lib/fba/productDetailAttrs'
+// `findThirdPartyBrands` used to be DEFINED (and exported) here; it is now only re-imported (see
+// above) — re-export it under the same name so its pre-existing external importers
+// (scripts/stress-brand-safety.ts, scripts/stress-trademark-and-framing.ts) are unaffected.
+export { findThirdPartyBrands }
 import { coerceToEnum, coerceGenderToEnum } from '@/lib/fba/productTypeDefinitions'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversaryTrademarkClause } from '@/lib/fba/trademarkGuard'
 import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalCompounds'
@@ -60,7 +74,10 @@ import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrity
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, loadBlankAssignments, resolveFamilyBlank, familyBlankRow, familyGarmentUnion, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
-import { composeItemHighlightDetailed, ihAudienceOf } from '@/lib/fba/itemHighlightComposer'
+import { composeItemHighlightDetailed, ihAudienceOf, type ComposerResult } from '@/lib/fba/itemHighlightComposer'
+// WRITER SPEC PART 2 (2026-09-10, B4) — the writer is a LEAF (see its own header for why); this file
+// is a CONSUMER, never the other way, so the dependency graph stays acyclic.
+import { ihWriterMode, ihWriterMaxCallsBudget, ihWriterDeadlineMs, runWriterForDesign, IH_WRITER_RETRY_CAP, WriterPartialCallsError, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
 /* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
  * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
  * highlights. Blank-grounded (resolveFamilyBlank), never title-derived: a title cannot vouch for
@@ -75,6 +92,7 @@ import {
   buildPhraseTruthCtx,
   youthMarkerFor,
   resolveGarmentAudience,
+  ihLineTruthVerdict,
   type PhraseTruthCtx,
   type TruthGarmentFamily,
   type TruthAudienceLean,
@@ -1034,54 +1052,12 @@ function enforceHardAudience(text: string, audience: 'Men' | 'Women'): string {
 // now lives once in designName.ts; this alias keeps all eight call sites below unchanged.
 const BASIC_COLOR_RE = BASIC_COLOR_WORD_RE
 
-/**
- * Third-party brand names that REQUIRE 'for [Brand]' or 'compatible with [Brand]' framing
- * in titles and bullets. Amazon's Jan 2025 enforcement (tightened Q4 2025): bare third-party
- * brand references in titles trigger listing suppression and can lead to ASIN takedown.
- * Sources: DAM Law Firm 2026 Q4 enforcement report; Amazon Seller Central Product Title
- * Guidelines effective Jan 21, 2025.
- *
- * The seller's own brand (input.brandName) is exempted at runtime — this list is
- * COMPETITORS / accessories ecosystems the seller's product is compatible WITH, not made by.
- *
- * Apparel "blank" brands (Comfort Colors, Bella Canvas, Gildan…) are deliberately NOT here.
- * Amazon has long tolerated them as material/style descriptors and the existing pipeline
- * handles them via `attributePin`. This list focuses on actively-enforcing trademark holders.
- */
-const THIRD_PARTY_BRANDS = new Set([
-  // Cameras & imaging
-  'canon', 'nikon', 'sony', 'fujifilm', 'fuji', 'olympus', 'panasonic', 'pentax', 'leica',
-  'kodak', 'gopro', 'insta360', 'dji', 'ricoh', 'sigma', 'tamron',
-  // Memory / storage manufacturers
-  'sandisk', 'samsung', 'lexar', 'kingston', 'pny', 'toshiba', 'transcend', 'adata', 'patriot',
-  'crucial', 'seagate', 'maxell', 'micron',
-  // Phones & computing
-  'apple', 'iphone', 'ipad', 'macbook', 'imac', 'galaxy', 'pixel', 'microsoft', 'surface',
-  'huawei', 'xiaomi', 'oneplus', 'motorola',
-  // Drones
-  'parrot', 'autel', 'skydio', 'yuneec',
-  // Gaming
-  'nintendo', 'playstation', 'xbox', 'switch',
-  // Audio
-  'bose', 'beats', 'jbl', 'sennheiser',
-  // Apparel / athletic competitor RETAIL brands (2026-07-07, B0FRYMM56C: "why do we have NIKE"). The
-  // keyword research pulls the #1 competitor's ranking terms ("nike shirts women") into the pool as
-  // proven converters, and — until now — no filter knew Nike was a brand, so the bullet coverage
-  // backstop wove it straight into customer copy. A graphic tee is NOT "compatible with" Nike, so these
-  // are DROPPED (like trademark phrases), never framed "for [Brand]". OMITTED pending a context-guard
-  // because they double as legit design words: champion / gap / columbia / express (common words),
-  // puma (animal), wrangler (cowboy/Jeep), levis / hollister (names).
-  'nike', 'adidas', 'reebok', 'lululemon', 'athleta', 'underarmour', 'vuori', 'gymshark',
-  'fabletics', 'aeropostale', 'abercrombie', 'nautica',
-])
-
-/** Multi-word brand phrases (checked verbatim, not per-word). */
-const THIRD_PARTY_BRAND_PHRASES = [
-  'western digital', 'audio technica', 'sea gate', 'go pro',
-  // Apparel/athletic competitor brands whose name is multi-word (per-word checks would false-positive
-  // on 'under'/'new'/'north'/'face'). See the apparel block in THIRD_PARTY_BRANDS above.
-  'under armour', 'new balance', 'north face',
-]
+// THIRD_PARTY_BRANDS / THIRD_PARTY_BRAND_PHRASES MOVED (IH terminal net Phase A, 2026-09-10) to
+// productDetailAttrs.ts — the pure, client-safe leaf `capItemHighlightRepeats` already lives in —
+// and re-imported at the top of this file, byte-identical, so the ~20 call sites below (title/
+// bullets/backend brand gates) are unaffected. See the block comment on `IhContentRuleReason`
+// (productDetailAttrs.ts) for why: the Item Highlights terminal net needed this vocabulary too, and
+// a second copy is exactly the "two rulebooks" class this move exists to prevent.
 
 /**
  * Sports teams, college athletic programs, media franchises, and other licensed
@@ -1200,19 +1176,7 @@ export function findTrademarkPhrases(text: string): string[] {
   return [...found]
 }
 
-/** Find every third-party brand token in `text`, excluding the seller's own brand. */
-export function findThirdPartyBrands(text: string, ownBrandTokens: Set<string>): string[] {
-  const lc = text.toLowerCase()
-  const found = new Set<string>()
-  for (const w of lc.split(/[^a-z0-9]+/).filter(Boolean)) {
-    if (ownBrandTokens.has(w)) continue
-    if (THIRD_PARTY_BRANDS.has(w)) found.add(w)
-  }
-  for (const phrase of THIRD_PARTY_BRAND_PHRASES) {
-    if (lc.includes(phrase)) found.add(phrase)
-  }
-  return [...found]
-}
+// findThirdPartyBrands MOVED (IH terminal net Phase A) to productDetailAttrs.ts, re-imported above.
 
 /**
  * True if EVERY occurrence of `brandToken` in `text` is properly preceded by a framing
@@ -1261,19 +1225,7 @@ export function isBrandProperlyFramed(text: string, brandToken: string): boolean
   return true
 }
 
-/** Get the seller's own brand tokens for exemption from brand checks. Includes NORMALIZED forms
- *  (apostrophe-deleted, punctuation-stripped) alongside the raw tokens (adversarial 2026-07-08):
- *  the backend ban sites compare against normalized tokens ("Darlin' Co." must ban "darlin"), and
- *  a raw-only set silently no-ops for any punctuated brand. Superset — raw consumers unaffected. */
-function ownBrandTokenSet(brandName: string): Set<string> {
-  const s = new Set<string>()
-  for (const t of brandName.toLowerCase().split(/\s+/).filter(Boolean)) {
-    s.add(t)
-    const stripped = t.replace(/['’]/g, '').replace(/[^a-z0-9]/g, '')
-    if (stripped) s.add(stripped)
-  }
-  return s
-}
+// ownBrandTokenSet MOVED (IH terminal net Phase A) to productDetailAttrs.ts, re-imported above.
 // Product-type words capped at 2 total in the backend core (Amazon's bag-of-words already
 // has them from the title; >2 is the "shirt ×7" waste the PO flagged).
 const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees'])
@@ -1955,13 +1907,32 @@ function looksApparel(category?: string | null, repTitle?: string | null, produc
 // "ring-spun cotton", "for men", etc. Only applied when the product is non-apparel.
 const APPAREL_CONTAMINANTS = /\b(?:t[-\s]?shirts?|tees?|shirts?|graphic\s*tees?|hoodie|sweat\s?shirts?|sweater|apparel|clothing|garments?|fabric|cotton|ring[-\s]?spun|jersey|knit(?:ted)?|relaxed\s*fit|regular\s*fit|comfort\s*colors|bella\s*canvas|gildan|next\s*level|unisex|m[ae]ns?|wom[ae]ns?|fashion|outfit|wardrobe|sleeves?|crew\s?neck|tank\s?tops?|garment[-\s]?dyed|\bdye\b|wear|wearable)\b/i
 
-// A storage-capacity token ("128GB", "1 TB"). When children span >=2 distinct capacities the
-// title is per-child (each carries its own capacity) — NOT a concept that ever matches apparel.
-const CAPACITY_RE = /\b(\d{1,4})\s?(t|g)b?\b/i // GB/TB only — "MB" is usually a transfer speed, not capacity
+// CAPACITY_RE MOVED (IH terminal net Phase A) to productDetailAttrs.ts, re-imported above — same
+// meaning ("128GB", "1 TB"; GB/TB only). When children span >=2 distinct capacities the title is
+// per-child (each carries its own capacity) — NOT a concept that ever matches apparel.
 function capacityOf(s: string | null | undefined): string | null {
   const m = (s ?? '').match(CAPACITY_RE)
   // "32G"/"64G." -> 32GB/64GB, "128GB" -> 128GB, "1T"/"1TB" -> 1TB
   return m ? `${m[1]}${m[2].toUpperCase()}B` : null
+}
+
+/** FIX ROUND 2 (RULING I-2/F2): does this family vary by storage capacity (2+ children carrying
+ *  DIFFERENT GB/TB tokens on their SKU or title)? The shared signal `hardcoded-capacity` (the moved
+ *  Item Highlights content rule) needs at every seam that can resolve it — a broadcast field naming
+ *  one variant's "128GB" misleads the 32GB/64GB siblings. Exported so a caller with no full
+ *  `PipelineInput` in scope (`regenerate-item-highlight/route.ts`, which bypasses the pipeline
+ *  entirely) can derive the identical signal `runBulletsAgent`'s own local `capacityFamily` const
+ *  and Stage 2's `capacityFamilyTokens` (both still computed inline at their own call sites,
+ *  byte-identical to this — this export exists for a caller that has no equivalent of its own, not
+ *  to replace either). */
+export function deriveCapacityFamily(children: readonly { sku?: string | null; title?: string | null }[] | undefined, apparel: boolean): boolean {
+  if (apparel) return false
+  const caps = new Set<string>()
+  for (const c of children ?? []) {
+    const cap = capacityOf(c.sku) || capacityOf(c.title)
+    if (cap) caps.add(cap)
+  }
+  return caps.size >= 2
 }
 
 /* ── SEASON POLICY (KEYWORD_TARGET_SET, PO 2026-07-23) ────────────────────────────────────────────
@@ -2252,17 +2223,26 @@ import { capTitle75 } from './titleCap'
 // ONE named reason. `validateItemHighlights` below remains the seller-facing checker (the
 // check-item-highlight route) for hand-edited values.
 
-// Pricing/promo language never belongs in a customer-facing highlight. "% off" and "$" match
-// anywhere (a \b next to "$" could never fire — it is not a word char); the words need boundaries.
-const HIGHLIGHT_PROMO_RE = /\b(?:sale|discount|cheap|free|deal)\b|% ?off|\$/i
+// HIGHLIGHT_PROMO_RE MOVED (IH terminal net Phase A) to productDetailAttrs.ts, inside
+// `ihContentRuleViolations` — never re-declared here.
 
 /** Deterministic Item Highlights gates — ALL must pass. Returns the violations (empty = compliant).
  *  Callers scrub trademarks BEFORE validating (the scrubbed string is what ships), so the
- *  trademark gate only fires if a mark somehow survives the scrub. */
+ *  trademark gate only fires if a mark somehow survives the scrub.
+ *
+ *  IH TERMINAL NET PHASE A (2026-09-10): the five content rules (sentence-shape, off-season,
+ *  promo-pricing, hardcoded-capacity, third-party-brand) now delegate to `ihContentRuleViolations`
+ *  (productDetailAttrs.ts) instead of re-implementing — the SAME predicate `capItemHighlightRepeats`
+ *  enforces at every producer, the Regen route, and the push seam, so this checker can never again
+ *  drift from what actually ships (finish-final-review.md's "two rulebooks" class). Only the checks
+ *  that are NOT part of the five moved rules (max length, the repeat cap, the raw trademark-mark
+ *  check) stay inline here — they have their OWN single-source owners elsewhere already. */
 export function validateItemHighlights(
   s: string, brandName: string, capacityFamily: boolean,
   /** Canonical occasions THIS design is about (deriveDesignSeasons). Default [] = the historical
-   *  blanket rule, which is what the out-of-file caller (regenerate-item-highlight) keeps. */
+   *  blanket rule, which is what the out-of-file caller (check-item-highlight route) keeps — that
+   *  caller always resolves real seasons before calling, so `[]` here means "resolved, found none",
+   *  never a guess (contrast `ihContentRuleViolations`'s own `undefined` = "no signal, skip"). */
   designSeasons: readonly string[] = [],
 ): string[] {
   const problems: string[] = []
@@ -2272,7 +2252,6 @@ export function validateItemHighlights(
   // ~120-char comma-sentence live (B0FKKN8XKV). Cap 75 + ban sentence punctuation so the corrective-retry
   // loop + the deterministic fallback both converge on short phrases.
   if (s.length > CONTENT_CONTRACT.itemHighlights.max) problems.push(`${s.length} characters — keep it ≤${CONTENT_CONTRACT.itemHighlights.max}; short feature/benefit phrases, not a sentence`)
-  if (/[.!?](\s|$)/.test(s)) problems.push('reads as a full sentence — use short comma-separated feature/benefit phrases with NO sentence punctuation (. ! ?)')
   /* ONE RULE, shared with the push boundary (productDetailAttrs.ihRepeatViolations, 2026-08-18).
    * This used to count locally with `c > 1` — STRICTER than Amazon, which allows a word twice. The
    * generator therefore rejected values `capItemHighlightRepeats` would have shipped unchanged, so
@@ -2282,16 +2261,8 @@ export function validateItemHighlights(
   const repeated = ihRepeatViolations(s)
   if (repeated.length) problems.push(`these words appear more than ${IH_MAX_WORD_REPEATS}x: ${repeated.join(', ')} — Amazon rejects the SKU above that`)
   if (scrubTrademarks(s).trim() !== s.trim()) problems.push('contains a protected trademark (e.g. "World Cup" — the safe phrasing is "World Futbol Cup")')
-  const brands = findThirdPartyBrands(s, ownBrandTokenSet(brandName))
-  if (brands.length) problems.push(`contains third-party brand(s)/team(s): ${brands.join(', ')}`)
-  const lc = s.toLowerCase()
-  // OFF-SEASON only (2026-07-23): "evergreen" means "not about a holiday we are not about". A Valentine
-  // design's own "Valentine" is its subject, not a seasonal claim, so it is no longer a violation.
-  const season = SEASONAL_TERMS.find((t) => lc.includes(t) && isOffSeasonKeyword(t, designSeasons))
-  if (season) problems.push(`contains the seasonal term "${season}" — this is an evergreen field`)
-  if (HIGHLIGHT_PROMO_RE.test(s)) problems.push('contains pricing/promotional language (sale/discount/cheap/free/deal/$/% off)')
-  if (capacityFamily && CAPACITY_RE.test(s)) problems.push('hardcodes a storage capacity — the field is shared across all capacity variants')
-  if (s.split(',').map((p) => p.trim()).filter(Boolean).length < 2) problems.push('must be at least 2 comma-separated phrases')
+  // The five MOVED rules — ONE call, never a second hand-rolled copy (see the doc above).
+  for (const v of ihContentRuleViolations(s, { brandName, capacityFamily, designSeasons })) problems.push(v.message)
   return problems
 }
 
@@ -2333,6 +2304,76 @@ export interface ItemHighlightsInput {
   /** THIS design's own name/identity tokens — the forced-gender rule's design-own-name exemption.
    *  NEVER the family-wide union; see `ComposerOpts.designTokens` (itemHighlightComposer.ts). */
   designTokens?: readonly string[]
+  /** IH TERMINAL NET PHASE A (2026-09-10): the family's REAL resolved occasions
+   *  (`deriveDesignSeasons`) — threaded to the moved off-season rule (`ihContentRuleViolations`, via
+   *  `capItemHighlightRepeats`'s `contentCtx`). BLOCKING 3 (finish-final-review.md): absent/undefined
+   *  here means "the caller has no occasion signal" and the off-season rule is SKIPPED at this call
+   *  — never defaulted to `[]`, which would assert "no occasion" and refuse a true on-season line. */
+  designSeasons?: readonly string[]
+  /** FIX ROUND 2 (RULING I-2/F2): does this family vary by storage capacity (2+ children carrying
+   *  different GB/TB tokens)? Threaded to the moved `hardcoded-capacity` rule. Undefined/false (the
+   *  default every pre-fix-round caller left it at) is safe — it can only ever ADD a refusal, never
+   *  guess — but a caller that CAN resolve this (every real call site now does) should. */
+  capacityFamily?: boolean
+  /** FIX ROUND 2 (RULING I-2/F3): the seller's own resolved brand — exempts it from the moved
+   *  `third-party-brand` rule. Undefined defaults to `'THE CEO'` (`ihContentRuleViolations`'s own
+   *  default), safe today because this codebase hardcodes exactly one seller; every real call site
+   *  now threads `PipelineInput.brandName` instead of relying on that coincidence. */
+  brandName?: string
+  /** FIX ROUND B2 (RULING W5): the family's RESOLVED design name, consumed ONLY by
+   *  `produceItemHighlights`'s writer call (`runWriterForDesign`'s `designName`) — NEVER by the
+   *  composer/`buildItemHighlights`, so a flag-off composer's bytes are unaffected by this field.
+   *  Kept deliberately separate from `designTokens` above (which the composer's OWN forced-gender
+   *  exemption already reads, pre-dating the writer) — threading identity through THAT field instead
+   *  would have changed composer output on single-design families that never previously set it,
+   *  breaking the flag-off byte-identity invariant. Falls back to `designTokens?.[0]` when absent
+   *  (back-compat with any caller that only ever set the composer-facing field). */
+  identityDesignName?: string | null
+  /** FIX ROUND B2 (RULING W5): the design's vision identity phrases (designTheme + seedKeywords),
+   *  the SAME shape `identityPhrases()` (designGroupIdentity.ts) already extracts for the per-design
+   *  path — writer-only, additive, never read by the composer. */
+  identityPhrases?: readonly string[]
+}
+
+/**
+ * WRITER SPEC PART 2, B3 (2026-09-10) — THE ONE post-compose tail: `ensureBlankBrandInHighlights` ->
+ * `capItemHighlightRepeats` (contentCtx + truthCheck) -> `ihFloorDoor`. Extracted verbatim from
+ * `buildItemHighlights`'s own inline block (unchanged behavior — same calls, same order, same hold
+ * mapping) so the composer's OWN line and the writer's candidate line run through the IDENTICAL
+ * deterministic gates (repeat budget, the moved content rules, the line truth net, the floor door) —
+ * never a second, hand-copied tail. `site` names the caller in the refusal log only; it changes no
+ * shipped byte and no hold reason.
+ *
+ * FIX ROUND B2 (RULING W4): `reason` is additive — the tail's REAL refusal (`capResult.reason`,
+ * e.g. `material-lie`, `audience-kids-on-adult`), not only the coarser `hold` bucket every
+ * non-repeat refusal collapses onto (`under-floor`). Every existing caller destructures `.value`/
+ * `.hold` only, so this changes no existing byte; the writer's own violation text
+ * (`judgeWriterArrangement`) reads `.reason` so a retry — and the PO's `IH_WRITER_SHADOW` readout —
+ * names the actual lie instead of misreporting it as "too short".
+ */
+export function runIhTail(
+  line: string,
+  opts: {
+    titles: string[]
+    blankBrand: BlankSpecRow | null
+    designSeasons?: readonly string[]
+    capacityFamily?: boolean
+    brandName?: string
+    truthCtx: PhraseTruthCtx
+    site?: string
+  },
+): { value: string; hold: IhHoldReason | null; reason?: string | null } {
+  const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(line, opts.titles, opts.blankBrand), {
+    contentCtx: { designSeasons: opts.designSeasons, capacityFamily: opts.capacityFamily, brandName: opts.brandName },
+    truthCheck: (l) => ihLineTruthVerdict(l, opts.truthCtx),
+  })
+  if (!capResult.ok) {
+    console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: opts.site ?? 'buildItemHighlights', reason: capResult.reason, len: line.length }))
+    const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
+    return { value: '', hold, reason: capResult.reason }
+  }
+  const value = ihFloorDoor(capResult.value)
+  return value ? { value, hold: null, reason: null } : { value: '', hold: 'under-floor', reason: 'under-floor' }
 }
 
 /**
@@ -2340,29 +2381,44 @@ export interface ItemHighlightsInput {
  * regenerate-item-highlight route (Invariant 1: one function ships the field on every path).
  * Deterministic; never touches an LLM. `value` = the shipped bytes, or '' (= HOLD the stored value)
  * with `hold` naming why.
+ *
+ * WRITER SPEC PART 2, B1/B4 (2026-09-10) — `composed`/`truthCtx`/`titles` are additive: the async
+ * `produceItemHighlights` wrapper (itemHighlightWriter.ts) reuses them to build the writer's admitted
+ * set and to re-run `runIhTail` on an accepted writer line, WITHOUT recomposing or re-deriving
+ * `truthCtx` a second time. No existing caller reads these fields, so nothing byte-identical changes.
  */
-export function buildItemHighlights(input: ItemHighlightsInput): { value: string; hold: IhHoldReason | null } {
+export function buildItemHighlights(input: ItemHighlightsInput): { value: string; hold: IhHoldReason | null; composed?: ComposerResult; truthCtx?: PhraseTruthCtx; titles?: string[] } {
   const { finalTitle, pool, apparelProduct, blankBrand } = input
   const titles = (input.netTitles ?? [finalTitle]).filter((t): t is string => !!t)
+  // Named so the terminal net's line-level truth check (below) can reuse the IDENTICAL ctx the
+  // composer's own per-candidate truth stage already judges against — never a second resolution.
+  // NOT annotated `: PhraseTruthCtx` on purpose: `composeItemHighlightDetailed` wants the WIDER
+  // `ComposerOpts['spec']` (brand/stretch/dye included, from `blankBrand.spec`'s own full type);
+  // narrowing this const to `PhraseTruthCtx` would make TS see only the narrower fields, and it
+  // would then reject `spec` at the composer call below. Left uninferred, structural typing
+  // satisfies BOTH the composer's `ComposerOpts` (below) and `ihLineTruthVerdict`'s `PhraseTruthCtx`
+  // (the truthCheck closure) — a superset object literal is assignable to either.
+  const truthCtx = {
+    // Truth stage inputs: the blank's facts + the family's garment class (UNFOLDED — kids_tee
+    // drives the audience rule; long_sleeve_tee names its own brand spec phrase). NON-APPAREL
+    // families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocabulary. The
+    // title regex remains the fallback for an unresolved blank only.
+    spec: blankBrand?.spec ?? null,
+    garmentFamily: (!apparelProduct ? 'none' : (blankBrand?.garmentFamily ?? (/sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee'))) as TruthGarmentFamily,
+    // Audience comes from the BLANK's family only (PO: never inferred from a title) — an
+    // unresolved blank has no audience rule rather than a title-guessed one.
+    audience: ihAudienceOf(blankBrand?.garmentFamily ?? null),
+    // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
+    allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
+    // Task 5: threaded straight through — undefined on every caller that doesn't set it.
+    audienceLean: input.audienceLean,
+    designTokens: input.designTokens,
+    field: 'highlights' as const,
+  }
   const res = composeItemHighlightDetailed(
     pool.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: k.themeFit ?? null })),
     titles,
-    {
-      // Truth stage inputs: the blank's facts + the family's garment class (UNFOLDED — kids_tee
-      // drives the audience rule; long_sleeve_tee names its own brand spec phrase). NON-APPAREL
-      // families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocabulary. The
-      // title regex remains the fallback for an unresolved blank only.
-      spec: blankBrand?.spec ?? null,
-      garmentFamily: !apparelProduct ? 'none' : (blankBrand?.garmentFamily ?? (/sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee')),
-      // Audience comes from the BLANK's family only (PO: never inferred from a title) — an
-      // unresolved blank has no audience rule rather than a title-guessed one.
-      audience: ihAudienceOf(blankBrand?.garmentFamily ?? null),
-      // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
-      allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
-      // Task 5: threaded straight through — undefined on every caller that doesn't set it.
-      audienceLean: input.audienceLean,
-      designTokens: input.designTokens,
-    },
+    truthCtx,
   )
   if (res.line) {
     console.log(JSON.stringify({ tag: 'IH_COMPOSED', len: res.line.length, ih: res.line.slice(0, 140) }))
@@ -2374,15 +2430,15 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
     // (no new hold semantics, per the spec's own non-goals): the repeat net emptying everything is
     // the same fact `under-floor-no-repeat` already names (a repeat-permitting selection was the
     // only way to reach the floor and the PO's absolute no-repeat ruling forbids it); every other
-    // refusal (over-max, or a length/repeat-driven drop landing under the floor) is `under-floor`.
-    const capResult = capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand))
-    if (!capResult.ok) {
-      console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'buildItemHighlights', reason: capResult.reason, len: res.line.length }))
-      const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
-      return { value: '', hold }
-    }
-    const value = ihFloorDoor(capResult.value)
-    return value ? { value, hold: null } : { value: '', hold: 'under-floor' }
+    // refusal (over-max, or a length/repeat-driven drop landing under the floor, or — IH TERMINAL
+    // NET PHASE A — a moved content rule or the line-level truth net) is `under-floor`.
+    // B3: the tail moved to `runIhTail` (this call is byte-identical to the pre-move inline block).
+    const tail = runIhTail(res.line, {
+      titles, blankBrand,
+      designSeasons: input.designSeasons, capacityFamily: input.capacityFamily, brandName: input.brandName,
+      truthCtx,
+    })
+    return { ...tail, composed: res, truthCtx, titles }
   }
   // HOLD (PO 2026-08-21): no LLM draft, no spec-mash — a named reason the PO can act on. An
   // unrated pool holds BEFORE selection (the composer never volume-orders without a judgment).
@@ -2395,7 +2451,7 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
       : res.stage === 'under-floor-after-pad' ? (blankBrand?.spec ? 'under-floor' : 'no-spec')
         : 'thin-candidates'
   console.warn(JSON.stringify({ tag: 'IH_HOLD', reason: hold, stage: res.stage }))
-  return { value: '', hold }
+  return { value: '', hold, composed: res, truthCtx, titles }
 }
 
 // ─── Item Highlights for MULTI-DESIGN families: ONE LINE PER DESIGN (PO 2026-09-06) ────────────
@@ -2429,6 +2485,17 @@ export interface PerDesignItemHighlightsInput {
   /** PER-DESIGN seller-declared lean override (PipelineInput.audienceLeanByDesign, migration 070),
    *  {designKey: lean}. Absent/empty key ⇒ pure family fallback, same precedence as the title path. */
   audienceLeanByDesign?: Record<string, string> | null
+  /** IH TERMINAL NET PHASE A: the family's REAL resolved occasions (`deriveDesignSeasons`) —
+   *  threaded to each design's own `buildItemHighlights` call below. See `ItemHighlightsInput.
+   *  designSeasons` for the BLOCKING-3 contract (undefined ⇒ skip the off-season rule, never a
+   *  blanket `[]`). */
+  designSeasons?: readonly string[]
+  /** FIX ROUND 2 (RULING I-2/F2): threaded to each design's own `buildItemHighlights` call below.
+   *  See `ItemHighlightsInput.capacityFamily`. */
+  capacityFamily?: boolean
+  /** FIX ROUND 2 (RULING I-2/F3): threaded to each design's own `buildItemHighlights` call below.
+   *  See `ItemHighlightsInput.brandName`. */
+  brandName?: string
 }
 
 export interface PerDesignItemHighlight {
@@ -2443,6 +2510,12 @@ export interface PerDesignItemHighlight {
   /** hold === 'designs-unrated' only: the design keys whose rating the pool lacks family-wide
    *  (informational — this design may be the only one held; siblings compose independently). */
   missingDesigns?: string[]
+  /** WRITER SPEC PART 2, B1/B4 (2026-09-10) — additive: this design's own composer admitted set +
+   *  truthCtx, straight through from its own `buildItemHighlights` call. `undefined` on the
+   *  `designs-unrated` branch (that branch never calls `buildItemHighlights`). See
+   *  `buildItemHighlights`'s own doc for why this changes no existing byte. */
+  composed?: ComposerResult
+  truthCtx?: PhraseTruthCtx
 }
 
 export interface SharedItemHighlight {
@@ -2535,11 +2608,33 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
       // THIS design's own name only (never the family union) — a sibling's name stays foreign to
       // the forced-gender rule's exemption exactly as it already does to the pool partition above.
       designTokens: [g.designName],
+      // IH TERMINAL NET PHASE A: the family-wide resolved occasions, threaded straight through —
+      // undefined on every caller that doesn't set it (byte-identical).
+      designSeasons: input.designSeasons,
+      // FIX ROUND 2 (RULING I-2/F2, I-2/F3): same straight-through threading, same byte-identical
+      // default when the caller doesn't set them.
+      capacityFamily: input.capacityFamily,
+      brandName: input.brandName,
     })
     console.log(JSON.stringify({ tag: 'IH_PER_DESIGN', design: g.key, pool: pool.length, scoped: scoped.length, len: r.value.length, hold: r.hold }))
-    return { designKey: g.key, designName: g.designName, skus: g.skus, value: r.value, hold: r.hold, foreignDropped }
+    return { designKey: g.key, designName: g.designName, skus: g.skus, value: r.value, hold: r.hold, foreignDropped, composed: r.composed, truthCtx: r.truthCtx }
   })
 
+  return { perDesign, ...assemblePerDesignItemHighlights(perDesign, designKeys, missingDesigns) }
+}
+
+/**
+ * WRITER SPEC PART 2 (2026-09-10) — extracted verbatim from `buildItemHighlightsPerDesign`'s own
+ * trailing block (same computations, same order): the per-SKU `perChild` fan-out and the `shared`
+ * marker-row derivation from a finished `perDesign` array. Reused by the async
+ * `produceItemHighlightsPerDesign` wrapper (itemHighlightWriter.ts) to re-derive `perChild`/`shared`
+ * after swapping in accepted writer lines — never a second, hand-copied assembly.
+ */
+export function assemblePerDesignItemHighlights(
+  perDesign: PerDesignItemHighlight[],
+  designKeys: string[],
+  missingDesigns: string[],
+): { perChild: PerChildItemHighlight[]; shared: SharedItemHighlight } {
   const perChild: PerChildItemHighlight[] = []
   for (const d of perDesign) {
     for (const s of d.skus) perChild.push({ sku: s.sku, asin: s.asin, item_highlight: d.value, designName: d.designName, designKey: d.designKey, hold: d.hold })
@@ -2563,10 +2658,229 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
   const foreignDroppedTotal = perDesign.reduce((n, d) => n + d.foreignDropped, 0)
 
   return {
-    perDesign,
     perChild,
     shared: { value: sharedValue, hold: sharedHold, designKeys, missingDesigns, foreignDropped: foreignDroppedTotal },
   }
+}
+
+/** WRITER SPEC PART 2 (2026-09-10, B9) — one row per design, logged (`IH_WRITER_SHADOW`) and
+ *  returned so the regenerate-item-highlight route's JSON response can carry it (spec §2a
+ *  "Rollout"), and so the PO can read real lines from ONE POST before any flag flips ship-affecting.
+ */
+export interface IhWriterLogRow {
+  design: string | null
+  composer: string
+  writer: string | null
+  accepted: boolean
+  reasons: string[]
+  calls: number
+  /** RULING W5: true when NO identity resolved for this design (name absent, no vision phrases) —
+   *  the shadow block says so explicitly, alongside the `IH_WRITER_NO_IDENTITY` log line, rather
+   *  than leaving the PO to infer it from a null `design` field. Absent (not `false`) when identity
+   *  DID resolve — additive, never widens an existing row's shape by default. */
+  noIdentity?: boolean
+}
+
+/**
+ * WRITER SPEC PART 2 (2026-09-10, B4) — THE ONE async entry point for the single-design path.
+ * `off` (default): zero calls, delegates straight to the sync `buildItemHighlights` — byte-identical.
+ * `shadow`: makes the call(s), logs `IH_WRITER_SHADOW`, but SHIPS the composer's own result.
+ * `on`: ships the accepted writer line; falls back to the composer's own vetted result (its line or
+ * its named HOLD) the instant the writer is ineligible, errors, or exhausts its retry budget — flag-
+ * on is therefore never worse than flag-off, and an unvetted line never ships (spec §2a "Fail-
+ * closed").
+ */
+export async function produceItemHighlights(
+  input: ItemHighlightsInput,
+  deps?: WriterDeps,
+): Promise<{ value: string; hold: IhHoldReason | null; writerLog?: IhWriterLogRow }> {
+  const built = buildItemHighlights(input)
+  const mode = ihWriterMode()
+  if (mode === 'off' || !built.composed || !built.truthCtx) return { value: built.value, hold: built.hold }
+  const titles = built.titles ?? []
+  const truthCtx = built.truthCtx
+  // RULING W5: the writer's OWN design-name source — never the composer-facing `designTokens`
+  // (see `ItemHighlightsInput.identityDesignName`'s own doc for why they must stay separate).
+  const designName = input.identityDesignName ?? input.designTokens?.[0] ?? null
+  if (!designName) console.warn(JSON.stringify({ tag: 'IH_WRITER_NO_IDENTITY', site: 'produceItemHighlights' }))
+  // RULING P9 (fix round B5, wire Blocking 2): the single-design path never carried a deadline at
+  // all — give it the SAME regen-level bound the per-design path uses.
+  const deadlineAt = Date.now() + ihWriterDeadlineMs()
+  // RULING P10 (fix round B5, wire Important W4/W5): wrap the call the SAME way the per-design path
+  // does — a writer-side throw (from `runIhTail` via `runTail`, never from `askWriter`'s own client
+  // call, which swallows its own errors) must fall back to the composer's own value/hold, never
+  // escape to the route as a 500 in `shadow` mode where flag-off would have returned 200.
+  let outcome: Awaited<ReturnType<typeof runWriterForDesign>>
+  try {
+    outcome = await runWriterForDesign({
+      composed: built.composed,
+      fallbackHold: built.hold,
+      designName,
+      identityPhrases: input.identityPhrases,
+      truthCtx,
+      runTail: (line) => runIhTail(line, {
+        titles, blankBrand: input.blankBrand, designSeasons: input.designSeasons,
+        capacityFamily: input.capacityFamily, brandName: input.brandName, truthCtx,
+        site: 'produceItemHighlights',
+      }),
+      deps,
+      deadlineAt,
+    })
+  } catch (e) {
+    const callsMade = e instanceof WriterPartialCallsError ? e.callsMade : 0
+    const reasons = e instanceof WriterPartialCallsError ? [...e.reasonsSoFar, e.message] : [e instanceof Error ? e.message : String(e)]
+    console.warn(JSON.stringify({ tag: 'IH_WRITER_ERROR', error: e instanceof Error ? e.message : String(e) }))
+    const writerLog: IhWriterLogRow = {
+      design: designName, composer: built.value, writer: null, accepted: false,
+      reasons, calls: callsMade, ...(designName ? {} : { noIdentity: true }),
+    }
+    return { value: built.value, hold: built.hold, writerLog }
+  }
+  const writerLog: IhWriterLogRow = {
+    design: designName, composer: built.value,
+    writer: outcome.accepted ? outcome.value : null, accepted: outcome.accepted,
+    reasons: outcome.reasons, calls: outcome.calls,
+    ...(designName ? {} : { noIdentity: true }),
+  }
+  console.log(JSON.stringify({ tag: 'IH_WRITER_SHADOW', ...writerLog }))
+  if (mode === 'shadow' || !outcome.accepted) return { value: built.value, hold: built.hold, writerLog }
+  return { value: outcome.value, hold: null, writerLog }
+}
+
+/**
+ * WRITER SPEC PART 2 (2026-09-10, B4) — THE ONE async entry point for the multi-design (per-design)
+ * path. Same off/shadow/on contract as `produceItemHighlights`, applied per design; `perChild`/
+ * `shared` are re-derived via `assemblePerDesignItemHighlights` (B3's sibling — ONE assembly
+ * function) after any accepted writer lines are swapped in, so this returns the SAME shape
+ * `buildItemHighlightsPerDesign` does, plus `writerLog` per design.
+ */
+/** FIX ROUND B2 (RULING W8): bounded parallelism — at most `limit` of `fn` in flight at once,
+ *  results returned in ORIGINAL `items` order regardless of completion order. Retries stay
+ *  sequential WITHIN one design (`runWriterForDesign`'s own retry loop, untouched); this only bounds
+ *  how many DESIGNS' writer runs overlap. No new dependency — a tiny inline worker pool. */
+async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      results[i] = await fn(items[i], i)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => worker()))
+  return results
+}
+
+export async function produceItemHighlightsPerDesign(
+  input: PerDesignItemHighlightsInput,
+  deps?: WriterDeps,
+): Promise<{ perDesign: PerDesignItemHighlight[]; perChild: PerChildItemHighlight[]; shared: SharedItemHighlight; writerLog?: IhWriterLogRow[] }> {
+  const built = buildItemHighlightsPerDesign(input)
+  const mode = ihWriterMode()
+  if (mode === 'off') return built
+  const groupsByKey = new Map(input.groups.map((g) => [g.key, g]))
+  // RULING G8 (F7): an EXACT per-regen call budget, shared ACROSS every design in this family
+  // (distinct from `IH_WRITER_RETRY_CAP`'s per-design cap). FIX ROUND B3: the PRIOR "check after"
+  // shape (`if (callsUsed >= budget)`, incrementing only once a design's run had already finished)
+  // let up to `concurrency` designs' retry loops start together before any of them observed the
+  // exhausted budget — review B2 measured a soft overshoot of +6 (default budget 18) and +8 (budget
+  // 1). The fix RESERVES the full `IH_WRITER_RETRY_CAP` calls for a design BEFORE it starts, so the
+  // running total can never exceed `budget`: a design that cannot reserve its whole cap gets the
+  // composer result with 0 calls, never a partial start. The reservation check-and-increment below
+  // is synchronous (no `await` between them), and `mapWithConcurrency`'s worker loop calls each
+  // design's async function synchronously up to ITS first `await` before the next worker starts
+  // (`Array.from`'s mapper runs every `worker()` invocation synchronously) — so this plain counter
+  // needs no lock. Pinned: budget 18 with 10 always-invalid designs spends AT MOST 18 calls (exactly
+  // 6 designs × 3 retries, never the pre-fix 24).
+  const budget = ihWriterMaxCallsBudget()
+  let callsReserved = 0
+  const writerLogByIndex: (IhWriterLogRow | null)[] = new Array(built.perDesign.length).fill(null)
+  // RULING K10 (fix round B4, wire Important I2): a REGEN-LEVEL wall-time deadline, checked before
+  // EACH design's reservation — once it passes, every design still pending gets the composer's own
+  // result (a budget-shaped skip, never a partial writer run), bounding the worst case to roughly
+  // `deadline + one call's timeout` rather than every design's own 3x20s retry loop stacking up.
+  const deadlineAt = Date.now() + ihWriterDeadlineMs()
+
+  const nextPerDesign = await mapWithConcurrency(built.perDesign, 3, async (d, i): Promise<PerDesignItemHighlight> => {
+    if (!d.composed || !d.truthCtx) return d
+    if (Date.now() >= deadlineAt) {
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_DEADLINE_EXCEEDED', design: d.designKey }))
+      const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: ['skip: regen-level writer deadline exceeded'], calls: 0 }
+      writerLogByIndex[i] = row
+      return d
+    }
+    if (callsReserved + IH_WRITER_RETRY_CAP > budget) {
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_BUDGET_EXHAUSTED', design: d.designKey, budget }))
+      const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [`skip: per-regen call budget (${budget}) exhausted`], calls: 0 }
+      writerLogByIndex[i] = row
+      return d
+    }
+    callsReserved += IH_WRITER_RETRY_CAP
+    const g = groupsByKey.get(d.designKey)
+    const titles = g?.titles ?? []
+    const truthCtx = d.truthCtx
+    // RULING K10 (fix round B4, wire Minor m2): wrap the writer call — a non-client throw (a bad
+    // `designName`, a malformed `identityPhrases`, any future writer-side bug) must fall back to
+    // the composer's OWN result exactly like every other failure mode, never escape `produce*` and
+    // change the route's response. Logged so the class is visible without silencing it.
+    let outcome: Awaited<ReturnType<typeof runWriterForDesign>>
+    try {
+      outcome = await runWriterForDesign({
+        composed: d.composed,
+        fallbackHold: d.hold,
+        designName: d.designName,
+        identityPhrases: g?.identityPhrases,
+        truthCtx,
+        runTail: (line) => runIhTail(line, {
+          titles, blankBrand: input.blankBrand, designSeasons: input.designSeasons,
+          capacityFamily: input.capacityFamily, brandName: input.brandName, truthCtx,
+          site: 'produceItemHighlightsPerDesign',
+        }),
+        deps,
+        // RULING P9 (fix round B5, wire Blocking 2): the SAME `deadlineAt` every design in this
+        // family is judged against — carried INTO the per-design retry loop now, not only checked
+        // here before reservation, so an in-flight design's own 3x20s loop also stops at the bound.
+        deadlineAt,
+      })
+    } catch (e) {
+      // RULING P10 (fix round B5, wire Blocking 3): refund only the UNSPENT part of the
+      // reservation — `WriterPartialCallsError` carries the number of calls ACTUALLY made before
+      // the throw (0 when the throw happened before any call, e.g. a bad `designName` reaching
+      // `buildAdmittedUnits`). The wire lens measured this catch refunding the FULL cap even when
+      // every one of a design's 3 calls had already been billed (30 calls spent against an 18
+      // budget), with `writerLog.calls` reporting 0 — both are fixed by reading `callsMade`.
+      const callsMade = e instanceof WriterPartialCallsError ? e.callsMade : 0
+      const priorReasons = e instanceof WriterPartialCallsError ? e.reasonsSoFar : []
+      console.warn(JSON.stringify({ tag: 'IH_WRITER_ERROR', design: d.designKey, error: e instanceof Error ? e.message : String(e), callsMade }))
+      callsReserved -= (IH_WRITER_RETRY_CAP - callsMade)
+      const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [...priorReasons, `error: ${e instanceof Error ? e.message : String(e)}`], calls: callsMade }
+      writerLogByIndex[i] = row
+      return d
+    }
+    // RULING K10 (fix round B4, value Important I4): refund the UNUSED part of this design's
+    // reservation the instant it finishes — a design accepted on call 1 only ever spent 1 of its
+    // reserved `IH_WRITER_RETRY_CAP`, so the other 2 go back to the shared budget for a later
+    // design. "Never exceed budget" still holds (the reservation was already taken before this
+    // design started; refunding only ever gives MORE room to later designs, never less to already-
+    // reserved ones). Pinned: 8 designs each accepted on call 1 -> 8 written lines for 8 calls.
+    callsReserved -= (IH_WRITER_RETRY_CAP - outcome.calls)
+    const row: IhWriterLogRow = {
+      design: d.designKey, composer: d.value, writer: outcome.accepted ? outcome.value : null,
+      accepted: outcome.accepted, reasons: outcome.reasons, calls: outcome.calls,
+    }
+    console.log(JSON.stringify({ tag: 'IH_WRITER_SHADOW', ...row }))
+    writerLogByIndex[i] = row
+    if (mode === 'shadow' || !outcome.accepted) return d
+    return { ...d, value: outcome.value, hold: null }
+  })
+
+  const writerLog = writerLogByIndex.filter((r): r is IhWriterLogRow => !!r)
+  if (mode === 'shadow') return { ...built, writerLog }
+  const designKeys = input.groups.map((g) => g.key)
+  const missingDesigns = built.shared.missingDesigns
+  const { perChild, shared } = assemblePerDesignItemHighlights(nextPerDesign, designKeys, missingDesigns)
+  return { perDesign: nextPerDesign, perChild, shared, writerLog }
 }
 
 /** The Item Highlights field's editorial description — shown to the PO on every detail row for this
@@ -10112,8 +10426,29 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // and keep THAT on refusal (never the raw pre-scrub value).
     per_child_item_highlights: r.per_child_item_highlights?.map((c) => {
       if (!c.item_highlight) return { ...c, item_highlight: '' }
+      const preScrubLen = c.item_highlight.trim().length
       const scrubbed = scrubPub(c.item_highlight, 'per-child-item-highlight')
-      const capResult = capItemHighlightRepeats(scrubbed)
+      // IH TERMINAL NET PHASE A (BLOCKING 2's class, same mechanism as productDetailAttrs.ts's
+      // `buildDetailPatchValue`): `scrubPub` is a length-REDUCING transform that runs BEFORE
+      // `capItemHighlightRepeats`, so that net's own floor check — conditioned on a drop the net
+      // itself performed — cannot see scrub-driven shortening. Checked HERE, before the net runs.
+      // FIX ROUND 2 (RULING I-1): this used to fire UNCONDITIONALLY on the survivor
+      // (`scrubbed.length < min`, no `preScrubLen` gate), while claiming to mirror the push seam
+      // "exactly" — it did not: a naturally-short, scrub-UNTOUCHED value (`capItemHighlightRepeats`'s
+      // own documented case, pinned by `blankBrandHighlightNet.test.ts` T4.8) shipped at the push
+      // seam and was HELD here. Narrowed to the EXACT same scrub-CROSSING predicate the push seam
+      // uses (`buildDetailPatchValue`, productDetailAttrs.ts) — ONE predicate for one concept.
+      if (preScrubLen >= CONTENT_CONTRACT.itemHighlights.min && scrubbed.length < CONTENT_CONTRACT.itemHighlights.min) {
+        console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'per-child-item-highlight', sku: c.sku, reason: 'under-floor-post-scrub' }))
+        return { ...c, item_highlight: scrubbed, hold: 'under-floor' as IhHoldReason }
+      }
+      // IH TERMINAL NET PHASE A (BLOCKING 3 fix): the SAME real, resolved `designSeasons` this
+      // function's own season policy already derived — never a blanket `[]`.
+      // FIX ROUND 2 (RULING I-2/F2, I-2/F3): `capacityFamily`/`brandName` threaded from the SAME
+      // closure scope (`capacityFamilyTokens` computed once at Stage 2 above; `input.brandName` is
+      // the pipeline's own resolved seller brand) — the real signal, never the leaf's coincidental
+      // default, at every site that CAN resolve it.
+      const capResult = capItemHighlightRepeats(scrubbed, { contentCtx: { designSeasons, capacityFamily: capacityFamilyTokens.length >= 2, brandName: input.brandName } })
       if (!capResult.ok) {
         console.warn(JSON.stringify({ tag: 'IH_NET_REFUSED', site: 'per-child-item-highlight', sku: c.sku, reason: capResult.reason }))
         const hold: IhHoldReason = capResult.reason === 'repeat-over-budget' ? 'under-floor-no-repeat' : 'under-floor'
@@ -11938,7 +12273,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // broadcast detail row becomes a per-design MARKER with NO line — a broadcast Ship can never
       // push one design's line to every SKU (the push seam resolves per SKU from the array).
       onProgress(`Composing per-design Item Highlights across ${designGroupContexts.length} designs...`)
-      const built = buildItemHighlightsPerDesign({
+      // WRITER SPEC PART 2 (B4): through the ONE async entry point — IH_WRITER=off (default)
+      // delegates straight to the sync builder below, byte-identical.
+      const built = await produceItemHighlightsPerDesign({
         groups: designGroupContexts.map((c) => ({
           key: c.key, designName: c.designName, skus: c.skus,
           titles: [...new Set((perChildTitles ?? []).filter((t) => t.designKey === c.key).map((t) => t.title).concat(c.title ? [c.title] : []))],
@@ -11951,7 +12288,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.
         audienceLean: apparelProduct ? input.audienceLean : null,
         audienceLeanByDesign: input.audienceLeanByDesign,
-      })
+        // IH TERMINAL NET PHASE A (BLOCKING 3 fix): the SAME real, resolved `designSeasons` the
+        // title/bullets/backend paths already read from above (`deriveDesignSeasons(input,
+        // designName)`, computed ONCE per regen at the season-policy block) — never a blanket `[]`
+        // guess at THIS seam, which has full pipeline context and can resolve it for real.
+        designSeasons,
+        // FIX ROUND 2 (RULING I-2/F2, I-2/F3): the SAME family-wide capacity-token signal Stage 2
+        // already computed (`capacityFamilyTokens`) + the pipeline's own resolved seller brand —
+        // real signal, never `ihContentRuleViolations`'s coincidental-default fallback.
+        capacityFamily: capacityFamilyTokens.length >= 2,
+        brandName: input.brandName,
+      }, { openai: input.openai })
       perChildItemHighlights = built.perChild
       // SILENT-HOLD CLASS CLOSED (2026-09-04): the marker row ships EVERY TIME the attribute is in
       // the menu — composed>0 or not. Before this, `composed === 0` (every design held, e.g. a family
@@ -11972,7 +12319,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         ...buildPerDesignIhDetailPatch(built, IH_REASON),
       })
     } else {
-      const { value: hl, hold } = buildItemHighlights({
+      // WRITER SPEC PART 2 (B4): through the ONE async entry point — IH_WRITER=off (default)
+      // delegates straight to the sync builder below, byte-identical.
+      const { value: hl, hold } = await produceItemHighlights({
         finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles,
         // TASK 5 FIX ROUND 1 (2026-09-06, Important #2): this branch — the pipeline's OWN
         // single-design Item Highlights producer call — silently omitted the family's own audience
@@ -11987,7 +12336,21 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // same `buildItemHighlights`; this single-design branch has no per-design resolver to do
         // that for it, so it normalizes the family value directly — same function, same rule.
         audienceLean: apparelProduct ? normalizeAudienceLean(input.audienceLean) : null,
-      })
+        // IH TERMINAL NET PHASE A (BLOCKING 3 fix): same real, resolved `designSeasons` the
+        // multi-design branch above now threads — never a blanket `[]` guess.
+        designSeasons,
+        // FIX ROUND 2 (RULING I-2/F2, I-2/F3): same real signal the multi-design branch above now
+        // threads — never `ihContentRuleViolations`'s coincidental-default fallback.
+        capacityFamily: capacityFamilyTokens.length >= 2,
+        brandName: input.brandName,
+        // FIX ROUND B2 (RULING W5): the writer's own identity — never fed to the composer (see
+        // `ItemHighlightsInput.identityDesignName`'s doc). Same resolved name the title path already
+        // uses at this point in the function (`effectiveDesignName || designName`), and the SAME
+        // `identityPhrases()` extraction (designGroupIdentity.ts) the multi-design branch above feeds
+        // its own per-design writer calls — never a second resolver.
+        identityDesignName: effectiveDesignName || designName || null,
+        identityPhrases: identityPhrases(input.visionDesign),
+      }, { openai: input.openai })
       // SILENT-HOLD CLASS CLOSED (2026-09-04): same fix as the multi-design branch above — a held
       // single-design family (hl === '') used to push NO row at all. Always push; carry `hold` so the
       // seller sees the field, the reason, and the Features scorer never docks it.

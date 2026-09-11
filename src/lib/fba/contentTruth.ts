@@ -53,6 +53,7 @@ export type PhraseTruthReason =
   | 'weight-class-lie'              // light/mid/heavyweight that the blank's weightNote does not back
   | 'fit-claim-lie'                 // relaxed/classic/slim/regular/oversized/fitted/boxy that spec.fit does not back
   | 'audience-lean-lie'             // a single gender asserted on a unisex-lean family's TITLE or Item Highlight
+  | 'material-lie'                  // a fibre-composition claim (marked OR unmarked) that spec.material does not back — ITEM HIGHLIGHTS ONLY, see the block comment above FIBER_WORDS
 
 /** The seller's declared audience lean, normalized to what the truth rule needs. */
 export type TruthAudienceLean = 'unisex' | 'women' | 'men' | null
@@ -63,8 +64,11 @@ export interface PhraseTruthCtx {
    *  backs the weight-class rule. fit/sleeve/neck/material/unisex are NOT read by the predicate
    *  below — they are widened here (2026-08-22) purely so a PROMPT built from this ctx (the council
    *  brief's garment-truth line) can state the product's real facts without a second resolver call;
-   *  every caller already assigns the FULL resolved BlankSpec here, so this costs nothing. */
-  spec: Pick<BlankSpec, 'weightNote' | 'fit' | 'sleeve' | 'neck' | 'material' | 'unisex'> | null | undefined
+   *  every caller already assigns the FULL resolved BlankSpec here, so this costs nothing.
+   *  `brand` widened in (fix round 3, R3/B3) so rule (f) below can ask `sanctionedWearFact` whether
+   *  this family's blank is Comfort Colors — every caller still assigns the FULL resolved BlankSpec,
+   *  so this too costs nothing. */
+  spec: Pick<BlankSpec, 'weightNote' | 'fit' | 'sleeve' | 'neck' | 'material' | 'unisex' | 'brand'> | null | undefined
   allowedBrand: string | null | undefined
   audience: 'kids' | 'adult' | null
   /** EVERY garment family present in a MIXED variation family (B0DSCDZC6K ships Gildan 18000
@@ -232,7 +236,10 @@ export function garmentNounConstraint(ctx: PhraseTruthCtx): { allowed: string[];
 // does not mutate the source regex's lastIndex, so these stay safe to share.
 // ADULT_AUDIENCE_RE moved below LEAN_FEM_CORE/LEAN_MASC_CORE (FIX WAVE 2, M-2, 2026-09-06) — its
 // gender half is now DERIVED from that same core rather than hand-copied; see the comment there.
-const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/gi
+// EXPORTED (writer spec Part 2, B2, additive-only — no behavior change): the writer's own glue-word
+// collision guard (itemHighlightWriter.ts) needs the real audience regexes to prove no glue word can
+// ever be added that silently carries a truth claim. Nothing else about this const changes.
+export const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/gi
 
 /** The family's design words, plural-folded so a "Girl Dad" design also owns "girls". */
 const designWordSet = (tokens: readonly string[] | undefined): ReadonlySet<string> => {
@@ -299,7 +306,8 @@ const LEAN_MASC_RE = new RegExp(`\\b(?:${LEAN_MASC_CORE})\\b`, 'i')
  *  after is not newly rejected — pinned in contentTruthSpine.test.ts. GLOBAL (`matchAll`, never
  *  `.test()`) for the same reason the pre-existing regex was: the design-token exemption needs
  *  every individual hit, not merely whether one exists. */
-const ADULT_AUDIENCE_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE}|${LEAN_MASC_CORE}|adults?|plus[\\s-]?size)\\b`, 'gi')
+// EXPORTED (writer spec Part 2, B2) — same reason as KIDS_AUDIENCE_RE above.
+export const ADULT_AUDIENCE_RE = new RegExp(`\\b(?:${LEAN_FEM_CORE}|${LEAN_MASC_CORE}|adults?|plus[\\s-]?size)\\b`, 'gi')
 /** GLOBAL twins of the two regexes above, for Item Highlights only (Task 5) — `foreignAudienceHits`
  *  needs every match (`matchAll`), not merely whether one exists, so it can tell a phrase's OWN
  *  gendered hit (the design's own name — exempt) from a foreign one (a market audience claim —
@@ -649,7 +657,8 @@ const FIT_CLAIM_SUFFIX_WORDS = ['relaxed', 'classic', 'slim', 'regular'] as cons
  *  live are unchanged); without it `FIT_WORD_CANON` below has nothing to normalize, since a claim
  *  spelled "oversize" never reached rule (f) at all. */
 const FIT_CLAIM_BARE_WORDS = ['oversized', 'oversize', 'fitted', 'boxy'] as const
-const FIT_CLAIM_RE = new RegExp(
+// EXPORTED (writer spec Part 2, B2) — same reason as KIDS_AUDIENCE_RE above.
+export const FIT_CLAIM_RE = new RegExp(
   `\\b(${FIT_CLAIM_SUFFIX_WORDS.join('|')})\\b(?:(?!,)(?!\\b(?:${[...FIT_CLAIM_SUFFIX_WORDS, ...FIT_CLAIM_BARE_WORDS].join('|')})\\b).)*?\\bfit\\b|\\b(${FIT_CLAIM_BARE_WORDS.join('|')})\\b`, 'gi',
 )
 /** Spelling variants normalize to the canonical class word BEFORE the spec-containment check, so a
@@ -660,6 +669,129 @@ const FIT_CLAIM_RE = new RegExp(
  *  vocabulary doc above) — kept for byte-parity with titleBand's map so the two never drift apart if
  *  IH's vocabulary ever widens to match. */
 const FIT_WORD_CANON: Readonly<Record<string, string>> = { oversize: 'oversized', crop: 'cropped', taper: 'tapered' }
+
+/**
+ * RULING (fix round 3, R3/B3) — ONE source for WHETHER the composer's PO-sanctioned wear-style fact
+ * is true. The composer (`itemHighlightComposer.ts`) has appended the literal line "Can be worn as
+ * Oversized" since the PO ruling of 2026-08-21 ("A: comfort colors") — Comfort Colors/Relaxed-fit
+ * blanks ONLY, never Gildan 64000/64400 (Classic) or any other blank, gated on live oversized pool
+ * demand. Phase A's terminal `ihLineTruthVerdict` (wired into `buildItemHighlights` at compose time)
+ * then asked rule (f)'s ordinary fit-claim predicate about the JOINED line without ever telling it
+ * this clause was the sanctioned fact, not a pool phrase — "oversized" ≠ spec.fit "Relaxed" by plain
+ * containment, so every Comfort Colors family with oversized demand flipped from ship to HOLD (the
+ * compose differential vs `150778c`: 14 of 126 cases, every one this exact flip). Not a rule (f)
+ * bug — rule (f) doing exactly its job on a clause it was never told is exempt.
+ *
+ * WHETHER the fact is true lives here, ONE owner, reused by both sides: the composer (which decides
+ * WHEN to reach for it — pool demand, budget) and rule (f) (which must recognize it when judging the
+ * composer's own joined-line output). Returns the exact sanctioned string when this family's spec
+ * says Comfort Colors, else `null` — the composer's `isComfortColors`/`OVERSIZED_FACT` predicate,
+ * moved, not duplicated.
+ */
+export function sanctionedWearFact(spec: PhraseTruthCtx['spec']): string | null {
+  return /^comfort\s*colors?$/i.test((spec?.brand ?? '').trim()) ? 'Can be worn as Oversized' : null
+}
+
+/**
+ * FIBRE-COMPOSITION CLAIM VOCABULARY (Phase A, redoing the reverted `feat/ih-phase23-wip` @
+ * `c466225` Phase 3 with BLOCKING 1 closed — finish-final-review.md). Live B0DMXMH266's shopper-
+ * visible Item Highlight begins "Polycotton…" while the blank (Gildan 64000) states
+ * `material: 'Ring-Spun Cotton'` — 100% cotton, no polyester at all; `phraseTruthVerdict` returned
+ * `{ok:true}` on it before this rule existed.
+ *
+ * BLOCKING 1, closed here. The reverted version judged only a MARKED claim (a "%" beside a fibre
+ * word, the literal word "blend", the "polycotton" compound, or two-plus distinct fibres named
+ * together) — and thereby STEERED the composer into the UNMARKED spelling of the identical lie: on
+ * a 52/48 blend blank the pool held both "100% Combed Ringspun Cotton Tees" (rejected) and "Pure
+ * Cotton Graphic Shirts Men" (accepted, higher volume) — same false fact, different spelling, and
+ * the marked-only rule picked the one it could not see. `PURITY_ADJACENT_RE` below closes it: a
+ * purity WORD (pure/all/100%/100 percent/one hundred percent/solid/genuine/real) immediately
+ * beside a fibre word is now ALSO a composition claim, so "Pure Cotton" and "100% Cotton" get the
+ * identical verdict against the identical blank — the symmetry the reviewer's required fix names.
+ *
+ * ADJACENCY, not clause-presence, for the purity words specifically: "all" and "real" are common
+ * English words that say nothing about fibre when they are not touching one ("All Season Cotton
+ * Tee" — "all" describes "season", not "cotton"; "Real Deal Graphic Tee"). The "%" marker does not
+ * need this narrowing (a bare "%" beside ANY fibre word in the same clause is already unambiguous),
+ * but the ordinary-English purity words do — this is the SAME "claim vs. vocabulary" discipline
+ * `phraseTruthVerdict`'s fit-claim rule already documents for `oversized`/`relaxed`.
+ *
+ * WHAT THIS CATCHES: "Pure Cotton", "All Cotton"/"All-Cotton", "Solid Cotton", "Genuine Cotton",
+ * "Real Cotton", "100% Cotton", "100 Percent Cotton", "One Hundred Percent Cotton" — the purity
+ * word directly adjacent (whitespace or hyphen) to the fibre word, either order the "%"/"blend"
+ * markers already covered symmetry-tested against. WHAT IT DOES NOT CATCH, ON PURPOSE: a purity
+ * word separated from the fibre word by another word ("All Season Cotton", "Real Deal Cotton Tee")
+ * — those are ordinary vocabulary, not a claim, exactly like a bare "Soft Cotton Tee" is not a
+ * claim without any marker at all; a purity/fibre pair split across two different comma clauses
+ * (rule (g) below judges ONE clause at a time, deliberately, like weight-class-lie/fit-claim-lie);
+ * or a synonym outside the enumerated list ("totally cotton", "straight cotton").
+ *
+ * ITEM HIGHLIGHTS ONLY — same scoping as the fit-claim-lie rule above: bullets/description have an
+ * existing fabric-truth owner (`enforceFabricTruth`, the weight-class half); unifying the two is
+ * future work, not this task.
+ */
+const FIBER_WORDS = ['cotton', 'polyester', 'poly', 'rayon', 'spandex', 'elastane', 'linen', 'wool', 'viscose', 'modal', 'nylon', 'acrylic', 'lycra'] as const
+// EXPORTED (writer spec Part 2, B2) — same reason as KIDS_AUDIENCE_RE above.
+export const FIBER_RE = new RegExp(`\\b(${FIBER_WORDS.join('|')})\\b`, 'gi')
+/** "polycotton"/"poly-cotton"/"poly cotton" as ONE compound blend claim — `FIBER_RE`'s word
+ *  boundaries alone cannot split the no-space spelling into its two fibres. */
+const POLYCOTTON_RE = /\bpoly[\s-]?cotton\b/i
+/** 'poly' (the common shorthand) folds to 'polyester' — a claim spelled "poly" is not a THIRD,
+ *  distinct fibre from "polyester". */
+const FIBER_CANON: Readonly<Record<string, string>> = { poly: 'polyester' }
+/** BLOCKING 1's fix: a purity word directly beside (whitespace/hyphen, either order) a fibre word —
+ *  see the block comment above for exactly which spellings this catches and which it does not.
+ *  Percent spellings ("100%", "100 percent", "one hundred percent") are NOT here — fix round 3
+ *  (RULING R2/B2) moved them to `PERCENT_MARKER_RE` below, which needs no adjacency at all (see its
+ *  own doc): only the AMBIGUOUS ordinary-English purity words (pure/all/solid/genuine/real) need
+ *  adjacency to avoid "All Season Cotton"/"Real Deal Cotton" false-binding. */
+// EXPORTED (writer spec Part 2, B2) — same reason as KIDS_AUDIENCE_RE above.
+export const PURITY_ADJACENT_RE = new RegExp(
+  `\\b(?:pure|all|solid|genuine|real)[\\s-]+(?:${FIBER_WORDS.join('|')})\\b` +
+  `|\\b(?:${FIBER_WORDS.join('|')})[\\s-]+pure\\b`,
+  'i',
+)
+/**
+ * RULING (fix round 3, R2/B2) — "%" and the word "percent" are ONE concept, not two: the fix round
+ * that closed BLOCKING 1 exempted only the literal "%" character from `PURITY_ADJACENT_RE`'s
+ * adjacency requirement (`isCompositionClaim` below tested `/%/` directly, unconditioned), but left
+ * "100 percent" and "one hundred percent" living inside `PURITY_ADJACENT_RE`, still needing
+ * adjacency to a fibre word. The reviewer proved the exact "same false fact, different spelling"
+ * asymmetry this was supposed to close: "Made With 100%, Combed Cotton Feel" (cross-clause) is
+ * caught, but "Made With One Hundred Percent, Combed Cotton Feel" and "Made From 100 Percent, Soft
+ * Combed Cotton" (cross-clause) and "100 Percent Combed Cotton" (one clause, a word between the
+ * marker and the fibre) all escaped. A "%"/"percent" marker is UNAMBIGUOUS — unlike "pure"/"all"/
+ * "real", English never uses either as an ordinary adjective for something else — so it needs no
+ * adjacency check at all, exactly like the "%" character already had none. Matched anywhere in the
+ * clause/line, same as `isCompositionClaim`'s existing `/%/` test.
+ */
+const PERCENT_MARKER_RE = /%|\bpercent\b/i
+
+/** Every distinct fibre CLASS named in `text` (fold applied), whether or not it reads as a CLAIM —
+ *  used for BOTH the candidate phrase and the blank's own `spec.material` string, so the two sides
+ *  of the comparison are built the identical way. */
+function fiberSetIn(text: string): Set<string> {
+  const s = new Set<string>()
+  if (POLYCOTTON_RE.test(text)) { s.add('cotton'); s.add('polyester') }
+  for (const m of text.matchAll(FIBER_RE)) s.add(FIBER_CANON[m[1].toLowerCase()] ?? m[1].toLowerCase())
+  return s
+}
+
+/** Does this CLAUSE assert a blend (as opposed to a single pure fibre)? The literal word "blend",
+ *  the "polycotton" compound, or two-plus distinct fibres named together all say so; a single bare
+ *  fibre word with a "%"/purity marker ("100% Combed Ringspun Cotton", "Pure Cotton") does NOT — it
+ *  asserts purity, the opposite claim. */
+const clauseAssertsBlend = (clause: string, fibers: ReadonlySet<string>): boolean =>
+  fibers.size >= 2 || POLYCOTTON_RE.test(clause) || /\bblend\b/i.test(clause)
+
+/** Does this CLAUSE carry an explicit composition CLAIM at all (see the block comment above for
+ *  the "not caught, on purpose" cases) — a "%" beside a fibre word, the word "blend", the
+ *  "polycotton" compound, two-plus distinct fibres named together, OR (BLOCKING 1's fix) a purity
+ *  word directly adjacent to a fibre word. A bare single fibre word with none of those is NOT a
+ *  claim — ordinary vocabulary must keep passing. */
+const isCompositionClaim = (clause: string, fibers: ReadonlySet<string>): boolean =>
+  fibers.size >= 2 || POLYCOTTON_RE.test(clause) || /\bblend\b/i.test(clause) ||
+  (fibers.size > 0 && PERCENT_MARKER_RE.test(clause)) || (fibers.size > 0 && PURITY_ADJACENT_RE.test(clause))
 
 /* ─── THE PREDICATE ───────────────────────────────────────────────────────────────────────────── */
 
@@ -757,14 +889,47 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
   // programme, not this task. `highlights` is the ONE field that had NO fit oracle at all before
   // Task 4 — this rule exists for it.
   if (ctx.field === 'highlights') {
-    const fit = ctx.spec?.fit?.toLowerCase()
-    for (const fm of phrase.matchAll(FIT_CLAIM_RE)) {
-      const claim = (fm[1] ?? fm[2] ?? '').toLowerCase()
-      // T4-b: normalize a spelling variant (e.g. "oversize") to the canonical class word before the
-      // containment check — mirrors titleBand.ts's `fitOk`, so a blank spelled "Oversized" still
-      // backs a claim spelled "oversize".
-      const canonClaim = FIT_WORD_CANON[claim] ?? claim
-      if (!fit || !fit.includes(canonClaim)) return { ok: false, reason: 'fit-claim-lie' }
+    // FIX ROUND 3 (R3/B3): the composer's PO-sanctioned wear-style fact (`sanctionedWearFact`) is a
+    // WHOLE-CLAUSE exemption, never a substring one — "Oversized Fit" and "Oversized Tee" still
+    // assert an ordinary (false, on a Relaxed blank) fit claim and must still fail below. Trimmed,
+    // case-insensitive: the composer joins clauses with ", " so this clause arrives with no leading/
+    // trailing whitespace in practice, but a defensive trim costs nothing.
+    const wearFact = sanctionedWearFact(ctx.spec)
+    const isSanctionedWearFact = !!wearFact && phrase.trim().toLowerCase() === wearFact.toLowerCase()
+    if (!isSanctionedWearFact) {
+      const fit = ctx.spec?.fit?.toLowerCase()
+      for (const fm of phrase.matchAll(FIT_CLAIM_RE)) {
+        const claim = (fm[1] ?? fm[2] ?? '').toLowerCase()
+        // T4-b: normalize a spelling variant (e.g. "oversize") to the canonical class word before the
+        // containment check — mirrors titleBand.ts's `fitOk`, so a blank spelled "Oversized" still
+        // backs a claim spelled "oversize".
+        const canonClaim = FIT_WORD_CANON[claim] ?? claim
+        if (!fit || !fit.includes(canonClaim)) return { ok: false, reason: 'fit-claim-lie' }
+      }
+    }
+  }
+  // (g) material/fibre-composition truth (see the block comment above `FIBER_WORDS` for the live
+  // defect, the BLOCKING 1 fix, and the scoping). ITEM HIGHLIGHTS ONLY, same gate as rule (f) —
+  // placed AFTER fit-claim-lie so an existing multi-clause fixture that already fails on a fit
+  // claim keeps that diagnosis. Bounded to ONE comma-delimited clause at a time — DEFENSIVE: in
+  // production every caller hands this a single un-comma'd candidate (the composer) or a single
+  // segment (`ihLineTruthVerdict`'s sweep below), but a fibre word in one clause must never bind to
+  // a "%"/"blend"/purity marker sitting in an unrelated clause.
+  if (ctx.field === 'highlights') {
+    for (const clause of phrase.split(',')) {
+      const fibers = fiberSetIn(clause)
+      if (!isCompositionClaim(clause, fibers)) continue
+      const trueMaterial = ctx.spec?.material
+      // FAIL CLOSED (same doctrine as weight-class-lie/fit-claim-lie above): an unconfirmed blank
+      // backs no composition claim — a claim with nothing behind it is exactly how the live lie
+      // shipped (B0DMXMH266's blank IS known; this guards the general case).
+      if (!trueMaterial) return { ok: false, reason: 'material-lie' }
+      const trueFibers = fiberSetIn(trueMaterial)
+      if (trueFibers.size === 0) return { ok: false, reason: 'material-lie' }
+      const subset = [...fibers].every((f) => trueFibers.has(f))
+      if (!subset || clauseAssertsBlend(clause, fibers) !== clauseAssertsBlend(trueMaterial, trueFibers)) {
+        return { ok: false, reason: 'material-lie' }
+      }
     }
   }
   return { ok: true }
@@ -1314,4 +1479,89 @@ export function applyTitleTruthNet(
   // 3. ONE garment class for the whole title (defect 3) — primed with the class segment 0 already
   //    committed to, so this never re-litigates what `scrubMoneyPhrase` just decided.
   return collapseRedundantGarmentMention(enforceSingleGarmentClass(swept, ctx, protectHay, seg0.primaryClass), protectHay)
+}
+
+/**
+ * RULING (fix round 2, I-3/R1) — cross-clause composition binding, the recombination escape the
+ * reviewer proved: on a 52/48 blend blank, `Cozy Crewneck Sweatshirt, Made With 100%, Combed
+ * Cotton Feel, Classic Fit` returned `{ok:true}` because rule (g) above judges ONE comma clause at
+ * a time, by design (same doctrine as weight-class-lie/fit-claim-lie), and NEITHER clause alone is
+ * a claim: "Made With 100%" has no fibre word beside it, "Combed Cotton Feel" has no marker beside
+ * it. Split across a comma, the identical lie a single clause would already catch survives.
+ *
+ * THE FIX judges the WHOLE LINE, reusing the EXACT same `isCompositionClaim`/`fiberSetIn`/
+ * `clauseAssertsBlend` helpers rule (g) already gates on — never a second detector. Rule (g)'s own
+ * "%"/"blend"/two-distinct-fibres branches already have NO adjacency requirement even within one
+ * clause (only the ordinary-English purity WORDS — pure/all/solid/genuine/real — need
+ * `PURITY_ADJACENT_RE`'s adjacency, to keep "All Season Cotton"/"Real Deal Cotton" passing); running
+ * the identical, unchanged predicate over the FULL LINE simply widens that no-adjacency-needed
+ * marker set from clause-scope to line-scope, closing the split without touching what the ambiguous
+ * purity words are allowed to mean (a literal comma is not in `PURITY_ADJACENT_RE`'s `[\s-]`, so
+ * "Pure Joy, Cotton Feel" still cannot bind — only the unambiguous "%"/"blend"/multi-fibre signals
+ * cross a clause boundary). Redundant with rule (g) on a SAME-clause claim (harmless: identical
+ * `material-lie` reason either way) — this function exists ONLY for the cross-clause case rule (g)
+ * cannot see. ITEM HIGHLIGHTS ONLY, same field gate as rule (g).
+ *
+ * KNOWN, DELIBERATE OVER-CATCH (fix round 3, R5/M1 — reviewer's O1): a TRUE line like `Cozy
+ * Crewneck Sweatshirt, Soft Cotton Feel, 100% Machine Washable, Classic Fit` on a 52/48 blend is
+ * refused here, even though the "100%" plainly modifies "Machine Washable", not the fibre. LINE
+ * SCOPE cannot know what a "%"/"percent" marker modifies — that is exactly the ambiguity this
+ * function trades away to close the cross-clause recombination escape (a purity/percentage marker
+ * ANYWHERE in the line now binds to a fibre word ANYWHERE in the line, ruling I-3's own naming for
+ * the class). FAILS CLOSED, same doctrine as every other rule in this file: an over-caught TRUE
+ * line HOLDs (loses a real fact) while an escaped LIE would ship a false one — the asymmetry this
+ * codebase always resolves the same way. `O2`/`O3` (the identical line on a pure-cotton blank, and
+ * a genuinely true blend claim) still pass, so this is scoped to the one shape line-scope truly
+ * cannot disambiguate, not a broad regression.
+ */
+function lineCompositionVerdict(line: string, ctx: PhraseTruthCtx): PhraseTruthVerdict {
+  if (ctx.field !== 'highlights') return { ok: true }
+  const fibers = fiberSetIn(line)
+  if (!isCompositionClaim(line, fibers)) return { ok: true }
+  const trueMaterial = ctx.spec?.material
+  if (!trueMaterial) return { ok: false, reason: 'material-lie' }
+  const trueFibers = fiberSetIn(trueMaterial)
+  if (trueFibers.size === 0) return { ok: false, reason: 'material-lie' }
+  const subset = [...fibers].every((f) => trueFibers.has(f))
+  if (!subset || clauseAssertsBlend(line, fibers) !== clauseAssertsBlend(trueMaterial, trueFibers)) {
+    return { ok: false, reason: 'material-lie' }
+  }
+  return { ok: true }
+}
+
+/* ─── THE ITEM HIGHLIGHT LINE-LEVEL TRUTH NET ─────────────────────────────────────────────────── */
+
+/**
+ * PHASE A of the 2026-09-10 writer spec (docs/superpowers/specs/2026-09-10-item-highlight-
+ * writer.md §2 step 3 — "judge the OUTPUT ... this is the title-coherence-architecture provenance-
+ * allowlist idiom, applied to a line instead of a fill fragment"; the reverted `feat/ih-phase23-wip`
+ * @ `c466225` Phase 3). GENERALISES `applyTitleTruthNet`'s own core idea — segment on the line's
+ * separator and judge each segment with `phraseTruthVerdict`, the ONE predicate, never a second
+ * rule list — to the Item Highlight's shape and doctrine, which differ from the title's on purpose:
+ *
+ *   - IH has no privileged "money phrase" (`applyTitleTruthNet`'s segment 0 is never dropped
+ *     because it carries the brand+design); every comma-delimited clause in an Item Highlight is an
+ *     independent feature/benefit phrase — SEGMENTS, not only tokens, is what the adversary section
+ *     names as the residual risk once each candidate is individually true (two admitted facts
+ *     joined into a false implication) — none is structurally protected.
+ *   - IH's own terminal-net doctrine (Phase 1, H10-H12; finish-line R2) is REFUSE, never silently
+ *     edit — "a truncated line is a line whose meaning nobody chose" applies exactly as much to a
+ *     line a truth check would otherwise have to drop a clause from. So this function does not
+ *     drop-and-rejoin like `applyTitleTruthNet`; it reports the FIRST failing verdict (or `ok`) and
+ *     leaves the refuse-vs-ship decision to the caller (`capItemHighlightRepeats`'s `truthCheck`
+ *     opt, productDetailAttrs.ts), matching every other IH terminal-net rule.
+ *
+ * Pure. Idempotent (a passing line is unaffected by being judged again). `ctx.field` should be
+ * `'highlights'` — every rule this reaches is field-agnostic except fit-claim-lie/material-lie
+ * (highlights-gated) and audience-lean-lie (title+highlights-gated), so a caller that passes a
+ * different field gets a strict SUBSET of the highlights rules, never a wrong one.
+ */
+export function ihLineTruthVerdict(line: string, ctx: PhraseTruthCtx): PhraseTruthVerdict {
+  const composition = lineCompositionVerdict(line, ctx)
+  if (!composition.ok) return composition
+  for (const clause of line.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const verdict = phraseTruthVerdict(clause, ctx)
+    if (!verdict.ok) return verdict
+  }
+  return { ok: true }
 }
