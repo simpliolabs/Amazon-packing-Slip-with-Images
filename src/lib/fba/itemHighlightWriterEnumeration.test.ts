@@ -25,6 +25,7 @@
  */
 import { describe, it, expect, beforeAll, vi } from 'vitest'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import ts from 'typescript'
 
@@ -867,12 +868,18 @@ function listTsFilesFlat(dir: string): string[] {
 // build's own resolution honours it. `ts.readConfigFile` + `ts.parseJsonConfigFileContent` read the
 // COMMITTED tsconfig.json exactly the way `tsc`/Next's own toolchain does — `include`, `paths`,
 // `baseUrl`, `customConditions` and `moduleSuffixes` all come from the real file, never a
-// hand-copied subset. Read via `ts.sys` (the real filesystem) rather than the overlay host: the
-// committed tsconfig.json is never mutated by any shape in this file (a NEW alias is expressed via
-// `scratchCopy`'s `pathsOverlay`, merged onto these real options in JS — see `scratchCopy` below —
-// never by writing a synthetic tsconfig.json to intercept), so there is nothing for an overlay to
-// serve here, and reading directly avoids re-running `parseJsonConfigFileContent`'s own `include`
-// glob expansion (non-trivial cost) on every one of this file's many calls. Cached once, like
+// hand-copied subset. Read via `ts.sys` (the real filesystem) for the common case — a shape that
+// names no NEW tsconfig content at all — where reading directly avoids re-running
+// `parseJsonConfigFileContent`'s own `include` glob expansion (non-trivial cost) on every one of
+// this file's many calls.
+// RULING D6 (fix round C2, phase-c1-review-wire.md m2): this sentence used to end "so there is
+// nothing for an overlay to serve here" — false as of RULING C5 (fix round C1, wire Important I3,
+// thirty lines below), which added `getRealCompilerOptionsCached`'s `overlay` parameter and the
+// "n1"/"n1-disk" pins that overlay `tsconfig.json` ITSELF (real disk content, JSON-parsed, one key
+// added, re-parsed exactly as `tsc` would parse a genuinely edited file) — the OLDER `pathsOverlay`
+// mechanism this sentence still names (a plain-JS merge onto the ALREADY-cached options, used by
+// n2/n18) is a SEPARATE, narrower path that never re-reads `tsconfig.json` at all; the two are not
+// interchangeable and neither replaces the other. Cached once, like
 // `cachedRealRootNames` beside it.
 let cachedRealCompilerOptions: ts.CompilerOptions | null = null
 // RULING C3 (fix round C1, wire Important I1; phase-b9-review-wire.md §I1): `parsed.fileNames` — the
@@ -1091,9 +1098,19 @@ function isResolveAliasAccess(node: ts.Expression): boolean {
  *  entry, or a `webpack()` callback's `config.resolve.alias.NAME = '<string>'` assignment, whose
  *  string-literal TARGET resolves to a restricted home module. The real, committed `webpack: (config)
  *  => { config.resolve.alias.canvas = false; ... }` line assigns `false`, not a string literal, so
- *  it is correctly never flagged. next.config.ts is genuinely OUTSIDE this file's program (it is
- *  build CONFIGURATION, never bundled into the app itself — spec §2i's own reason this is a
- *  dedicated check rather than a program root), so it is read directly, never added to `rootNames`. */
+ *  it is correctly never flagged. This check exists as a dedicated, CONFIGURATION-only scan (never
+ *  a program-level reference walk) because a webpack/turbopack alias target is a string literal a
+ *  compiler-API reference walk has no way to resolve on its own — that is spec §2i's reason this is
+ *  a dedicated check, not (as an earlier version of this comment claimed) because next.config.ts
+ *  sits outside the program.
+ *  RULING D6 (fix round C2, phase-c1-review-wire.md m2): "next.config.ts is genuinely OUTSIDE this
+ *  file's program … never added to `rootNames`" is false as of RULING C3 (fix round C1, wire
+ *  Important I1, above) — `getRealRootNamesCached()`'s root list is `parsed.fileNames`, the real
+ *  tsconfig's own include set, which the committed tsconfig.json's `next-env.d.ts`/`.next/types`
+ *  glob entries pull `next.config.ts` (and 8 other files outside `src/`) into as ordinary roots.
+ *  This function still reads it directly through the shared host rather than relying on that root
+ *  status — the STRING-LITERAL target a webpack/turbopack alias assigns is not something a
+ *  reference walk over `next.config.ts`-as-a-root would resolve any differently. */
 function findNextConfigAliasViolations(host: ts.CompilerHost, homeAbsSet: ReadonlySet<string>): string[] {
   const violations: string[] = []
   const nextConfigAbs = toPosix(path.join(process.cwd(), 'next.config.ts'))
@@ -1130,28 +1147,48 @@ function findNextConfigAliasViolations(host: ts.CompilerHost, homeAbsSet: Readon
 }
 
 let cachedRealRootNames: string[] | null = null
-/** RULING C3 (fix round C1, wire Important I1): the root list is now `tsc`'s OWN include set —
- *  `parsed.fileNames` from the SAME parse `getRealCompilerOptionsCached` reads its options from
+/** RULING C3 (fix round C1, wire Important I1): the root list started from `tsc`'s OWN include set
+ *  — `parsed.fileNames` from the SAME parse `getRealCompilerOptionsCached` reads its options from
  *  (`parseRealTsconfigOnce`) — filtered to drop `node_modules` (should never appear, kept as a
  *  belt-and-braces guard), test files (`COMPILED_TEST_RE`, unchanged from the old walk's own
  *  exclusion), and `.d.ts` files (handled separately by `checkDtsValueReExports`'s own program-wide
- *  `.d.ts` loop below — a `.d.ts` in `rootNames` would add nothing that loop does not already see,
- *  and TypeScript root-listing a declaration file is redundant, never wrong, but excluded here to
- *  match the OLD walk's own semantics exactly). This is a STRICT superset of the old
- *  `listTsFilesFlat(SRC_ROOT)` walk: every file the old walk found is also in `tsc`'s include set
- *  (verified: `tsc12.cjs`, review B9/wire, 409 files, 397 inside `src/`), PLUS the 12 include-set
- *  files outside `src/` the old walk could never reach at all (`next-env.d.ts`, `next.config.ts`,
- *  `vitest.config.ts`, 9 `scripts/*.ts`) — `a1`'s shape (below) is exactly one of those 9. The real
- *  tree's root file list, computed once and returned as a fresh array each call so a caller may
- *  safely append extra (synthetic) paths without mutating the shared cache. */
+ *  `.d.ts` loop below). This picks up the 12 include-set files outside `src/` the old walk could
+ *  never reach at all (`next-env.d.ts`, `next.config.ts`, `vitest.config.ts`, 9 `scripts/*.ts`) —
+ *  `a1`'s shape (below) is exactly one of those 9.
+ *
+ *  RULING D3 (fix round C2, phase-c1-review-pins.md m1): `parsed.fileNames` is NOT a strict
+ *  superset of the old `listTsFilesFlat(SRC_ROOT)` walk, and the comment above used to claim
+ *  otherwise ("matches the OLD walk's own semantics exactly") — measured false. The committed
+ *  tsconfig's own `include` array (see the repo's own tsconfig.json) is `next-env.d.ts`, a
+ *  recursive `.ts` glob, a recursive `.tsx` glob, the two `.next/types` globs, and a recursive
+ *  `.mts` glob — no recursive `.js`, `.jsx`, `.cjs`, `.mjs` or `.cts` glob entry at all.
+ *  `allowJs: true` lets the COMPILER accept those extensions once a `.ts` root imports them; it does
+ *  not make a file matching only one of those extensions a ROOT by itself. A `.js` App-Router route
+ *  under `src/` — the exact N10 shape P8 (fix round B5, wire Blocking 1) added coverage for — is
+ *  therefore silently NOT in `parsed.fileNames`, and stopped being scanned as its own root the
+ *  moment this function switched away from the directory walk. `listTsFilesFlat`'s own
+ *  `COMPILED_EXT_RE` covers all of `ts|tsx|js|jsx|mjs|cjs|mts|cts` — including `.d.ts` (its test is
+ *  "does the name end in one of these extensions", and `.d.ts` ends in `.ts`) — so the UNION below
+ *  restores both: the `.js`/`.jsx`/`.cjs`/`.mjs`/`.cts` extensions under `src/`, and an orphaned
+ *  `.d.ts` (nothing imports it) as a root reachable to the compiler-level `.d.ts` loop, exactly as
+ *  before this function existed. The real tree's root file list, computed once and returned as a
+ *  fresh array each call so a caller may safely append extra (synthetic) paths without mutating the
+ *  shared cache. */
 function getRealRootNamesCached(): string[] {
   if (!cachedRealRootNames) {
     parseRealTsconfigOnce()
-    cachedRealRootNames = cachedRealFileNames!
+    const fromIncludeSet = cachedRealFileNames!
       .map((f) => toPosix(f))
       .filter((f) => !f.includes('/node_modules/'))
       .filter((f) => !COMPILED_TEST_RE.test(path.posix.basename(f)))
       .filter((f) => !/\.d\.ts$/.test(f))
+    // `path.join(process.cwd(), 'src')`, not the module-level `SRC_ROOT` constant: `parseRealTsconfigOnce`
+    // already reads `process.cwd()` at call time, so the old walk must too, or a real-disk shape test
+    // that chdir's into a scratch root (this round's own "d3-jsroute" pin, below) would silently keep
+    // walking the ORIGINAL tree no matter what the scratch root contains. No behavior change for a
+    // normal run — cwd is always the repo root there, so this is `SRC_ROOT` by another name.
+    const fromOldWalk = listTsFilesFlat(path.join(process.cwd(), 'src')).map((f) => toPosix(f))
+    cachedRealRootNames = [...new Set([...fromIncludeSet, ...fromOldWalk])]
   }
   return [...cachedRealRootNames]
 }
@@ -2280,6 +2317,49 @@ describe('RULING U1 (fix round B9b, wire Blocking B1 scoped by spec §2i): CONFI
     } finally { cleanup() }
   })
 
+  // RULING D3 (fix round C2, phase-c1-review-pins.md m1 / phase-c2-rulings.md D3): the committed
+  // "js-route" pin above (line ~2092, `describe('RULING K8...')`) rides `scratchCopy`'s own
+  // synthetic-extra auto-push into `rootNames` — it never asks whether the REAL root list itself
+  // would have found the file, which is exactly the question C3's switch to `parsed.fileNames` (a
+  // set with no recursive `.js`/`.jsx`/`.cjs`/`.mjs`/`.cts` glob at all) got wrong. Unlike "a1"
+  // above (a real file the repo ALREADY has under `scripts/`), the repo has no real `.js` file
+  // under `src/` today — so this pin has to put one on a REAL filesystem itself: `fs.mkdtempSync`
+  // builds a scratch ROOT (never inside the repo; cleaned up in `finally`) holding a COPY of `src/`
+  // plus the four config files the guard reads from `process.cwd()`, `process.chdir()`s into it,
+  // invalidates every real-tree cache, writes ONE physical `.js` route there, then asks
+  // `getRealRootNamesCached()` — never `scratchCopy`'s auto-push — whether it is already a root.
+  // Every cache and `process.cwd()` is restored in `finally`, so no other test in this file (all of
+  // which read real-tree state through the SAME module-level caches) observes the scratch root.
+  it('sensitivity ("d3-jsroute", a real .js App-Router route under src/, reached ONLY via the real root list on a REAL scratch filesystem, never scratchCopy\'s synthetic-extra auto-push) — REFUSED', () => {
+    const realCwd = process.cwd()
+    const savedOptions = cachedRealCompilerOptions
+    const savedFileNames = cachedRealFileNames
+    const savedRootNames = cachedRealRootNames
+    const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ih-d3-jsroute-'))
+    try {
+      fs.cpSync(SRC_ROOT, path.join(scratchRoot, 'src'), { recursive: true })
+      for (const f of ['tsconfig.json', 'next.config.ts', 'package.json', 'next-env.d.ts']) {
+        fs.copyFileSync(path.join(realCwd, f), path.join(scratchRoot, f))
+      }
+      const routeDir = path.join(scratchRoot, 'src/app/api/fba/probe-d3-jsroute')
+      fs.mkdirSync(routeDir, { recursive: true })
+      fs.writeFileSync(path.join(routeDir, 'route.js'), `import { buildItemHighlights } from '@/lib/fba/listingPipeline'\nexport async function POST() { return buildItemHighlights({}) }\n`)
+      cachedRealCompilerOptions = null
+      cachedRealFileNames = null
+      cachedRealRootNames = null
+      process.chdir(scratchRoot)
+      const roots = getRealRootNamesCached()
+      const abs = toPosix(path.join(scratchRoot, 'src/app/api/fba/probe-d3-jsroute/route.js'))
+      expect(roots.includes(abs), `the real .js route must already be a root: ${JSON.stringify(roots.filter((r) => r.includes('probe-d3-jsroute')))}`).toBe(true)
+    } finally {
+      process.chdir(realCwd)
+      cachedRealCompilerOptions = savedOptions
+      cachedRealFileNames = savedFileNames
+      cachedRealRootNames = savedRootNames
+      fs.rmSync(scratchRoot, { recursive: true, force: true })
+    }
+  })
+
   // ─── REFUSED: the CONFIGURATION-level checks (tsconfig paths / package.json fields / next.config
   // aliases) and the new .d.ts value-re-export rule. Each shape is the reviewer's own r11-wire
   // fixture, reproduced verbatim (paths/package.json/next.config content included). ─────────────
@@ -2313,6 +2393,51 @@ describe('RULING U1 (fix round B9b, wire Blocking B1 scoped by spec §2i): CONFI
       const { violations } = findEnumerationViolations(inputs)
       expect(violations.length, `"n2" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
     } finally { cleanup() }
+  })
+
+  // RULING D2 (fix round C2, phase-c1-review-pins.md wire I1 / phase-c2-rulings.md D2):
+  // `getRealCompilerOptionsCached` has TWO branches. n1/n2 above pin the OVERLAY branch — a fresh
+  // `ts.parseJsonConfigFileContent` call on overlaid text, which never touches
+  // `cachedRealCompilerOptions`. Every OTHER shape in this file (every `scratchCopy` call that omits
+  // `tsconfigOverlay`/`pathsOverlay` — the large majority) reads options through the OTHER branch:
+  // `parseRealTsconfigOnce`'s cache, populated by exactly ONE assignment,
+  // `cachedRealCompilerOptions = parsed.options`. Nothing pinned THAT assignment itself — C1's own
+  // wire review proved it with `C5_handLiteralDiskReadOnly` (the disk assignment replaced by a
+  // hand-copied literal, the overlay branch left untouched): all 87 committed tests stayed green,
+  // because ~n1/n2's own alias only ever reaches the overlay branch's independent parse.
+  // This pin drives a NEW "~ihD2" alias through the DISK branch's OWN read — `ts.sys.readFile` is
+  // monkey-patched for exactly the `tsconfig.json` path (restored in `finally`, never written to
+  // disk), and the two disk-cache slots are invalidated first so `parseRealTsconfigOnce` is forced
+  // to re-run — never a hand-copied literal, never the overlay parameter. If a future regression
+  // reverts that one assignment to a literal, `inputs.options.paths['~ihD2']` above is empty, the
+  // import resolves nowhere near the home file, and this pin's violation count drops to zero.
+  it('sensitivity ("n1-disk", RULING D2): a NEW tsconfig paths alias reaches the DISK-READ cache assignment `parseRealTsconfigOnce` performs, not only the overlay parameter — REFUSED', () => {
+    const configPath = path.join(process.cwd(), 'tsconfig.json')
+    const realText = ts.sys.readFile(configPath)
+    if (realText === undefined) throw new Error(`RULING D2: could not read the real tsconfig.json at ${configPath}`)
+    const withAlias = JSON.parse(realText) as { compilerOptions: { paths?: Record<string, string[]> } }
+    withAlias.compilerOptions.paths = { ...withAlias.compilerOptions.paths, '~ihD2': ['./src/lib/fba/listingPipeline.ts'] }
+    const patchedText = JSON.stringify(withAlias)
+    const savedOptions = cachedRealCompilerOptions
+    const savedFileNames = cachedRealFileNames
+    const originalReadFile = ts.sys.readFile
+    cachedRealCompilerOptions = null
+    cachedRealFileNames = null
+    ts.sys.readFile = ((p: string, encoding?: string) => (toPosix(p) === toPosix(configPath) ? patchedText : originalReadFile(p, encoding))) as typeof ts.sys.readFile
+    try {
+      const { inputs, cleanup } = scratchCopy({
+        extra: { relPath: 'app/api/fba/probe-d2-n1disk/route.ts', content: `import { /* x */ buildItemHighlights as b } from '~ihD2'\nexport async function POST() { return Response.json(b({} as never)) }` },
+      })
+      try {
+        expect(inputs.options.paths?.['~ihD2'], JSON.stringify(inputs.options.paths)).toBeTruthy()
+        const { violations } = findEnumerationViolations(inputs)
+        expect(violations.length, `"n1-disk" must be flagged: ${JSON.stringify(violations)}`).toBeGreaterThan(0)
+      } finally { cleanup() }
+    } finally {
+      ts.sys.readFile = originalReadFile
+      cachedRealCompilerOptions = savedOptions
+      cachedRealFileNames = savedFileNames
+    }
   })
 
   // RULING C4 (fix round C1, wire Important I2; phase-b9-review-wire.md §I2): the OLD fixture

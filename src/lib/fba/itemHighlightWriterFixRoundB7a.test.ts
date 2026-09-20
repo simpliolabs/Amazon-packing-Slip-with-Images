@@ -128,6 +128,29 @@ describe('RULING R1: mandatory units (identity, isBrand) are never filtered; the
     expect(outcome.reasons.join(' ')).toMatch(/mandatory-collision/)
   })
 
+  // RULING D5 (fix round C2, phase-c1-review-pins.md Minor C9.3 / phase-c2-rulings.md D5): an
+  // identity whose OWN text already trips the sentence-punctuation rule (real "." "!" "?") can
+  // never be satisfied by any arrangement — the identity renders VERBATIM and is mandatory, so
+  // every retry's tail refusal is the SAME unteachable 'sentence-shape' verdict. `runWriterForDesign`
+  // must skip before spending a call, exactly like the mandatory-collision skip above (mutation-
+  // proved: reverting the skip drives `calls` to 3 against the SAME throwing stub client — see
+  // phase-c2-report.md).
+  it('identity-sentence-punctuation: runWriterForDesign skips the writer with 0 calls when the identity text ITSELF trips the sentence-punctuation rule ("Boss Lady!")', async () => {
+    // A pool/spec combination whose best-case joined length clears the floor on its own merits
+    // (unlike the mandatory-collision test above, which does not need to) — so this pin's mutation
+    // proof (revert the D5 skip) demonstrates the retry loop actually RUNS and burns real calls
+    // against the throwing stub, never a DIFFERENT, unrelated skip (the floor check) taking over.
+    const outcome = await runWriterForDesign({
+      composed: { candidates: ['Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'], specFacts: ['100% Ring-Spun Cotton'], brandPick: null, wearFact: null, needBrand: false },
+      fallbackHold: null, designName: 'Boss Lady!', truthCtx,
+      runTail: runTailFor('THE CEO Boss Lady! Shirt', CC, truthCtx),
+      deps: { openai: { chat: { completions: { create: async () => { throw new Error('MUST NOT BE CALLED') } } } } as never },
+    })
+    expect(outcome.accepted).toBe(false)
+    expect(outcome.calls).toBe(0)
+    expect(outcome.reasons.join(' ')).toMatch(/identity-sentence-punctuation/)
+  })
+
   it('K2 (judgeWriterArrangement) is keyed on the EXPLICIT needBrand, never on units.find(isBrand): an arrangement with NO isBrand unit at all is still rejected unbranded when needBrand=true is passed', () => {
     // A synthetic unit set with no isBrand unit whatsoever (simulating a hypothetical future
     // admission gap) — the OLD `units.find(u => u.isBrand)`-only check would have silently passed
