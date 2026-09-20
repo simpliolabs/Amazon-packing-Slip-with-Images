@@ -22,7 +22,7 @@ import {
 } from './itemHighlightWriter'
 import { lineCarriesBrand } from './itemHighlightComposer'
 import { lineHasSignificantRepeat } from './productDetailAttrs'
-import { buildItemHighlights, runIhTail } from './listingPipeline'
+import { buildItemHighlights, runIhTail, produceItemHighlights } from './listingPipeline'
 import { phraseTruthVerdict, type PhraseTruthCtx } from './contentTruth'
 import { DEFAULT_BLANK_SPECS, type BlankSpecRow } from './blankSpecs'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
@@ -128,27 +128,75 @@ describe('RULING R1: mandatory units (identity, isBrand) are never filtered; the
     expect(outcome.reasons.join(' ')).toMatch(/mandatory-collision/)
   })
 
-  // RULING D5 (fix round C2, phase-c1-review-pins.md Minor C9.3 / phase-c2-rulings.md D5): an
-  // identity whose OWN text already trips the sentence-punctuation rule (real "." "!" "?") can
-  // never be satisfied by any arrangement — the identity renders VERBATIM and is mandatory, so
-  // every retry's tail refusal is the SAME unteachable 'sentence-shape' verdict. `runWriterForDesign`
-  // must skip before spending a call, exactly like the mandatory-collision skip above (mutation-
-  // proved: reverting the skip drives `calls` to 3 against the SAME throwing stub client — see
-  // phase-c2-report.md).
-  it('identity-sentence-punctuation: runWriterForDesign skips the writer with 0 calls when the identity text ITSELF trips the sentence-punctuation rule ("Boss Lady!")', async () => {
-    // A pool/spec combination whose best-case joined length clears the floor on its own merits
-    // (unlike the mandatory-collision test above, which does not need to) — so this pin's mutation
-    // proof (revert the D5 skip) demonstrates the retry loop actually RUNS and burns real calls
-    // against the throwing stub, never a DIFFERENT, unrelated skip (the floor check) taking over.
+  // RULING D5 (fix round C2, phase-c1-review-pins.md Minor C9.3 / phase-c2-rulings.md D5),
+  // CORRECTED by RULING E1 (fix round C3, phase-c2-review-pins.md Important): C2's skip fired on
+  // ANY sentence punctuation in the identity's own text, trailing included, on the premise that no
+  // arrangement could ever satisfy productDetailAttrs.ts's `/[.!?](\s|$)/` rule. That premise holds
+  // only for the INTERNAL case (punctuation followed by whitespace INSIDE the text, e.g.
+  // "Mrs. Claus") — it survives verbatim into every rendered line. It is FALSE for the TRAILING case
+  // (e.g. "Boss Lady!"): the renderer attaches a following "," with no space, so "Boss Lady!," is
+  // "!" followed by "," — neither whitespace nor end-of-string — and the rule does not fire. An
+  // exhaustive search over the real judge found 144 of 360 in-band arrangements ACCEPTED for
+  // "Boss Lady!" (phase-c2-review-pins.md D5). The two cases are now pinned separately.
+  it('identity-sentence-punctuation (INTERNAL): runWriterForDesign skips the writer with 0 calls when the identity text carries sentence punctuation followed by INTERNAL whitespace ("Mrs. Claus")', async () => {
+    // Same pool/spec combination as the trailing case below, proving the internal skip is keyed on
+    // the identity text's own shape, not on this fixture's other properties (mutation-proved below:
+    // reverting the skip drives `calls` to 3 against the SAME throwing stub client).
     const outcome = await runWriterForDesign({
       composed: { candidates: ['Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'], specFacts: ['100% Ring-Spun Cotton'], brandPick: null, wearFact: null, needBrand: false },
-      fallbackHold: null, designName: 'Boss Lady!', truthCtx,
-      runTail: runTailFor('THE CEO Boss Lady! Shirt', CC, truthCtx),
+      fallbackHold: null, designName: 'Mrs. Claus', truthCtx,
+      runTail: runTailFor('THE CEO Mrs. Claus Shirt', CC, truthCtx),
       deps: { openai: { chat: { completions: { create: async () => { throw new Error('MUST NOT BE CALLED') } } } } as never },
     })
     expect(outcome.accepted).toBe(false)
     expect(outcome.calls).toBe(0)
     expect(outcome.reasons.join(' ')).toMatch(/identity-sentence-punctuation/)
+  })
+
+  it('identity-sentence-punctuation (TRAILING): runWriterForDesign does NOT skip for "Boss Lady!" — the writer reaches the model (mutation-proved: the pre-E1 predicate turns this RED)', async () => {
+    // A stub that immediately accepts the FIRST arrangement it is offered — this pin only needs to
+    // observe that the skip did not fire (a real call was made), not re-run the judge.
+    let calls = 0
+    const outcome = await runWriterForDesign({
+      composed: { candidates: ['Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'], specFacts: ['100% Ring-Spun Cotton'], brandPick: null, wearFact: null, needBrand: false },
+      fallbackHold: null, designName: 'Boss Lady!', truthCtx,
+      runTail: runTailFor('THE CEO Boss Lady! Shirt', CC, truthCtx),
+      deps: { openai: { chat: { completions: { create: async () => { calls++; throw new Error('stub: no arrangement offered, only presence of a call matters here') } } } } as never },
+    })
+    expect(calls, 'the writer must have reached the model at least once').toBeGreaterThan(0)
+    expect(outcome.reasons.join(' ')).not.toMatch(/identity-sentence-punctuation/)
+  })
+
+  it('identity-sentence-punctuation (TRAILING) END TO END: for "Boss Lady!", at least one real-judge-accepted arrangement SHIPS through produceItemHighlights with the identity in it', async () => {
+    process.env.IH_WRITER = 'on'
+    try {
+      const name = 'Boss Lady!'
+      const title = `THE CEO ${name} Shirt`
+      const input = {
+        finalTitle: title,
+        pool: ['Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'].map((k, i) => kw(k, 5000 - i * 10)),
+        apparelProduct: true, blankBrand: PURE_TEE, netTitles: [title], designTokens: [name],
+        capacityFamily: false, brandName: 'THE CEO',
+      }
+      const built = buildItemHighlights(input)
+      const units = buildAdmittedUnits(built.composed!, { designName: name, truthCtx: built.truthCtx! })
+      const id = (t: string) => units.find((u) => u.text === t)!.id
+      // The real judge's own firstAcceptedLine for this exact fixture (phase-c2-review-pins.md D5,
+      // `d5scope3.txt`, reproduced fresh under phase-c3-report.md): "Boss Lady!, 100% Ring-Spun
+      // Cotton with a Classic Fit, Vintage Beach Vibes, Made for Lazy Summer Days".
+      const parts: ArrangementPart[] = [
+        { unit: id('Boss Lady!') }, { glue: ',' }, { unit: id('100% Ring-Spun Cotton') },
+        { glue: 'with' }, { glue: 'a' }, { unit: id('Classic Fit') },
+        { glue: ',' }, { unit: id('Vintage Beach Vibes') },
+        { glue: ',' }, { unit: id('Made for Lazy Summer Days') },
+      ]
+      const client = { chat: { completions: { create: async () => ({ choices: [{ message: { role: 'assistant', content: JSON.stringify({ parts }) }, finish_reason: 'stop' }] }) } } } as never
+      const result = await produceItemHighlights(input, { openai: client })
+      expect(result.writerLog?.calls ?? 0).toBeGreaterThan(0)
+      expect(result.writerLog?.accepted).toBe(true)
+      expect(result.value).toContain('Boss Lady!')
+      expect(result.value).not.toBe(built.value) // ships the writer's line, not the composer's fallback
+    } finally { delete process.env.IH_WRITER }
   })
 
   it('K2 (judgeWriterArrangement) is keyed on the EXPLICIT needBrand, never on units.find(isBrand): an arrangement with NO isBrand unit at all is still rejected unbranded when needBrand=true is passed', () => {

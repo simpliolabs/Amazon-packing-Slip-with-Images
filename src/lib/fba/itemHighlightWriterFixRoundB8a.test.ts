@@ -453,6 +453,14 @@ describe('RULING S2: the wear fact stands alone in its own comma clause', () => 
   // reads as an offered glue choice — never a bare em-dash or the word "and" used as ordinary English
   // prose (both appear, correctly, elsewhere in this same text at HEAD).
   const NO_QUOTED_WEAR_JOIN_RE = /"(?:and|&|—|\|)"/
+  // RULING E2 (fix round C3, phase-c2-review-pins.md Minor / phase-c3-rulings.md E2): D4's own
+  // bare-character check (`/[&|]/` below) still lets a bare "and" or an em-dash JOIN OFFER through
+  // — "joined ... by and" / "an em-dash join" name the SAME illegal glue in different words, and
+  // neither contains "&" or "|". Scoped to the OFFERING shape itself ("by and", "em-dash join"),
+  // never the bare word "and" alone (which appears correctly in this clause's own prose, e.g. "and
+  // no list join to a neighbour of any other kind)") or a real em-dash character (used throughout
+  // this file's prose) — so this cannot false-positive on the clause it is meant to protect.
+  const NO_BARE_WEAR_JOIN_OFFER_RE = /\bby and\b|em-dash/i
   it('RULING T4: the rendered GRAMMAR sentence\'s wear-fact EXEMPTION clause grants it no JOIN except the comma its own rule below requires — no quoted "and"/"&"/"—"/"|" token, in the EXCEPT clause specifically (rule (2)\'s OWN opening line legitimately quotes all five as the general list-join set; that is not the wear fact\'s clause)', () => {
     const { system } = buildWriterPrompt(units, 'Retro Sunset', [], 'Comfort Colors')
     const grammarSentence = system.slice(system.indexOf('THE GRAMMAR'), system.indexOf('(4) No other glue word exists'))
@@ -475,6 +483,9 @@ describe('RULING S2: the wear fact stands alone in its own comma clause', () => 
     // them sits outside `exemptionClause`'s slice), so a direct character check catches an offer
     // made without quotation marks too (mutation-proved RED under `T4f_bare`).
     expect(exemptionClause, exemptionClause).not.toMatch(/[&|]/)
+    // RULING E2: nor a bare "and"/em-dash JOIN OFFER (mutation-proved RED under `T4f_bareand` /
+    // `T4f_baredash`).
+    expect(exemptionClause, exemptionClause).not.toMatch(NO_BARE_WEAR_JOIN_OFFER_RE)
     // RULING C9 (fix round C1, value minor m1): the OLD wording ("it is never list-joined to a
     // neighbour either") denied the wear fact EVERY list join, comma included, contradicting rule
     // (3)'s own closing ("the wear fact STANDS ALONE in its own comma clause") and the WEAR_RULE
@@ -499,6 +510,8 @@ describe('RULING S2: the wear fact stands alone in its own comma clause', () => 
         // regression that put a bare "&"/"|" into the TEMPLATE itself is what this catches.
         const fixedProse = v.violation.replace('Can be worn as Oversized', '')
         expect(fixedProse, fixedProse).not.toMatch(/[&|]/)
+        // RULING E2: nor a bare "and"/em-dash JOIN OFFER (mutation-proved RED under `T4e_bareand`).
+        expect(fixedProse, fixedProse).not.toMatch(NO_BARE_WEAR_JOIN_OFFER_RE)
       }
     }
   })

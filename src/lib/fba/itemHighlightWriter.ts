@@ -1691,20 +1691,28 @@ export async function runWriterForDesign(args: {
     console.warn(JSON.stringify({ tag: 'IH_WRITER_SKIP', design: identityTextForBrand, reason: 'mandatory-collision' }))
     return { accepted: false, value: '', reasons: ['skip: mandatory-collision (identity and required brand collide)'], calls: 0 }
   }
-  // RULING D5 (fix round C2, phase-c1-review-pins.md Minor C9.3 / phase-c2-rulings.md D5): the
-  // identity unit is MANDATORY and renders VERBATIM in every arrangement `buildAdmittedUnits` can
-  // ever produce — it is never edited or dropped by the model. When the identity's OWN text already
-  // trips the sentence-punctuation rule (a real "." "!" or "?" — a persona name like "Boss Lady!"),
-  // every possible arrangement's tail refusal is `ihFirstContentRuleViolation`'s SAME
-  // 'sentence-shape' verdict every single retry, for a rule `WRITER_RULE_REGISTRY` never teaches
-  // (there is no taught sentence naming "no sentence punctuation") and the model has no way to act
-  // on (it cannot rewrite or omit the mandatory identity). Ask the ONE source
-  // (`ihContentRuleViolations`, never a copy) whether the identity ALONE already carries that
-  // specific violation — never its generic comma-count violation, which is meaningless for an
-  // isolated single phrase — and skip before spending a call, exactly like the collision skip above.
-  if (identityTextForBrand && ihContentRuleViolations(identityTextForBrand).some((v) => v.reason === 'sentence-shape' && /sentence punctuation/.test(v.message))) {
+  // RULING D5 (fix round C2, phase-c1-review-pins.md Minor C9.3 / phase-c2-rulings.md D5),
+  // CORRECTED by RULING E1 (fix round C3, phase-c2-review-pins.md Important): the identity unit is
+  // MANDATORY and renders VERBATIM in every arrangement `buildAdmittedUnits` can ever produce — it is
+  // never edited or dropped by the model. C2's skip fired on ANY sentence punctuation the identity's
+  // own text carried, TRAILING included, on the premise that no arrangement could ever satisfy the
+  // productDetailAttrs.ts rule `/[.!?](\s|$)/`. That premise is measurably true only for the
+  // INTERNAL case: punctuation followed by whitespace INSIDE the identity text (e.g. "Mrs. Claus")
+  // survives into every arrangement's rendered line unchanged, so the tail's same 'sentence-shape'
+  // verdict fires on every retry. It is FALSE for a TRAILING case (e.g. "Boss Lady!"): the renderer
+  // attaches a following "," with no space (`PUNCTUATION_ATTACH_LEFT`), so "Boss Lady!," is "!"
+  // followed by "," — neither whitespace nor end-of-string — and the outer rule does not fire. An
+  // exhaustive search over the real judge found 144 of 360 in-band arrangements ACCEPTED for
+  // "Boss Lady!" (phase-c2-review-pins.md D5, `d5scope3.txt`), including lines that ship with the
+  // design's own identity in them end-to-end through `produceItemHighlights`. Skipping on the
+  // trailing case therefore threw away exactly the lines the writer exists to produce, on every
+  // design whose name ends in sentence punctuation. Narrow the predicate to the case the premise
+  // actually holds for — `/[.!?]\s/` against the (already-trimmed) identity text alone, never
+  // `ihContentRuleViolations`'s `(\s|$)` variant, which cannot distinguish trailing from internal —
+  // and skip before spending a call, exactly like the collision skip above.
+  if (identityTextForBrand && /[.!?]\s/.test(identityTextForBrand)) {
     console.warn(JSON.stringify({ tag: 'IH_WRITER_SKIP', design: identityTextForBrand, reason: 'identity-sentence-punctuation' }))
-    return { accepted: false, value: '', reasons: ['skip: identity-sentence-punctuation (identity text itself trips the sentence-punctuation rule; mandatory, cannot be edited by the model)'], calls: 0 }
+    return { accepted: false, value: '', reasons: ['skip: identity-sentence-punctuation (identity text carries sentence punctuation followed by internal whitespace; every arrangement inherits it verbatim, mandatory, cannot be edited by the model)'], calls: 0 }
   }
 
   const units = buildAdmittedUnits(args.composed, { designName: args.designName, identityPhrases: args.identityPhrases, truthCtx: args.truthCtx })

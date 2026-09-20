@@ -872,15 +872,20 @@ function listTsFilesFlat(dir: string): string[] {
 // names no NEW tsconfig content at all — where reading directly avoids re-running
 // `parseJsonConfigFileContent`'s own `include` glob expansion (non-trivial cost) on every one of
 // this file's many calls.
-// RULING D6 (fix round C2, phase-c1-review-wire.md m2): this sentence used to end "so there is
-// nothing for an overlay to serve here" — false as of RULING C5 (fix round C1, wire Important I3,
-// thirty lines below), which added `getRealCompilerOptionsCached`'s `overlay` parameter and the
-// "n1"/"n1-disk" pins that overlay `tsconfig.json` ITSELF (real disk content, JSON-parsed, one key
-// added, re-parsed exactly as `tsc` would parse a genuinely edited file) — the OLDER `pathsOverlay`
-// mechanism this sentence still names (a plain-JS merge onto the ALREADY-cached options, used by
-// n2/n18) is a SEPARATE, narrower path that never re-reads `tsconfig.json` at all; the two are not
-// interchangeable and neither replaces the other. Cached once, like
-// `cachedRealRootNames` beside it.
+// RULING D6 (fix round C2, phase-c1-review-wire.md m2), CORRECTED by RULING E3 (fix round C3,
+// phase-c2-review-wire.md Important — measured, not asserted: `git show d865ea7:…` has no "n1-disk"
+// match, so it cannot be C5's): this sentence used to end "so there is nothing for an overlay to
+// serve here" — false as of RULING C5 (fix round C1, wire Important I3, thirty lines below), which
+// added `getRealCompilerOptionsCached`'s `overlay` parameter and the "n1" pin that overlays
+// `tsconfig.json` content THROUGH that parameter (one key added, merged into the already-cached
+// options). RULING D2 (fix round C2, this same commit) added a SEPARATE "n1-disk" pin that never
+// touches the `overlay` parameter at all — it drives the DISK-READ branch this function's cache
+// serves by monkey-patching `ts.sys.readFile` for `tsconfig.json` (restored in `finally`), so the
+// disk parse itself sees the edited key. The two pins probe genuinely different branches; the
+// OLDER `pathsOverlay` mechanism this sentence still names (a plain-JS merge onto the
+// ALREADY-cached options, used by n2/n18) is a THIRD, narrower path that never re-reads
+// `tsconfig.json` at all — none of the three is interchangeable with either other. Cached once,
+// like `cachedRealRootNames` beside it.
 let cachedRealCompilerOptions: ts.CompilerOptions | null = null
 // RULING C3 (fix round C1, wire Important I1; phase-b9-review-wire.md §I1): `parsed.fileNames` — the
 // REAL include set `tsc`'s own program build resolves from this SAME parse — used to be discarded
@@ -1103,12 +1108,17 @@ function isResolveAliasAccess(node: ts.Expression): boolean {
  *  compiler-API reference walk has no way to resolve on its own — that is spec §2i's reason this is
  *  a dedicated check, not (as an earlier version of this comment claimed) because next.config.ts
  *  sits outside the program.
- *  RULING D6 (fix round C2, phase-c1-review-wire.md m2): "next.config.ts is genuinely OUTSIDE this
- *  file's program … never added to `rootNames`" is false as of RULING C3 (fix round C1, wire
- *  Important I1, above) — `getRealRootNamesCached()`'s root list is `parsed.fileNames`, the real
- *  tsconfig's own include set, which the committed tsconfig.json's `next-env.d.ts`/`.next/types`
- *  glob entries pull `next.config.ts` (and 8 other files outside `src/`) into as ordinary roots.
- *  This function still reads it directly through the shared host rather than relying on that root
+ *  RULING D6 (fix round C2, phase-c1-review-wire.md m2), CORRECTED by RULING E3 (fix round C3,
+ *  phase-c2-review-wire.md Important — measured against real `ts.parseJsonConfigFileContent`
+ *  output, never asserted): "next.config.ts is genuinely OUTSIDE this file's program … never added
+ *  to `rootNames`" is false as of RULING C3 (fix round C1, wire Important I1, above) — but
+ *  `getRealRootNamesCached()`'s root list is the UNION of `parsed.fileNames` (the real tsconfig's
+ *  own include set) and the `src/` walk (RULING D3, fix round C2), not `parsed.fileNames` alone.
+ *  The include entry that actually reaches `next.config.ts` is the recursive `**\/*.ts` glob — the
+ *  `next-env.d.ts`/`.next/types` glob entries together pull in exactly ONE file between them, and it
+ *  is not `next.config.ts`. The count of root entries outside `src/` after the committed filters is
+ *  11, not 8: `next.config.ts` plus `vitest.config.ts` and 9 `scripts/*.ts` files. This function
+ *  still reads `next.config.ts` directly through the shared host rather than relying on that root
  *  status — the STRING-LITERAL target a webpack/turbopack alias assigns is not something a
  *  reference walk over `next.config.ts`-as-a-root would resolve any differently. */
 function findNextConfigAliasViolations(host: ts.CompilerHost, homeAbsSet: ReadonlySet<string>): string[] {
@@ -2281,13 +2291,17 @@ describe('RULING U1 (fix round B9b, wire Blocking B1 scoped by spec §2i): CONFI
     expect(getRealCompilerOptionsCached().strict).toBe(true)
   })
 
-  // RULING C3 (fix round C1, wire Important I1; phase-b9-review-wire.md §I1): U1 point 1 says "the
-  // program is built from the repo's REAL tsconfig" — the OLD root list was `listTsFilesFlat(SRC_ROOT)`,
-  // a hand-rolled directory walk of `src/` ALONE, so a call site OUTSIDE `src/` but INSIDE the real
-  // tsconfig's own `include` set (the committed `"**/*.ts"` glob covers `scripts/*.ts` too) compiled
-  // clean and was never a root of THIS scanner's program at all — unreachable, regardless of what it
-  // called. `getRealRootNamesCached` now derives from `parsed.fileNames`, the SAME include-set parse
-  // `getRealCompilerOptionsCached` reads its options from.
+  // RULING C3 (fix round C1, wire Important I1; phase-b9-review-wire.md §I1), CORRECTED by RULING
+  // E3 (fix round C3, phase-c2-review-wire.md Important — falsified by RULING D3 in the SAME C2
+  // commit that introduced it, never touched by that round's own D6 comment pass): U1 point 1 says
+  // "the program is built from the repo's REAL tsconfig" — the OLD root list was
+  // `listTsFilesFlat(SRC_ROOT)`, a hand-rolled directory walk of `src/` ALONE, so a call site
+  // OUTSIDE `src/` but INSIDE the real tsconfig's own `include` set (the committed `"**/*.ts"` glob
+  // covers `scripts/*.ts` too) compiled clean and was never a root of THIS scanner's program at all
+  // — unreachable, regardless of what it called. `getRealRootNamesCached` no longer derives from
+  // `parsed.fileNames` alone — RULING D3 (fix round C2) rebuilt it as the UNION of `parsed.fileNames`
+  // and the `src/` walk, so a compiled-extension file under `src/` the committed `include` globs
+  // miss (there is none today, but the union restores the CLASS) is not silently dropped either.
   it('the real root list is a STRICT SUPERSET of the old src/-only walk — it includes real scripts/*.ts files outside src/', () => {
     const roots = getRealRootNamesCached()
     const scriptsRoots = roots.filter((r) => /\/scripts\//.test(r))
