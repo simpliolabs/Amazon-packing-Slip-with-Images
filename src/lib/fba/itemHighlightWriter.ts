@@ -630,15 +630,18 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
       return `too many glue tokens in a row ('${run.map((g) => g.glue).join(' ')}') between '${left.text}' and '${right.text}'`
     }
     if (run.length === 2) {
-      // RULING F1 (fix round F1, Blocking): a LIST join may be followed by a RELATION join —
-      // "Sweatshirts for Women, with 50% Cotton / 50% Polyester" — legal under the EXACT SAME
+      // RULING F1 (fix round F1, Blocking), NARROWED by RULING G2 (round G1, phase-g1-rulings.md
+      // — review phase-f1-review.md §5 measured F1's own `roles[0] === 'list'` test legalising ALL
+      // FIVE list-glue spellings before a relation join, not only the ',' the ruling and the 12
+      // live shadow attempts actually named: "and with" / "& with" / "| with" / "— with" are not
+      // English and are not legalised here. Only a LITERAL ',' immediately before a RELATION join
+      // is legal — "Sweatshirts for Women, with 50% Cotton / 50% Polyester" — under the EXACT SAME
       // right-hand-unit rule a BARE relation join already enforces (`relationTargetViolation`,
-      // shared, never a second copy). This costs no truth: §2g already records that a relation
-      // bounds the FACT it attaches, not the SUBJECT it hangs it on — the fact here is the blank's
-      // own spec fact, exactly as a bare "with 50% Cotton / 50% Polyester" already was legal. 12 of
-      // 18 live shadow attempts on B0DSCDZC6K (2026-09-23) used exactly this shape and were wrongly
-      // refused before this ruling.
-      if (roles[0] === 'list' && roles[1] === 'relation') {
+      // shared, never a second copy). 12 of 18 live shadow attempts on B0DSCDZC6K (2026-09-23) used
+      // exactly this ',' shape and were wrongly refused before F1. Every other list glue followed by
+      // a relation join falls through to the "only a join followed by 'a'/'an' is" violation below,
+      // unchanged from pre-F1 behaviour.
+      if (run[0].glue === ',' && roles[1] === 'relation') {
         const violation = relationTargetViolation(run[1].glue, right)
         if (violation) return violation
         i = j
@@ -1227,10 +1230,33 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
   // true; only a cross-clause pairing with its NEIGHBOUR read as a fit-claim-lie). `n` is at most
   // ~12 admitted units, so this is at most ~66 extra `phraseTruthVerdict` calls per clause — still
   // the SAME predicate every pool candidate already passes, no lexicon.
+  // RULING G1 (fix round G1, phase-g1-rulings.md, Blocking — a truth fix, WRITER ONLY, never
+  // `ihLineTruthVerdict` in contentTruth.ts, which is shared with the composer and must not move
+  // flag-off bytes). Review phase-f1-review.md §2 measured that F1 legalised "X , with Y" (a `,`
+  // immediately followed by a relation glue) WITHOUT widening this clause walk to match — the
+  // comma above still closed the clause, so a relation's fact and the subject it hangs it on landed
+  // in two SEPARATE clauses that no span check here ever compares together, even though the SAME
+  // words with no comma ("X with Y") are one clause and ARE compared. The retry loop drives a model
+  // straight into the gap: refused for `join: '...' — fit-claim-lie` on the bare spelling, it adds
+  // exactly the comma the prompt's own `pair-truth` sentence recommends, and the identical claim
+  // ships. `truthParts` is a TRUTH-ONLY view of the arrangement — a `,` that opens a relation join
+  // is dropped from it — so the clause walk below, and every span it renders for
+  // `phraseTruthVerdict`, treats "X , with Y" as the byte-identical span "X with Y". The real
+  // OUTPUT `line` (rendered above, before this block, from the UNMODIFIED `v.parts`) is untouched —
+  // this view exists only to decide what gets judged, never what gets written.
+  const truthParts: ArrangementPart[] = []
+  v.parts.forEach((p, idx) => {
+    if ('unit' in p) { truthParts.push(p); return }
+    if (p.glue === ',') {
+      const next = v.parts[idx + 1]
+      if (next && !('unit' in next) && RELATION_GLUE.has(next.glue)) return // dropped: opens a relation, so it neither closes a clause NOR appears in a rendered span below
+    }
+    truthParts.push(p)
+  })
   const clauses: number[][] = []
   {
     let current: number[] = []
-    v.parts.forEach((p, idx) => {
+    truthParts.forEach((p, idx) => {
       if ('unit' in p) { current.push(idx); return }
       if (p.glue === ',') { if (current.length) clauses.push(current); current = [] }
       // Every other glue token (list/relation/article/punctuation) stays WITHIN the same clause.
@@ -1240,7 +1266,7 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
   for (const clause of clauses) {
     for (let a = 0; a < clause.length - 1; a++) {
       for (let b = a + 1; b < clause.length; b++) {
-        const span = renderArrangement(v.parts.slice(clause[a], clause[b] + 1), units).trim()
+        const span = renderArrangement(truthParts.slice(clause[a], clause[b] + 1), units).trim()
         const spanVerdict = phraseTruthVerdict(span, ctx.truthCtx)
         if (!spanVerdict.ok) {
           // RULING Q5 (fix round B6, value Blocking B2): plain-language — never the raw internal
