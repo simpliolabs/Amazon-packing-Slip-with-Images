@@ -471,6 +471,11 @@ const PUNCTUATION_ATTACH_LEFT: ReadonlySet<string> = new Set([','])
 const LIST_GLUE: ReadonlySet<string> = new Set(['and', ',', '—', '|', '&'])
 const RELATION_GLUE: ReadonlySet<string> = new Set(['with', 'in'])
 const ARTICLE_GLUE: ReadonlySet<string> = new Set(['a', 'an'])
+/** RULING P4 (fix round B5) / RULING H1 (fix round H1): a TRUTH clause is scoped to "one comma
+ *  clause" — never `—`/`|`/`&`, which stay WITHIN the same truth clause (so a list-joined lying
+ *  pair like "X and Y & Z with W" is still judged as one span). Passed to `segmentClauses` as its
+ *  `closers` set from the truth walk only; readability keeps the wider `GLUE_PUNCTUATION` default. */
+const TRUTH_CLAUSE_CLOSERS: ReadonlySet<string> = new Set([','])
 
 /** §2c's unit classes, NARROWED by RULING R6 (fix round B7a, value Important): `SPEC` used to union
  *  three kinds a relation join may introduce (a blank spec fact, the brand phrase, the sanctioned
@@ -969,29 +974,90 @@ function countListSections(clauses: readonly string[]): number {
   return sections
 }
 
-/** RULING R4 (fix round B7a, value Blocking B3): counts relation/list clauses from the
- *  ARRANGEMENT's own GLUE PARTS, never by re-scanning the rendered TEXT for the words "with"/"in"
- *  (`clauseIsKeywordShaped` above). A pool phrase whose OWN text happens to contain "in" or "with"
- *  ("Christmas in July Shirt", "Mom with Attitude") used to count as a relation clause with ZERO
- *  actual relation JOINS, letting a pure keyword list pass readability and ship. Clause boundaries
- *  are the SAME characters `READABILITY_CLAUSE_SPLIT_RE` splits on (`GLUE_PUNCTUATION`, defined
- *  earlier in this file) — matched against the glue PARTS, never the rendered string. Returns one
- *  boolean per clause: `true` when that clause is keyword-shaped (carries no relation-glue part). */
-function clauseShapesFromParts(parts: readonly ArrangementPart[]): boolean[] {
-  const shapes: boolean[] = []
-  let sawUnit = false
-  let sawRelationGlue = false
-  const closeClause = () => { if (sawUnit) shapes.push(!sawRelationGlue); sawUnit = false; sawRelationGlue = false }
-  for (const part of parts) {
-    if ('unit' in part) { sawUnit = true; continue }
-    // RULING R4: `READABILITY_CLAUSE_SPLIT_RE` splits on EVERY member of `GLUE_PUNCTUATION`
-    // (`,` `—` `|` `&`), not only the comma — the glue-based walk must match that exactly.
-    if (GLUE_PUNCTUATION.has(part.glue)) { closeClause(); continue }
-    if (RELATION_GLUE.has(part.glue)) sawRelationGlue = true
-    // A list-word join (`and`) or an article (`a`/`an`) neither opens nor closes a clause boundary.
+/** RULING H1 (fix round H1, phase-h1-rulings.md, Blocking — the class fix). THE single exported
+ *  authority on where a clause begins/ends over an `ArrangementPart[]`, and whether a relation glue
+ *  is open in it. Its rule: a `,` does not close a clause while a relation glue is open in that
+ *  clause — `with A, B` is ONE clause carrying two facts, the reading the grammar (`validateGrammar`
+ *  RULING Q1), the spec (§2g rule 6) and `enumerateWriterCandidates`'s own doc comment on
+ *  `WRITER_CANDIDATE_MAX_REL_UNITS` already state. Before this round, `clauseShapesFromParts`
+ *  closed on EVERY `,` unconditionally (RULING R4), so a stacked relation fact chained by `,` (the
+ *  ONLY spelling `enumerateWriterCandidates` emits for a stacked fact) counted as an extra
+ *  KEYWORD-SHAPED clause with zero relation join of its own — derank bait for a candidate that is
+ *  legally and truthfully ONE relation clause. `clauseShapesFromParts` and the truth walk in
+ *  `judgeWriterArrangement` both derive their clause boundaries from THIS function now — neither
+ *  re-walks `parts` with its own notion of where a clause ends. A `,` that itself OPENS a relation
+ *  (the very next token is a relation glue) is intentionally left closing the clause normally here
+ *  — exactly as it always did for the pool/relation clause split — because dropping THAT comma is
+ *  RULING G1's separate, TRUTH-ONLY concern (`judgeWriterArrangement` below), never a readability
+ *  behavior; this function is never handed a truth-only view for that reason. `—`/`|`/`&` still
+ *  close a clause unconditionally, exactly as before — H1 narrows the exception to `,` only. */
+export interface SegmentedClause {
+  /** Indices into `parts` of the UNITS belonging to this clause, in order. */
+  unitIdx: number[]
+  hasRelationGlue: boolean
+}
+export interface SegmentClausesResult {
+  clauses: SegmentedClause[]
+  /** Indices into `parts` of every `,` GLUE part that H1 kept open (did not close a clause) because
+   *  a relation glue was already open when it was reached AND the unit immediately following it is
+   *  itself relation-eligible (`SPEC_KINDS`, minus the brand carrier — the SAME eligibility
+   *  `enumerateWriterCandidates`'s own relation-target search and `relationTargetViolation` already
+   *  use) — i.e. a STACKING comma chaining a FURTHER FACT into the same relation, never the comma
+   *  that OPENS the relation, and never a comma that hands off to an ordinary pool/brand/wear-fact
+   *  clause instead (RULING S2 still owns that: the wear fact, and any non-spec unit, closes the
+   *  relation clause exactly as before — H1 does not swallow it). `clauseShapesFromParts` only
+   *  needs `clauses`; the truth walk additionally needs to know WHICH commas these were, to
+   *  rewrite them for judging (see there). */
+  chainedCommaIdx: ReadonlySet<number>
+}
+/** `closers`: which glue tokens count as a REAL clause boundary at all, BEFORE H1's stacking
+ *  exception is even considered — readability (RULING R4) and the truth walk (RULING P4) have
+ *  ALWAYS disagreed about this, on purpose, and H1 does not unify THAT: readability's own clause is
+ *  "the text between `,` `—` `|` `&`" (every member of `GLUE_PUNCTUATION`), while P4's truth clause
+ *  is scoped to "one comma clause" — `&`/`—`/`|` never close a TRUTH clause (a list-joined pair like
+ *  "100% Awesome and Farm Life Crewneck & Soft Poly Feel with 52% Cotton..." must stay ONE truth
+ *  clause for the span-truth walk to ever compare the lying pair, exactly as it always did).
+ *  Defaults to `GLUE_PUNCTUATION` (readability's own set); the truth walk passes a comma-only set. */
+export function segmentClauses(
+  parts: readonly ArrangementPart[],
+  units: readonly AdmittedUnit[],
+  closers: ReadonlySet<string> = GLUE_PUNCTUATION,
+): SegmentClausesResult {
+  const byId = new Map(units.map((u) => [u.id, u] as const))
+  const clauses: SegmentedClause[] = []
+  const chainedCommaIdx = new Set<number>()
+  let current: number[] = []
+  let relationOpen = false
+  const close = () => {
+    if (current.length) clauses.push({ unitIdx: current, hasRelationGlue: relationOpen })
+    current = []
+    relationOpen = false
   }
-  closeClause()
-  return shapes
+  parts.forEach((part, idx) => {
+    if ('unit' in part) { current.push(idx); return }
+    if (part.glue === ',' && relationOpen) {
+      // H1: does this comma CHAIN a further relation-target fact into the clause that is already
+      // open, or does it hand off to a DIFFERENT clause (a pool unit, the brand, or the wear fact —
+      // RULING S2's "stands alone" clause)? Only the former stays open; a comma is a real close the
+      // instant the next unit is not itself relation-eligible.
+      const next = parts[idx + 1]
+      const nextUnit = next && 'unit' in next ? byId.get(next.unit) : undefined
+      if (nextUnit && SPEC_KINDS.has(nextUnit.kind) && !nextUnit.isBrand) { chainedCommaIdx.add(idx); return }
+      close()
+      return
+    }
+    if (closers.has(part.glue)) { close(); return }
+    if (RELATION_GLUE.has(part.glue)) relationOpen = true
+    // A list-word join (`and`) or an article (`a`/`an`) neither opens nor closes a clause boundary.
+  })
+  close()
+  return { clauses, chainedCommaIdx }
+}
+/** RULING R4 (fix round B7a, value Blocking B3), now DERIVED from `segmentClauses` (RULING H1) —
+ *  never a second walk of `parts` with its own clause-boundary notion. Returns one boolean per
+ *  clause: `true` when that clause is keyword-shaped (carries no relation-glue part). */
+function clauseShapesFromParts(parts: readonly ArrangementPart[], units: readonly AdmittedUnit[]): boolean[] {
+  return segmentClauses(parts, units).clauses.map((c) => !c.hasRelationGlue)
 }
 /** RULING R4: the glue-based mirror of `countListSections` above, over the boolean clause-shape
  *  array `clauseShapesFromParts` returns — same run-of-2+ rule, same behavior, different input. */
@@ -1087,9 +1153,9 @@ export function writerReadabilityVerdict(line: string, units: readonly AdmittedU
   // callers that hand-type a rendered line with no arrangement at all (every such existing caller
   // types a line whose relation words really do come from a "with"/"in" GLUE choice, so the two
   // mechanisms agree on every one of them).
-  const clauseCount = parts ? clauseShapesFromParts(parts).length : line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean).length
+  const clauseCount = parts ? clauseShapesFromParts(parts, units).length : line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean).length
   const relationClauses = parts
-    ? clauseShapesFromParts(parts).filter((keywordShaped) => !keywordShaped).length
+    ? clauseShapesFromParts(parts, units).filter((keywordShaped) => !keywordShaped).length
     : countRelationClauses(line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean))
   // RULING S5 (fix round B8a, value Important): named from RELATION_GLUE, and explicit that a
   // "with"/"in" appearing INSIDE a unit's own text (never an arrangement GLUE part) does not count —
@@ -1102,7 +1168,7 @@ export function writerReadabilityVerdict(line: string, units: readonly AdmittedU
     return { ok: false, reason: `reads as a keyword list (0 of ${clauseCount} clauses contain a "with"/"in" JOIN — a "with"/"in" appearing inside a unit's own text does not count; at least one relation clause is required)` }
   }
   const listSections = parts
-    ? countListSectionsFromShapes(clauseShapesFromParts(parts))
+    ? countListSectionsFromShapes(clauseShapesFromParts(parts, units))
     : countListSections(line.split(READABILITY_CLAUSE_SPLIT_RE).map((s) => s.trim()).filter(Boolean))
   if (listSections > 1) {
     return { ok: false, reason: `reads as ${listSections} separate keyword lists (clauses with no "with"/"in" relation, split apart by another relation clause) — at most one list section is allowed` }
@@ -1253,20 +1319,29 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
     }
     truthParts.push(p)
   })
-  const clauses: number[][] = []
-  {
-    let current: number[] = []
-    truthParts.forEach((p, idx) => {
-      if ('unit' in p) { current.push(idx); return }
-      if (p.glue === ',') { if (current.length) clauses.push(current); current = [] }
-      // Every other glue token (list/relation/article/punctuation) stays WITHIN the same clause.
-    })
-    if (current.length) clauses.push(current)
-  }
-  for (const clause of clauses) {
-    for (let a = 0; a < clause.length - 1; a++) {
-      for (let b = a + 1; b < clause.length; b++) {
-        const span = renderArrangement(truthParts.slice(clause[a], clause[b] + 1), units).trim()
+  // RULING H1 (fix round H1, phase-h1-rulings.md, Blocking): clause boundaries over `truthParts`
+  // are DERIVED from `segmentClauses` (the single authority, above) — never a second, narrower
+  // walk. A `,` that CHAINS a further fact into an already-open relation clause ("with A, B") no
+  // longer closes the clause here either, widening the truth walk's own span checks to match. THE
+  // MECHANIC (because widening the clause boundary alone measures nothing): `phraseTruthVerdict`
+  // stops at a `,` inside the STRING it is handed, so a wider clause whose rendered span still
+  // reads "...A, B" would still be judged as if it stopped at the comma — the identical hole, now
+  // with a green-looking test. `truthRenderParts` rewrites every one of those STACKING commas
+  // (never the comma that opens the relation, which stays dropped above) to the list glue `and` —
+  // the spelling `phraseTruthVerdict` judges strictly — so the span this walk renders for the
+  // oracle reads "...A and B", matching the ONE-clause-two-facts reading the grammar and spec
+  // already state. The real OUTPUT `line` (rendered above, from the UNMODIFIED `v.parts`) is
+  // never touched by this — `truthRenderParts` exists only to decide what gets judged. RULING P4
+  // scopes a TRUTH clause to "one comma clause" — never `—`/`|`/`&` (readability's own, WIDER,
+  // clause boundary) — so this call passes a comma-only `closers` set, exactly the boundary the
+  // pre-H1 truth walk always used.
+  const { clauses: truthClauses, chainedCommaIdx } = segmentClauses(truthParts, units, TRUTH_CLAUSE_CLOSERS)
+  const truthRenderParts: ArrangementPart[] = truthParts.map((p, idx) => (chainedCommaIdx.has(idx) ? { glue: 'and' } : p))
+  for (const clause of truthClauses) {
+    const unitIdx = clause.unitIdx
+    for (let a = 0; a < unitIdx.length - 1; a++) {
+      for (let b = a + 1; b < unitIdx.length; b++) {
+        const span = renderArrangement(truthRenderParts.slice(unitIdx[a], unitIdx[b] + 1), units).trim()
         const spanVerdict = phraseTruthVerdict(span, ctx.truthCtx)
         if (!spanVerdict.ok) {
           // RULING Q5 (fix round B6, value Blocking B2): plain-language — never the raw internal
@@ -1734,7 +1809,7 @@ export function enumerateWriterCandidates(
           evaluated++
           const verdict = judgeWriterArrangement({ parts: finalParts }, units, ctx)
           if (!verdict.ok) continue
-          const shapes = clauseShapesFromParts(finalParts)
+          const shapes = clauseShapesFromParts(finalParts, units)
           candidates.push({
             parts: finalParts,
             line: verdict.value,
