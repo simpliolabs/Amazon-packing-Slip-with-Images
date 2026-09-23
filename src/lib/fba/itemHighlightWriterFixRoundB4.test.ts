@@ -8,7 +8,6 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildAdmittedUnits, judgeWriterArrangement, validateArrangement, renderArrangement,
-  buildWriterPrompt, WRITER_RULE_REGISTRY,
   type AdmittedUnit, type ArrangementPart,
 } from './itemHighlightWriter'
 import { composeItemHighlightDetailed, type ComposerResult } from './itemHighlightComposer'
@@ -375,42 +374,19 @@ describe('RULING P7: a tail sentence-shape refusal names the taught rule, not th
   })
 })
 
-// ─── K4: the prompt is GENERATED from the rule registry — a rule can never be taught without an id ─
-
-describe('RULING K4: the prompt is rendered from WRITER_RULE_REGISTRY — every applicable rule id\'s sentence appears', () => {
-  it('every UNCONDITIONAL-OR-APPLICABLE rule\'s sentence appears in the rendered system prompt', () => {
-    // RULING P7 (fix round B5): a "Unisex Fit" spec-fact unit must be present for the (now
-    // conditional, per M1) unisex-gender rule to render at all — include one so this fixture
-    // exercises every rule id, brand included. RULING R6 (fix round B7a): a wear-fact unit must ALSO
-    // be present for the `wear-fact-list-only` rule (conditional, same shape as `unisex-gender`).
-    // RULING R6's own wear-fact unit is truthful only for the PO-sanctioned Comfort Colors brand
-    // (`sanctionedWearFact`, contentTruth.ts) — `spec.brand` must actually say so, or
-    // `buildAdmittedUnits` drops it as untrue before this fixture ever exercises the rule.
-    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic', unisex: true, brand: 'Comfort Colors' } as never, allowedBrand: 'Comfort Colors', audience: 'adult', field: 'highlights' }
-    const units = buildAdmittedUnits(
-      { candidates: ['Cozy Graphic Tee'], specFacts: ['Classic Fit', 'Unisex Fit'], brandPick: 'Comfort Colors Tee', brandOrigin: 'spec', wearFact: 'Can be worn as Oversized' },
-      { designName: 'Retro Sunset', truthCtx },
-    )
-    const { system } = buildWriterPrompt(units, 'Retro Sunset', [])
-    for (const rule of WRITER_RULE_REGISTRY) {
-      expect(system, `rule "${rule.id}" must be taught`).toContain(rule.sentence)
-    }
-  })
-  it('the sentence-shape (>=1 comma) and unisex-beside-gender rules specifically are taught — value review B1/B2\'s exact gap', () => {
-    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic', unisex: true } as never, allowedBrand: null, audience: 'adult', field: 'highlights' }
-    const units = buildAdmittedUnits({ candidates: [], specFacts: ['Unisex Fit'], brandPick: null, brandOrigin: null, wearFact: null }, { designName: 'X', truthCtx })
-    const { system } = buildWriterPrompt(units, 'X', [])
-    expect(system).toMatch(/AT LEAST ONE ","/)
-    expect(system).toMatch(/gendered audience word/)
-  })
-  it('the brand rule is OMITTED when no brand unit exists (conditional, per the composer\'s own needBrand)', () => {
-    const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }
-    const units = buildAdmittedUnits({ candidates: [], specFacts: [], brandPick: null, brandOrigin: null, wearFact: null }, { designName: 'X', truthCtx })
-    const { system } = buildWriterPrompt(units, 'X', [])
-    const brandRule = WRITER_RULE_REGISTRY.find((r) => r.id === 'brand')!
-    expect(system).not.toContain(brandRule.sentence)
-  })
-})
+// ─── K4: RETIRED by RULING G4 (fix round G1, phase-g1-rulings.md, design change) ──────────────────
+//
+// K4 pinned that `buildWriterPrompt` rendered its system message FROM `WRITER_RULE_REGISTRY` — the
+// model composed a line, so every applicable rule had to be TAUGHT. `phase-f1-review.md` measured
+// that three rounds of teaching this grammar in prose produced 18 live refusals, a rule sentence
+// that contradicted the code, and a worked example the real judge rejected 130/130 times. RULING G3
+// deleted composing entirely: the model now picks an INDEX from already-accepted candidate lines
+// (`itemHighlightWriterFixRoundG3.test.ts`), so `buildWriterPrompt`'s signature and purpose both
+// changed — it no longer takes `units`/`priorViolations`, and it teaches NO rule sentence at all
+// (`itemHighlightWriterFixRoundG3.test.ts`'s "no rule sentence it no longer needs to teach" pin is
+// K4's direct successor, asserting the OPPOSITE of what K4 asserted, on purpose). `WRITER_RULE_
+// REGISTRY` itself is KEPT (RULING G4: "keep the registry for the validator's messages") — only its
+// wiring into the prompt is gone.
 
 // ─── K9: Part 1's compose change is INTENDED — pin one GILDAN row and one spec-null row ────────
 

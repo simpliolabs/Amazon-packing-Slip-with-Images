@@ -15,9 +15,9 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import {
-  buildAdmittedUnits, judgeWriterArrangement, validateArrangement, buildWriterPrompt,
+  buildAdmittedUnits, judgeWriterArrangement, validateArrangement,
   writerReadabilityVerdict, runWriterForDesign, mandatoryBrandStatus, WRITER_RULE_REGISTRY,
-  renderArrangement,
+  renderArrangement, IH_WRITER_RETRY_CAP, enumerateWriterCandidates,
   type AdmittedUnit, type ArrangementPart,
 } from './itemHighlightWriter'
 import { lineCarriesBrand } from './itemHighlightComposer'
@@ -260,86 +260,60 @@ describe('RULING S1: a garment-head unit is offered only when an identity unit w
     expect(neverRows.map((u) => `${u.kind}:${u.text}`)).toEqual([])
   })
 
-  // The prompt: no DESIGN NAME line, and no garment-head units in the ADMITTED UNITS json, when
-  // no identity survives — folds in m2 ("a dropped identity is still sent as the DESIGN NAME").
-  it('buildWriterPrompt: with NO identity unit admitted, the user message never mentions "DESIGN NAME"', () => {
-    const units = buildAdmittedUnits(composed, { designName: 'Disney Squad', truthCtx })
-    const { user } = buildWriterPrompt(units, 'Disney Squad', [])
-    expect(user).not.toMatch(/DESIGN NAME/)
-    expect(user).not.toMatch(/Disney Squad/)
-  })
-  it('buildWriterPrompt: WITH an identity unit admitted, the DESIGN NAME line IS sent, reproduced exactly', () => {
-    const units = buildAdmittedUnits(composed, { designName: 'Retro Sunset', truthCtx })
-    const { user } = buildWriterPrompt(units, 'Retro Sunset', [])
-    expect(user).toMatch(/DESIGN NAME \(reproduce spelling EXACTLY.*"Retro Sunset"/)
+  // RULING G3/G4 (fix round G1): the two "buildWriterPrompt: ... DESIGN NAME" pins that used to
+  // live here are RETIRED — `buildWriterPrompt` now renders a candidate list, never an ADMITTED
+  // UNITS json or a DESIGN NAME line built from `units` at all (`itemHighlightWriterFixRoundG3.
+  // test.ts` pins the new prompt's OWN design-name handling). What survives unchanged is `buildAdmittedUnits` itself, exercised immediately below through BOTH produce* paths.
+
+  // Through the REAL enumerateWriterCandidates: a headless-identity design never offers a
+  // garment-head unit to the search AT ALL (it is structurally excluded — `enumerateWriterCandidates`
+  // only ever abuts a garment-head unit directly after an IDENTITY unit; with none admitted, there
+  // is no slot for one to occupy), so no candidate LINE it could ever produce carries one either.
+  // RULING G3/G4 (fix round G1): the two produce*-path pins that used to live here inspected the
+  // OLD prompt's grouped-units JSON directly (`c.user`'s `'garment-head'` group) — retired, since
+  // `buildWriterPrompt` no longer receives `units` at all. What they proved is now proven at the
+  // SOURCE (`buildAdmittedUnits`, already pinned above in this describe block) and reproven here at
+  // the SEARCH layer, which is the only remaining place a garment-head unit could leak from.
+  it('a headless-identity design (designName null): enumerateWriterCandidates never returns a candidate whose LINE contains a garment-head word this design never admitted', () => {
+    const title = 'THE CEO Retro Sunset Shirt'
+    const input = {
+      finalTitle: title, pool: ['Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'].map((k, i) => kw(k, 5000 - i * 10)),
+      apparelProduct: true, blankBrand: PURE_TEE, netTitles: [title], designTokens: [], capacityFamily: false,
+    }
+    const built = buildItemHighlights(input)
+    const units = buildAdmittedUnits(built.composed!, { designName: null, truthCtx: built.truthCtx! })
+    expect(units.some((u) => u.kind === 'garment-head')).toBe(false) // S1's own admission-time guarantee
+    const runTail = (l: string) => runIhTail(l, { titles: [title], blankBrand: PURE_TEE, truthCtx: built.truthCtx!, capacityFamily: false, site: 'fix-round-b8a-test' })
+    const result = enumerateWriterCandidates(units, { truthCtx: built.truthCtx!, runTail })
+    for (const c of result.candidates) {
+      expect(c.parts.some((p) => 'unit' in p && units.find((u) => u.id === p.unit)?.kind === 'garment-head')).toBe(false)
+    }
   })
 
-  // Through BOTH produce* paths: the writer never sends a headless-identity design's garment-head
-  // group, and the composer's own line ships whenever the stub cannot legally use one (there is
-  // none to use).
-  it('produceItemHighlights (single-design path): designName null (no identityDesignName, no designTokens) — the composer\'s OWN line ships, and no garment-head is ever offered to the model', async () => {
-    process.env.IH_WRITER = 'on'
-    try {
-      const title = 'THE CEO Retro Sunset Shirt'
-      const input = {
-        finalTitle: title, pool: ['Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'].map((k, i) => kw(k, 5000 - i * 10)),
-        apparelProduct: true, blankBrand: PURE_TEE, netTitles: [title], designTokens: [], capacityFamily: false,
-      }
-      const composerBaseline = buildItemHighlights(input)
-      const { client, calls } = stubClient(null) // malformed draft -> exhausts retries -> falls back
-      const result = await produceItemHighlights(input, { openai: client })
-      expect(result.value).toBe(composerBaseline.value)
-      expect(calls.length).toBeGreaterThan(0) // the writer DID run (eligible; identity-null alone is not a skip)
-      for (const c of calls) {
-        expect(c.user).not.toMatch(/DESIGN NAME/)
-        // RULING C9 (fix round C1, value minor m3): the OLD `?? '{}'` silent fallback made this pin
-        // compare `[]` to `[]` and pass even if the grouped-units JSON were missing entirely (a
-        // change to the prompt's own shape would go undetected) — assert the match exists FIRST.
-        const m = c.user.match(/(\{"identity":.*\})/)
-        expect(m, c.user).not.toBeNull()
-        expect(JSON.parse(m![1])['garment-head'] ?? []).toEqual([])
-      }
-    } finally { delete process.env.IH_WRITER }
-  })
-
-  it('produceItemHighlightsPerDesign: a design with an untrue-dropped identity — the composer\'s OWN line ships for THAT design, and it never sees a garment-head unit', async () => {
-    process.env.IH_WRITER = 'on'
-    try {
-      const keys = ['A', 'B']
-      const pool = [
-        kwFor('vintage beach vibes', 5000, keys), kwFor('made for lazy summer days', 4500, keys), kwFor('great for weekend road trips', 4000, keys),
-      ]
-      const groups = [
-        { key: 'A', designName: 'Oversized Vibes', skus: [{ sku: 'A1', asin: 'B0A0000001' }], titles: ['THE CEO Oversized Vibes Shirt'] },
-        { key: 'B', designName: 'Retro Sunset', skus: [{ sku: 'B1', asin: 'B0B0000001' }], titles: ['THE CEO Retro Sunset Shirt'] },
-      ]
-      const input = { groups, pool, apparelProduct: true, blankBrand: PURE_TEE, familyTitleText: 'Family' }
-      const composerBaseline = buildItemHighlightsPerDesign(input)
-      const { client, calls } = stubClient(null)
-      const result = await produceItemHighlightsPerDesign(input, { openai: client })
-      const aRow = result.perDesign.find((d) => d.designKey === 'A')!
-      const aBaseline = composerBaseline.perDesign.find((d) => d.designKey === 'A')!
-      expect(aRow.value).toBe(aBaseline.value)
-      const aCalls = calls // both designs share ONE client; filter by absence of "Retro Sunset" head offering is enough
-      expect(aCalls.some((c) => c.user.includes('"Oversized Vibes"'))).toBe(false) // never sent as DESIGN NAME
-      // RULING T2 (fix round B9a, truth Important and value Important): the OLD pin stopped at the
-      // DESIGN-NAME half (m2's own check) and asserted NOTHING about garment heads — it stayed GREEN
-      // under MS1 (`identityAdmittedForHeads = true`) because nothing here ever inspected the
-      // 'garment-head' group. Design A has no identity (its name was dropped as untrue), so per S1
-      // its OWN calls carry NO "DESIGN NAME" line at all (unlike design B's, which carry "Retro
-      // Sunset") — that absence is how A's calls are told apart from B's on the ONE shared client.
-      // Parse A's own grouped-units JSON and assert 'garment-head' is empty on every one of them.
-      const aCallsOnly = calls.filter((c) => !c.user.includes('DESIGN NAME'))
-      expect(aCallsOnly.length, JSON.stringify(calls.map((c) => c.user.slice(0, 40)))).toBeGreaterThan(0)
-      for (const c of aCallsOnly) {
-        // RULING C9 (fix round C1, value minor m3): see the single-design pin above — no silent
-        // `?? '{}'` fallback; the match must exist.
-        const m = c.user.match(/(\{"identity":.*\})/)
-        expect(m, c.user).not.toBeNull()
-        const grouped = JSON.parse(m![1])
-        expect(grouped['garment-head'] ?? [], c.user).toEqual([])
-      }
-    } finally { delete process.env.IH_WRITER }
+  it('produceItemHighlightsPerDesign: a design with an untrue-dropped identity — never admits a garment-head unit for THAT design, proven on the REAL admitted set AND at the search layer', () => {
+    const keys = ['A', 'B']
+    const pool = [
+      kwFor('vintage beach vibes', 5000, keys), kwFor('made for lazy summer days', 4500, keys), kwFor('great for weekend road trips', 4000, keys),
+    ]
+    const groups = [
+      { key: 'A', designName: 'Oversized Vibes', skus: [{ sku: 'A1', asin: 'B0A0000001' }], titles: ['THE CEO Oversized Vibes Shirt'] },
+      { key: 'B', designName: 'Retro Sunset', skus: [{ sku: 'B1', asin: 'B0B0000001' }], titles: ['THE CEO Retro Sunset Shirt'] },
+    ]
+    const input = { groups, pool, apparelProduct: true, blankBrand: PURE_TEE, familyTitleText: 'Family' }
+    const baseline = buildItemHighlightsPerDesign(input)
+    const aRow = baseline.perDesign.find((d) => d.designKey === 'A')!
+    expect(aRow.composed, JSON.stringify(aRow)).toBeDefined()
+    expect(aRow.truthCtx, JSON.stringify(aRow)).toBeDefined()
+    // Design A's own name ("Oversized Vibes") was dropped as untrue at admission (S1's own
+    // premise) — `buildAdmittedUnits` is handed `designName: null` for it here, exactly as
+    // `produceItemHighlightsPerDesign` itself would after the drop.
+    const aUnits = buildAdmittedUnits(aRow.composed!, { designName: null, truthCtx: aRow.truthCtx! })
+    expect(aUnits.some((u) => u.kind === 'garment-head'), JSON.stringify(aUnits)).toBe(false)
+    const aRunTail = (l: string) => runIhTail(l, { titles: ['THE CEO Oversized Vibes Shirt'], blankBrand: PURE_TEE, truthCtx: aRow.truthCtx!, capacityFamily: false, site: 'fix-round-b8a-test' })
+    const aResult = enumerateWriterCandidates(aUnits, { truthCtx: aRow.truthCtx!, runTail: aRunTail })
+    for (const c of aResult.candidates) {
+      expect(c.parts.some((p) => 'unit' in p && aUnits.find((u) => u.id === p.unit)?.kind === 'garment-head')).toBe(false)
+    }
   })
 })
 
@@ -461,40 +435,11 @@ describe('RULING S2: the wear fact stands alone in its own comma clause', () => 
   // no list join to a neighbour of any other kind)") or a real em-dash character (used throughout
   // this file's prose) — so this cannot false-positive on the clause it is meant to protect.
   const NO_BARE_WEAR_JOIN_OFFER_RE = /\bby and\b|em-dash/i
-  it('RULING T4: the rendered GRAMMAR sentence\'s wear-fact EXEMPTION clause grants it no JOIN except the comma its own rule below requires — no quoted "and"/"&"/"—"/"|" token, in the EXCEPT clause specifically (rule (2)\'s OWN opening line legitimately quotes all five as the general list-join set; that is not the wear fact\'s clause)', () => {
-    const { system } = buildWriterPrompt(units, 'Retro Sunset', [], 'Comfort Colors')
-    const grammarSentence = system.slice(system.indexOf('THE GRAMMAR'), system.indexOf('(4) No other glue word exists'))
-    expect(grammarSentence, grammarSentence).toMatch(/EXCEPT a garment-head unit.*wear-fact unit/)
-    expect(grammarSentence, grammarSentence).toMatch(/wear fact STANDS ALONE/)
-    // The wear-fact EXEMPTION clause: from "EXCEPT" (where rule (2) carves the wear fact out of the
-    // list-join grant) to the end of rule (2)'s own prose ("— list joins otherwise …"), just before
-    // rule (3) begins. Scoped narrowly so rule (2)'s OWN opening enumeration of the five list-join
-    // tokens (correct, and unrelated to the wear fact) is never mistaken for a grant.
-    const exceptStart = grammarSentence.indexOf('EXCEPT a garment-head unit')
-    const exceptEnd = grammarSentence.indexOf('— list joins otherwise')
-    expect(exceptStart, grammarSentence).toBeGreaterThan(-1)
-    expect(exceptEnd, grammarSentence).toBeGreaterThan(exceptStart)
-    const exemptionClause = grammarSentence.slice(exceptStart, exceptEnd)
-    expect(exemptionClause, exemptionClause).not.toMatch(NO_QUOTED_WEAR_JOIN_RE)
-    // RULING D4 (fix round C2, phase-c1-review-pins.md Minor / phase-c2-rulings.md D4):
-    // `NO_QUOTED_WEAR_JOIN_RE` only catches a QUOTED "&"/"|" token — the ruled property is "no
-    // and/&/—/| token for the wear fact", quoted or bare. Neither raw character has any legitimate
-    // reason to appear in this clause's prose (the opening list-join enumeration that DOES quote
-    // them sits outside `exemptionClause`'s slice), so a direct character check catches an offer
-    // made without quotation marks too (mutation-proved RED under `T4f_bare`).
-    expect(exemptionClause, exemptionClause).not.toMatch(/[&|]/)
-    // RULING E2: nor a bare "and"/em-dash JOIN OFFER (mutation-proved RED under `T4f_bareand` /
-    // `T4f_baredash`).
-    expect(exemptionClause, exemptionClause).not.toMatch(NO_BARE_WEAR_JOIN_OFFER_RE)
-    // RULING C9 (fix round C1, value minor m1): the OLD wording ("it is never list-joined to a
-    // neighbour either") denied the wear fact EVERY list join, comma included, contradicting rule
-    // (3)'s own closing ("the wear fact STANDS ALONE in its own comma clause") and the WEAR_RULE
-    // registry sentence's explicit "," instruction below — a literal reader of rule (2) ALONE would
-    // find the wear fact has no legal position at all. The exemption clause must grant it its one
-    // real join, the "," its own rule requires, not deny every list join outright.
-    expect(exemptionClause, exemptionClause).toMatch(/","\s*immediately before it/)
-    expect(exemptionClause, exemptionClause).not.toMatch(/never list-joined to a neighbour either/)
-  })
+  // RULING G3/G4 (fix round G1): the "rendered GRAMMAR sentence's wear-fact EXEMPTION clause" pin
+  // that used to live here is RETIRED — `validateGrammar`'s rule (2)/(3) prose (`WRITER_RULE_
+  // REGISTRY`'s `grammar` entry) is UNCHANGED by this round and is never rendered into any prompt
+  // any more; the RETRY MESSAGE it pinned alongside (the enforcement half, through the REAL
+  // `validateArrangement`) is unaffected and stays pinned immediately below.
   it('RULING T4: the relation-wear retry message — for BOTH "with" and "in" — offers no quoted "and"/"&"/"—"/"|" token for the wear fact; its only legal join is the comma its own rule requires', () => {
     for (const relation of ['with', 'in'] as const) {
       const parts: ArrangementPart[] = [{ unit: id('Retro Sunset') }, { unit: garmentHead }, { glue: relation }, { unit: id('Can be worn as Oversized') }]
@@ -669,11 +614,14 @@ describe('RULING S3: the WRITER_RULE_REGISTRY when-predicate SWEEP — a genuine
   ]
 
   for (const fam of FAMILIES) {
-    it(`${fam.id}: the "${fam.expectedRuleId}" sentence renders for this unit set, and the ENUMERATED real arrangements map at least one refusal to it`, () => {
-      const { system } = buildWriterPrompt(fam.units, fam.designName, [], fam.truthCtx.allowedBrand ?? null)
-      const rule = WRITER_RULE_REGISTRY.find((r) => r.id === fam.expectedRuleId)!
-      expect(system.includes(rule.sentence), `${fam.id}: rule "${fam.expectedRuleId}" must be rendered for this unit set`).toBe(true)
-
+    // RULING G3/G4 (fix round G1): this test used to ALSO assert that `fam.expectedRuleId`'s
+    // sentence rendered in `buildWriterPrompt`'s system message — retired, since nothing is taught
+    // to the model any more. The ENUMERATION half — that real arrangements built from real admitted
+    // units map at least one refusal to the expected rule, through the REAL judge — is UNCHANGED
+    // (this round never touched `judgeWriterArrangement`'s grammar/truth/readability gates) and is
+    // exactly the coverage the design change's own bound (`enumerateWriterCandidates`) depends on
+    // never finding a false accept for.
+    it(`${fam.id}: the ENUMERATED real arrangements map at least one refusal to "${fam.expectedRuleId}"`, () => {
       const judgeUnits = fam.judgeUnits ?? fam.units
       const runTail = runTailFor(`THE CEO ${fam.designName} Shirt`, fam.truthCtx.allowedBrand ? CC : PURE_TEE, fam.truthCtx)
       const arrangements = fam.arrangements()
@@ -738,28 +686,32 @@ describe('RULING S4: R2\'s admission-time gender/Unisex pair check is pinned', (
     } finally { warn.mockRestore() }
   })
 
-  it('through produceItemHighlights: neither colliding phrase is ever offered to the model (never appears in any prompt user message)', async () => {
-    process.env.IH_WRITER = 'on'
-    try {
-      const title = 'THE CEO Retro Sunset Shirt'
-      const input = {
-        finalTitle: title, pool: ['Unisex Shirt for Women', 'Mens and Womens Matching Shirt', 'Vintage Beach Vibes', 'Made for Lazy Summer Days'].map((k, i) => kw(k, 5000 - i * 10)),
-        apparelProduct: true, blankBrand: PURE_TEE, netTitles: [title], designTokens: ['Retro Sunset'], capacityFamily: false,
-      }
-      const composerBaseline = buildItemHighlights(input)
-      // Sanity: at least ONE of the two colliding phrases really is a composer candidate (so this
-      // pin is not vacuous — the composer itself could plausibly have shipped it were it not
-      // dropped at the WRITER's own admission gate).
-      const composedAny = composerBaseline.composed
-      expect(composedAny, 'the composer must actually produce a result for this pin to mean anything').toBeDefined()
-      const { client, calls } = stubClient(null)
-      await produceItemHighlights(input, { openai: client })
-      expect(calls.length).toBeGreaterThan(0)
-      for (const c of calls) {
-        expect(c.user).not.toMatch(/Unisex Shirt for Women/)
-        expect(c.user).not.toMatch(/Mens and Womens Matching Shirt/)
-      }
-    } finally { delete process.env.IH_WRITER }
+  // RULING G3/G4 (fix round G1): retired as an end-to-end produce* pin inspecting prompt text
+  // (`buildWriterPrompt` no longer receives `units`, so a dropped phrase could never appear there
+  // even if admission failed — the OLD pin's own channel is gone). Reproven at the SEARCH layer,
+  // the only remaining place a dropped phrase could leak from: a candidate's rendered LINE is built
+  // ONLY from `units`, so if the colliding phrases were never admitted, no candidate can ever carry
+  // them either.
+  it('the two colliding/dropped phrases never appear in ANY enumerated candidate LINE (they were never admitted, so the search has no unit to build one from)', () => {
+    const title = 'THE CEO Retro Sunset Shirt'
+    const input = {
+      finalTitle: title, pool: ['Unisex Shirt for Women', 'Mens and Womens Matching Shirt', 'Vintage Beach Vibes', 'Made for Lazy Summer Days'].map((k, i) => kw(k, 5000 - i * 10)),
+      apparelProduct: true, blankBrand: PURE_TEE, netTitles: [title], designTokens: ['Retro Sunset'], capacityFamily: false,
+    }
+    const built = buildItemHighlights(input)
+    // Sanity: at least ONE of the two colliding phrases really is a composer candidate (so this
+    // pin is not vacuous — the composer itself could plausibly have shipped it were it not dropped
+    // at the WRITER's own admission gate).
+    expect(built.composed, 'the composer must actually produce a result for this pin to mean anything').toBeDefined()
+    const units = buildAdmittedUnits(built.composed!, { designName: 'Retro Sunset', truthCtx: built.truthCtx! })
+    expect(units.find((u) => u.text === 'Unisex Shirt for Women')).toBeUndefined()
+    expect(units.find((u) => u.text === 'Mens and Womens Matching Shirt')).toBeUndefined()
+    const runTail = (l: string) => runIhTail(l, { titles: [title], blankBrand: PURE_TEE, truthCtx: built.truthCtx!, capacityFamily: false, site: 'fix-round-b8a-test' })
+    const result = enumerateWriterCandidates(units, { truthCtx: built.truthCtx!, runTail })
+    for (const c of result.candidates) {
+      expect(c.line).not.toMatch(/Unisex Shirt for Women/)
+      expect(c.line).not.toMatch(/Mens and Womens Matching Shirt/)
+    }
   })
 })
 
@@ -767,13 +719,11 @@ describe('RULING S4: R2\'s admission-time gender/Unisex pair check is pinned', (
 // S5 (Important, value): R4's sentence and retry message come from RELATION_GLUE.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('RULING S5: the readability fidelity sentence and retry message name a JOIN, not a word', () => {
-  it('the rendered sentence says "JOIN" and explicitly excludes a with/in appearing inside a unit\'s own text', () => {
-    const units: AdmittedUnit[] = [{ id: 'u0', text: 'Retro Sunset', kind: 'identity', numberable: false }]
-    const { system } = buildWriterPrompt(units, 'Retro Sunset', [])
-    expect(system).toMatch(/must contain a "with"\/"in" JOIN \(a glue token connecting two units\) — a "with"\/"in" appearing INSIDE a unit's own text does not count/)
-  })
-})
+// RULING G3/G4 (fix round G1): S5's own pin ("the rendered sentence says JOIN...") is RETIRED —
+// `writerReadabilityFidelitySentence()` (the `names-design` registry entry) is UNCHANGED but no
+// longer rendered into any prompt; the READABILITY CHECK it used to teach is enforced exactly as
+// before by `writerReadabilityVerdict`, pinned elsewhere in this file and in
+// `itemHighlightWriterFixRoundB7a.test.ts`'s RULING R4 block.
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // S6 (Important, compliance): R1's produce*-path pins, committed for real.
@@ -933,11 +883,21 @@ describe('RULING S6: R1\'s produce*-path brand pins, committed through BOTH prod
       for (const u of pool) expect(lineCarriesBrand(u.text, 'Comfort Colors'), u.text).toBe(false)
       const parts: ArrangementPart[] = [{ unit: pool[0].id }, { glue: 'with' }, { unit: units.find((u) => u.kind === 'spec-fact')!.id }]
       pool.slice(1).forEach((u, i) => { parts.push({ glue: i === pool.length - 2 ? 'and' : ',' }); parts.push({ unit: u.id }) })
-      const { client } = stubClient({ parts })
+      // RULING G3 (fix round G1, design change): this adversarial `{parts}` object is the OLD
+      // compose-time answer shape. Under the chooser, `runWriterForDesign` never interprets a
+      // client response as an ARRANGEMENT any more — only as `{"pick": <index>}` — so this stub
+      // has no "pick" key at all and is indistinguishable from a client failure: every attempt is
+      // retried up to `IH_WRITER_RETRY_CAP`, then the search's OWN (already brand-safe, by
+      // construction — the identity leads every candidate here, and it IS the carrier) top
+      // candidate ships instead. The adversary is never even OFFERED to `judgeWriterArrangement`
+      // — a stronger guarantee than the old retry-loop defence this test used to pin.
+      const { client, calls } = stubClient({ parts })
       const result = await produceItemHighlights(input, { openai: client })
-      expect(result.value).toBe(composerBaseline.value) // fell back — the adversary never shipped
-      expect(result.writerLog?.accepted).toBe(false)
-      expect(result.writerLog?.reasons.some((r) => r.includes('does not name or evoke the design'))).toBe(true)
+      expect(calls.length).toBe(IH_WRITER_RETRY_CAP) // every attempt was the SAME unusable shape
+      // Whichever safe result shipped (the enumerated candidate or the composer's own fallback),
+      // it MUST carry the brand — never the adversary's own unbranded text.
+      expect(lineCarriesBrand(result.value, 'Comfort Colors'), result.value).toBe(true)
+      expect(result.value).not.toBe(renderArrangement(parts, units)) // the adversary's own line never ships
     } finally { delete process.env.IH_WRITER }
   })
 
@@ -971,11 +931,16 @@ describe('RULING S6: R1\'s produce*-path brand pins, committed through BOTH prod
       expect(line.length, line).toBeGreaterThanOrEqual(CONTENT_CONTRACT.itemHighlights.min) // RULING T3.5: IN-BAND
       expect(line.length, line).toBeLessThanOrEqual(CONTENT_CONTRACT.itemHighlights.max)
 
+      // RULING G3 (fix round G1, design change): as in the test above, this `{parts}` stub has no
+      // "pick" key — it is never judged as the adversary's own arrangement any more. Whatever ships
+      // (the search's own candidate, or the composer's fallback) must carry the brand regardless.
+
       // SINGLE-design path.
-      const { client } = stubClient({ parts })
+      const { client, calls } = stubClient({ parts })
       const single = await produceItemHighlights(input, { openai: client })
-      expect(single.value).toBe(composerBaseline.value) // fell back
-      expect(single.writerLog?.accepted).toBe(false)
+      expect(calls.length).toBe(IH_WRITER_RETRY_CAP)
+      expect(lineCarriesBrand(single.value, 'Comfort Colors'), single.value).toBe(true)
+      expect(single.value).not.toBe(line) // the adversary's own line never ships
 
       // PER-DESIGN path — the same identity, the same adversary, offered as design A's own draft.
       const keys = ['A']
@@ -989,9 +954,8 @@ describe('RULING S6: R1\'s produce*-path brand pins, committed through BOTH prod
       const { client: perClient } = stubClient({ parts })
       const per = await produceItemHighlightsPerDesign(perInput, { openai: perClient })
       const aRow = per.perDesign.find((d) => d.designKey === 'A')!
-      expect(aRow.value).toBe(aBaseline.value) // fell back
-      const aLog = per.writerLog?.find((w) => w.design === 'A')
-      expect(aLog?.accepted).toBe(false)
+      expect(lineCarriesBrand(aRow.value, 'Comfort Colors'), aRow.value).toBe(true)
+      expect(aRow.value).not.toBe(line)
     } finally { delete process.env.IH_WRITER }
   })
 

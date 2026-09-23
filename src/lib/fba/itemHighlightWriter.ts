@@ -1562,73 +1562,204 @@ function writerReadabilityFidelitySentence(): string {
   return `READABILITY: split the line at every ${splitChars} into clauses. AT LEAST ONE clause must contain a "${relationWords}" JOIN (a glue token connecting two units) — a "${relationWords}" appearing INSIDE a unit's own text does not count, and a line with ZERO such join clauses reads as a keyword list and is rejected. After that, a RUN OF TWO OR MORE consecutive clauses that all lack a "${relationWords}" join counts as ONE list section (a trailing run of any length still counts once; a SINGLE such clause on its own, between two relation clauses, is ordinary prose and does NOT count) — AT MOST ONE such list section is allowed; a SECOND one, split off by another relation clause, will also be rejected. If the design has an identity unit, the line must also name or evoke it.`
 }
 
-/** RULING F3 (fix round F1, Important): builds ONE legal, IN-BAND example arrangement
- *  DETERMINISTICALLY from THIS design's own admitted units — the live shadow run (2026-09-23)
- *  measured 18 attempts, taught only by prose rules, producing ZERO accepted lines. A concrete,
- *  VALIDATED answer for the EXACT units this design offers teaches the shape no amount of prose
- *  did. Template, legal by CONSTRUCTION under the CURRENT grammar (never a parallel notion of
- *  "legal" — every step is re-verified against the real `validateArrangement` before this ever
- *  returns): identity, then its garment-head directly abutted (rule 1's one legal abutment), then
- *  the composer's mandatory brand unit (if `needBrand` — added FIRST, unconditionally, because
- *  omitting it would fail `validateArrangement`'s own brand-required rule regardless of length),
- *  then ordinary pool units list-joined one at a time until the floor is reached (never past the
- *  ceiling), then AT MOST ONE relation clause carrying a spec fact (the exact shape F1 exists to
- *  teach: "<pool units>, with <spec fact>"), then the wear fact alone at the very end. Returns
- *  `null` — the prompt simply omits the example block — whenever no combination of THIS design's
- *  own units reaches the band, or the template does not validate for this design's specific unit
- *  shape; an unvalidated example would teach the model the WRONG thing (F3's own words). */
-export function buildWorkedExample(units: readonly AdmittedUnit[]): { json: { parts: ArrangementPart[] }; line: string } | null {
-  const min = CONTENT_CONTRACT.itemHighlights.min
-  const max = CONTENT_CONTRACT.itemHighlights.max
-  const parts: ArrangementPart[] = []
-  const usedIds = new Set<string>()
+// RULING G3/G4 (fix round G1, phase-g1-rulings.md, the design change, spec §3a): `buildWorkedExample`
+// (RULING F3) is DELETED, not merely unused. `phase-f1-review.md` §3 measured its own worked example
+// rejected by the REAL judge 130 of 130 times — it was verified only against `validateArrangement` +
+// the band, never the acceptance oracle (`judgeWriterArrangement`) the model's real answer is judged
+// by, so it taught the model to reach for the exact keyword-list shape the writer exists to replace,
+// while telling it that shape "passes every rule above". The class fix below does not re-verify a
+// SINGLE hand-built example more carefully — it makes "verified against the wrong gate" structurally
+// impossible: every LINE the model can ever be shown has ALREADY been judged by the real oracle,
+// because it is a member of `enumerateWriterCandidates`'s own output, never a template.
 
-  /** Appends `unit` (joined by `glue` when `parts` is already non-empty) IF the result still fits
-   *  the ceiling; returns whether it was appended. Never re-implements `renderArrangement` — every
-   *  trial is rendered by the SAME production function the final line renders with. */
-  const tryAppend = (glue: readonly ArrangementPart[], unit: AdmittedUnit): boolean => {
-    if (usedIds.has(unit.id)) return false
-    const lead = parts.length ? glue : []
-    const trial = [...parts, ...lead, { unit: unit.id }]
-    if (renderArrangement(trial, units).length > max) return false
-    parts.push(...lead, { unit: unit.id })
-    usedIds.add(unit.id)
-    return true
-  }
+// ─── G3: THE CHOOSER (phase-g1-rulings.md, design change items 1-2) — code enumerates and ranks;
+// the model only picks an index (below, in `buildWriterPrompt`/`runWriterForDesign`) ───────────────
 
+export interface WriterCandidate {
+  parts: readonly ArrangementPart[]
+  /** The FULL acceptance path's own output bytes (`judgeWriterArrangement`'s `value`) — never
+   *  re-rendered here, so a candidate the model is shown is BYTE-IDENTICAL to what would ship. */
+  line: string
+  /** Ranking inputs (G3 point 2), computed once per candidate from its own `parts`/`line` — never
+   *  recomputed differently by a caller, so a candidate's rank cannot drift from what produced it. */
+  keywordShapedClauses: number
+  distinctPoolUnits: number
+  lengthFromTarget: number
+}
+
+export interface EnumerateWriterCandidatesResult {
+  /** Ranked BEST FIRST (G3 point 2), already sliced to at most `WRITER_CANDIDATE_TOP_K` — index 0
+   *  is "candidate 1" in the prompt AND the fallback every failure mode collapses onto (G3 point 4). */
+  candidates: readonly WriterCandidate[]
+  /** How many full `judgeWriterArrangement` calls this search actually spent — logged (never only
+   *  asserted) so a caller/test can tell a capped search from an exhausted one. */
+  evaluated: number
+  /** True iff either bound below was hit before the search space was exhausted — the search STOPS
+   *  the instant this would go true, so `evaluated`/the pool units considered are never exceeded,
+   *  never merely reported after the fact. */
+  bounded: boolean
+}
+
+/** G3 point 1's bound, DOCUMENTED (the ruling's own words: "the bound is documented and logged"):
+ *  at most this many of a design's OWN ordinary pool units are ever considered — every combination
+ *  of a further unit is a further factor of 2 on the subset search below, so a family offering more
+ *  than this has only its LOWEST-priority (composer-order-tail) pool units dropped from the search;
+ *  the identity/garment-head/brand/wear-fact/relation units are NEVER subject to this cap. */
+const WRITER_CANDIDATE_MAX_POOL_UNITS = 8
+/** Grammar rule 3 (spec §2c): "with"/"in" opens a relation clause that stays open until the next
+ *  ",", and EVERY unit reached by a LIST join before that "," is inside it too — "with Ring-Spun
+ *  Cotton, Classic Fit and Crew Neck" is legally ONE relation clause carrying three facts, not
+ *  three separate clauses. A search that only ever tried ONE relation-target unit per candidate
+ *  could return zero candidates for a design whose safe pool content, alone, cannot reach the
+ *  floor without repeating a word — exactly the shape that under-counted this bound before it was
+ *  added: stacking every true spec fact into ONE clause is what the composer's own flag-off line
+ *  already does (comma-joined, no relation word required of it); this cap is the search's mirror
+ *  of that same freedom, bounded the same way the pool subset is. */
+const WRITER_CANDIDATE_MAX_REL_UNITS = 6
+/** At most this many full `judgeWriterArrangement` calls (each already running its own `runTail`)
+ *  are spent evaluating candidates for ONE design, across every subset/relation-unit/relation-glue/
+ *  wear-fact combination — the search stops the INSTANT this is reached, never merely warns after
+ *  spending more. */
+const WRITER_CANDIDATE_MAX_EVALUATED = 300
+/** G3 point 3: "the top K (K <= 8) RENDERED LINES". */
+export const WRITER_CANDIDATE_TOP_K = 8
+
+/** Appends `unit` to `parts`, joined by `glue` UNLESS `parts` is still empty (nothing to join to
+ *  yet) — a pure function (never mutates `parts`), so the search below can branch freely without
+ *  one branch's trial corrupting another's. */
+function appendUnit(parts: readonly ArrangementPart[], glue: readonly ArrangementPart[], unit: AdmittedUnit): ArrangementPart[] {
+  return [...parts, ...(parts.length ? glue : []), { unit: unit.id }]
+}
+
+/** G3 point 1: enumerates arrangements built ONLY from shapes known-legal by construction — the
+ *  SAME template `buildWorkedExample` (RULING F3, deleted above) used to hand-build exactly ONE of:
+ *  identity, its garment-head directly abutted, the mandatory brand list-joined in, then a SUBSET
+ *  (never only the greedy prefix F3 tried) of the design's own ordinary pool units, THEN exactly one
+ *  relation clause (a spec-fact unit introduced by "with" or "in" — readability requires at least
+ *  one, so a candidate with none would only be refused; never searched), then optionally the wear
+ *  fact alone at the end. Every candidate that reaches the returned list has been judged by the
+ *  REAL, FULL acceptance path (`judgeWriterArrangement` — arrangement grammar, span truth, the
+ *  repeat budget, the tail's byte-identity + content/truth net, readability, the push-seam
+ *  classifier) and PASSED it — nothing downstream re-checks a candidate this function returns. */
+export function enumerateWriterCandidates(
+  units: readonly AdmittedUnit[],
+  ctx: JudgeWriterLineCtx,
+): EnumerateWriterCandidatesResult {
   const identity = units.find((u) => u.kind === 'identity') ?? null
   const garmentHead = identity ? units.find((u) => u.kind === 'garment-head') ?? null : null
   const brandUnit = units.find((u) => u.isBrand) ?? null
   const wearFact = units.find((u) => u.kind === 'wear-fact') ?? null
-  const relationCandidate = units.find((u) => u.kind === 'spec-fact' && !u.isBrand) ?? null
-  const ordinaryPool = units.filter((u) => u.kind === 'pool' && !u.isBrand)
+  // Mirrors `relationTargetViolation`'s OWN eligibility exactly (`SPEC_KINDS`, minus the brand
+  // carrier) — never a second, looser notion of "can open a relation" that could offer the search a
+  // unit the real validator would refuse regardless.
+  const allRelationCandidates = units.filter((u) => SPEC_KINDS.has(u.kind) && !u.isBrand)
+  const relationCandidates = allRelationCandidates.slice(0, WRITER_CANDIDATE_MAX_REL_UNITS)
+  const allOrdinaryPool = units.filter((u) => u.kind === 'pool' && !u.isBrand)
+  const ordinaryPool = allOrdinaryPool.slice(0, WRITER_CANDIDATE_MAX_POOL_UNITS)
 
-  if (identity) {
-    tryAppend([], identity)
-    if (garmentHead) tryAppend([], garmentHead) // rule 1's ONE legal abutment: NO glue at all.
+  // Every PREFIX variant to try: identity+garmentHead-abutted (rule 1's usual shape) AND, whenever
+  // a garmentHead exists, identity ALONE (no abutment). Both are legal by construction — the
+  // abutment is never REQUIRED by any rule — and trying both is not merely thoroughness: an
+  // abutment renders identity and garmentHead joined by a bare SPACE (`renderArrangement`'s own
+  // no-glue join), so an identity ending in sentence punctuation followed by that space
+  // ("Boss Lady! Shirt") trips the SAME tail sentence-shape rule a trailing "!" at the very end of
+  // the line does — exactly the class RULING E1 (fix round C3) proved has 144 of 360 real in-band
+  // arrangements, ALL of which skip the abutment (`d5scope3.txt`'s own first-accepted line opens
+  // "Boss Lady!," — a comma, never the bare abutment). Skipping the abutment is the ONLY way this
+  // search can ever find one of them; trying only the abutted shape (as `buildWorkedExample`,
+  // RULING F3, deleted above, always did) would return zero candidates for every such design.
+  const prefixVariants: ArrangementPart[][] = []
+  {
+    const withoutHead: ArrangementPart[] = identity ? appendUnit([], [], identity) : []
+    if (brandUnit) prefixVariants.push(appendUnit(withoutHead, [{ glue: ',' }], brandUnit))
+    else prefixVariants.push(withoutHead)
+    if (identity && garmentHead) {
+      const withHead = appendUnit(withoutHead, [], garmentHead) // rule 1's ONE legal abutment: NO glue at all.
+      prefixVariants.push(brandUnit ? appendUnit(withHead, [{ glue: ',' }], brandUnit) : withHead)
+    }
   }
-  // The brand is mandatory whenever it exists in `units` (the SAME fallback `validateArrangement`
-  // itself uses when `needBrand` is omitted — see its own doc comment) — added BEFORE the band-fill
-  // loop below so it is never crowded out once the floor is reached.
-  if (brandUnit && !tryAppend([{ glue: ',' }], brandUnit)) return null // cannot fit the mandatory brand at all
-  for (const u of ordinaryPool) {
-    if (renderArrangement(parts, units).length >= min) break
-    tryAppend([{ glue: ',' }], u)
-  }
-  // The ONE relation clause — the shape F1 exists to teach ("<units>, with <spec fact>") — only
-  // once something already precedes it (a relation join can never OPEN the line).
-  if (relationCandidate && parts.length) tryAppend([{ glue: ',' }, { glue: 'with' }], relationCandidate)
-  // The wear fact stands alone in its own comma clause, at the very END (never the start).
-  if (wearFact && parts.length) tryAppend([{ glue: ',' }], wearFact)
 
-  if (parts.length === 0) return null
-  const line = renderArrangement(parts, units)
-  if (line.length < min || line.length > max) return null
-  const json = { parts }
-  // RULING F3's own words: "an example that does not validate would teach the wrong thing." Never
-  // trust the construction above alone — re-check it against the REAL validator before returning.
-  if (!validateArrangement(json, units).ok) return null
-  return { json, line }
+  const min = CONTENT_CONTRACT.itemHighlights.min
+  const max = CONTENT_CONTRACT.itemHighlights.max
+  const target = CONTENT_CONTRACT.itemHighlights.fillTarget
+
+  const seen = new Set<string>() // de-dupe an identical rendered PARTS shape reached two ways
+  const candidates: WriterCandidate[] = []
+  let evaluated = 0
+  let bounded = allOrdinaryPool.length > ordinaryPool.length || allRelationCandidates.length > relationCandidates.length
+
+  const n = ordinaryPool.length
+  outer:
+  for (const prefix of prefixVariants) {
+  for (let mask = 0; mask < (1 << n); mask++) {
+    // Build THIS subset's pool clause, pruning the INSTANT it is already over the ceiling — G3
+    // point 1's "prune on the band early": rendered length is monotonically non-decreasing as units
+    // are appended, so no later addition (relation, wear fact) could ever bring it back in band.
+    let poolParts = prefix
+    let overMax = false
+    for (let i = 0; i < n; i++) {
+      if (!(mask & (1 << i))) continue
+      poolParts = appendUnit(poolParts, [{ glue: ',' }], ordinaryPool[i])
+      if (renderArrangement(poolParts, units).length > max) { overMax = true; break }
+    }
+    if (overMax) continue
+
+    // Readability's OWN "at least one relation clause" rule means a candidate with none would only
+    // ever be refused — never searched. Both relation words are tried: they are structurally
+    // interchangeable to the grammar/validator, but NOT to `phraseTruthVerdict` (G1's own review
+    // measured "with"/"in" reaching different truth verdicts on the same words), so trying only one
+    // would silently narrow the search below what the oracle actually accepts. Every NON-EMPTY
+    // SUBSET of relation candidates is tried, in order, as ONE open clause (WRITER_CANDIDATE_MAX_
+    // REL_UNITS's own doc comment) — never only a single relation-target unit.
+    const rn = relationCandidates.length
+    for (let relMask = 1; relMask < (1 << rn); relMask++) {
+      const relSelected: AdmittedUnit[] = []
+      for (let i = 0; i < rn; i++) if (relMask & (1 << i)) relSelected.push(relationCandidates[i])
+      for (const relGlue of ['with', 'in'] as const) {
+        let relParts = appendUnit(poolParts, [{ glue: ',' }, { glue: relGlue }], relSelected[0])
+        let relOverMax = renderArrangement(relParts, units).length > max
+        for (let i = 1; i < relSelected.length && !relOverMax; i++) {
+          relParts = appendUnit(relParts, [{ glue: ',' }], relSelected[i])
+          if (renderArrangement(relParts, units).length > max) relOverMax = true
+        }
+        if (relOverMax) continue
+        for (const useWearFact of wearFact ? [false, true] : [false]) {
+          const finalParts = useWearFact ? appendUnit(relParts, [{ glue: ',' }], wearFact!) : relParts
+          const line = renderArrangement(finalParts, units)
+          if (line.length < min || line.length > max) continue
+          const key = JSON.stringify(finalParts)
+          if (seen.has(key)) continue
+          seen.add(key)
+          if (evaluated >= WRITER_CANDIDATE_MAX_EVALUATED) { bounded = true; break outer }
+          evaluated++
+          const verdict = judgeWriterArrangement({ parts: finalParts }, units, ctx)
+          if (!verdict.ok) continue
+          const shapes = clauseShapesFromParts(finalParts)
+          candidates.push({
+            parts: finalParts,
+            line: verdict.value,
+            keywordShapedClauses: shapes.filter(Boolean).length,
+            distinctPoolUnits: finalParts.filter((p) => 'unit' in p && ordinaryPool.some((u) => u.id === p.unit)).length,
+            lengthFromTarget: Math.abs(verdict.value.length - target),
+          })
+        }
+      }
+    }
+  }
+  }
+
+  // G3 point 2's ranking: a relation clause present is guaranteed for EVERY candidate here (never a
+  // ranking factor — it is an invariant, enforced above, not a preference); then fewer keyword-
+  // shaped clauses, then closer to the fill target, then more distinct pool units, then stable
+  // (evaluation) order as the final tie-break — deterministic, never `Math.random`, so the SAME
+  // units always rank the SAME way.
+  const ranked = [...candidates].sort((a, b) =>
+    a.keywordShapedClauses - b.keywordShapedClauses ||
+    a.lengthFromTarget - b.lengthFromTarget ||
+    b.distinctPoolUnits - a.distinctPoolUnits ||
+    0,
+  )
+  return { candidates: ranked.slice(0, WRITER_CANDIDATE_TOP_K), evaluated, bounded }
 }
 
 /** W1: the prompt — the admitted units grouped by kind WITH THEIR IDS, the design name EXACTLY as
@@ -1647,64 +1778,31 @@ export function buildWorkedExample(units: readonly AdmittedUnit[]): { json: { pa
  *  unit at all (its title already carries the brand). Every production caller (`askWriter`) passes
  *  it; the every test caller that omits it (pre-Q8) gets the pre-Q8 behaviour (gated on `brandUnit`
  *  alone) — additive, never a required-argument break. */
-export function buildWriterPrompt(units: readonly AdmittedUnit[], designName: string | null, priorViolations: readonly string[], allowedBrand: string | null = null): { system: string; user: string } {
-  const grouped = unitsByKind(units)
-  const brandUnit = units.find((u) => u.isBrand) ?? null
-  // RULING R3 (fix round B7a, value Blocking): each registry entry's OWN `when` decides whether its
-  // sentence renders — never a second, hand-maintained condition here. `whenCtx` carries exactly the
-  // inputs a `when` predicate may read (`WriterRuleWhenCtx`).
-  const whenCtx: WriterRuleWhenCtx = { units, brandUnit, allowedBrand }
-  const system = WRITER_RULE_REGISTRY
-    .filter((r) => !r.when || r.when(whenCtx))
-    .map((r) => r.sentence)
-    .join(' ')
-  // RULING K4 (value I3): each unit's character length and the join costs, so the model can COUNT
-  // toward the band instead of guessing — the value lens measured the commonest failure
-  // (under-floor) carried no way for the model to know how close it was.
-  const lengths = units.map((u) => `${u.id}=${u.text.length}c`).join(', ')
-  // RULING P7 (fix round B5, value Minor M1): " in " is 4 chars (1 space + "in" + 1 space), not
-  // 5-7 — split each join word out individually instead of one lumped, imprecise range.
-  const joinCosts = '", " = 2 chars, " and " = 5 chars, " with " = 6 chars, " in " = 4 chars, " — "/" | "/" & " = 3 chars, "a "/"an " = 2-3 chars'
-  const min = CONTENT_CONTRACT.itemHighlights.min
-  const max = CONTENT_CONTRACT.itemHighlights.max
-  // RULING F3 (fix round F1): built ONCE per prompt render, from THIS design's own admitted units —
-  // see `buildWorkedExample`'s own doc comment for the template and the `null` fallback.
-  const example = buildWorkedExample(units)
-  // RULING S1 (fix round B8a, value Blocking B1, folding in m2): NEVER send the DESIGN NAME line
-  // when no identity unit was admitted — `designName` null, OR the name was dropped for a trademark,
-  // a celebrity, or an untrue claim (`buildAdmittedUnits`'s identity loop). Before this, a DROPPED
-  // name ("Disney Squad") was still sent with the "reproduce spelling EXACTLY" instruction even
-  // though there is no identity unit id anywhere in `units` for the model to place — an impossible
-  // instruction that leaked nothing (the model cannot write free text), but named a design the writer
-  // was never going to be allowed to use.
-  const hasIdentityUnit = units.some((u) => u.kind === 'identity')
+/** G4 (phase-g1-rulings.md): "It now shows numbered lines and asks for one index... Nothing about
+ *  grammar, bands or repeats — those are already proven before the model sees the list." Every
+ *  candidate here already passed the FULL acceptance path (`enumerateWriterCandidates`'s own doc
+ *  comment) — the grammar lesson (`WRITER_RULE_REGISTRY`'s prose), the worked example (`buildWorked
+ *  Example`, deleted) and the band/repeat lectures taught a model how to compose a line that would
+ *  pass; a model that only PICKS among already-passing lines needs none of that, and `phase-f1-
+ *  review.md` measured all three actively misleading (a rule text that contradicted the code, a
+ *  refusal named nothing the model was taught, an example the real judge rejected 130/130). RULING
+ *  G4 also says "Keep the registry for the validator's messages" — `WRITER_RULE_REGISTRY` stays
+ *  exported, UNUSED by this function, so it still documents what the validator/judge enforce and so
+ *  a test can assert none of its sentences leak into this prompt any more
+ *  (`itemHighlightWriterFixRoundG3.test.ts`, "no rule sentence it no longer needs to teach"). */
+export function buildWriterPrompt(candidates: readonly WriterCandidate[], designName: string | null): { system: string; user: string } {
+  const system = [
+    'You choose ONE Amazon Item Highlight line for a t-shirt/apparel listing from a NUMBERED list of candidate lines — you do not write or edit any text, and no grammar, length or repeat rule is yours to apply: every candidate below has ALREADY been verified to satisfy every one of them.',
+    'Return JSON: {"pick": <integer>} — the number of the ONE candidate you choose, and nothing else. Do not invent a number outside the list, and do not return any other key.',
+    'Pick the candidate that reads best to a shopper — the one that sounds most like a real sentence about this product, not a list of keywords. If you are unsure, picking 1 is always a safe answer.',
+  ].join(' ')
+  const list = candidates.map((c, i) => `${i + 1}. ${c.line}`).join('\n')
   const user = [
-    hasIdentityUnit ? `DESIGN NAME (reproduce spelling EXACTLY, including any typo): ${JSON.stringify(designName ?? '')}` : '',
-    `ADMITTED UNITS (json), grouped by kind, each {"id":"...","text":"..."} — arrange these ids, never their text:`,
-    JSON.stringify(grouped),
-    // RULING P2 (fix round B5, compliance Important, value Blocking 2): name the REQUIRED brand
-    // unit's id EXPLICITLY here — the "brand" GROUP above is EMPTY whenever the brand is pool-
-    // sourced (K2 classes it `kind: 'pool'`), so a model that only reads the grouped JSON has no
-    // way to find it there.
-    brandUnit ? `REQUIRED BRAND UNIT: id "${brandUnit.id}" (text: ${JSON.stringify(brandUnit.text)}) — list-join only.` : '',
-    `Unit character lengths (to help you count toward the ${CONTENT_CONTRACT.itemHighlights.min}-${CONTENT_CONTRACT.itemHighlights.max} band): ${lengths}`,
-    `Join costs (added between units, roughly): ${joinCosts}`,
-    // RULING F4 (fix round F1, Important): make the band impossible to miss. Three of 18 live
-    // shadow attempts (2026-09-23) rendered 211-318 chars against a max of 125 — the system
-    // message's one-sentence "must be 97-125 characters" was not read as a HARD limit. State the
-    // max again here, plainly, beside the per-unit costs the model needs to count with.
-    `THE MAXIMUM IS ${max} CHARACTERS. A rendered line over ${max} characters is DISCARDED — not truncated, not accepted with a warning, not fixed up afterward. Add up the units you plan to use plus every join between them BEFORE you answer, and stop choosing units once you are near the limit.`,
-    // RULING F3 (fix round F1, Important): a worked example built by CODE from THIS design's own
-    // admitted units — rules alone produced 18 refusals and 0 accepted lines in the live shadow
-    // run. `example` is `null` whenever this design's own units cannot reach the band or the
-    // template does not validate for this exact shape (`buildWorkedExample`'s own doc comment) —
-    // the block below is simply omitted then, never a broken or unvalidated example.
-    example
-      ? `EXAMPLE — a VALID answer for this exact design (built from the units above, and it passes every rule above): ${JSON.stringify(example.json)} renders to: ${JSON.stringify(example.line)} — ${example.line.length} chars, inside the ${min}-${max} band. This is ONE legal arrangement, not the only one; build your OWN choice of units and joins from what is offered above.`
-      : '',
-    priorViolations.length
-      ? `Your previous attempt was REJECTED for: ${priorViolations.join('; ')}. Fix these specific problems by choosing a DIFFERENT arrangement — do not repeat the same rejected parts.`
-      : '',
+    designName ? `DESIGN: ${JSON.stringify(designName)}` : '',
+    `CANDIDATES (already verified — pick one by number):\n${list}`,
+    // Literal word "json" (bullet/backend council convention, `bullet-pad-pool-exhaustion` memory)
+    // so `response_format: json_object` never 400s.
+    `Reply with JSON only: {"pick": <integer 1-${candidates.length}>}.`,
   ].filter(Boolean).join('\n')
   return { system, user }
 }
@@ -1736,10 +1834,9 @@ const WRITER_DEADLINE_SKIPPED: unique symbol = Symbol('writer-deadline-skipped')
  *  retry loop) racing against `askWriter`'s OWN `remainingMs <= 0` check — deadline passes in the
  *  gap between them — over-counted a call that spent nothing. */
 async function askWriter(
-  openai: OpenAI, model: string, units: readonly AdmittedUnit[], designName: string | null,
-  priorViolations: readonly string[], deadlineAt?: number, allowedBrand?: string | null,
+  openai: OpenAI, model: string, candidates: readonly WriterCandidate[], designName: string | null, deadlineAt?: number,
 ): Promise<unknown> {
-  const { system, user } = buildWriterPrompt(units, designName, priorViolations, allowedBrand ?? null)
+  const { system, user } = buildWriterPrompt(candidates, designName)
   const remainingMs = deadlineAt !== undefined ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY
   if (remainingMs <= 0) {
     console.warn(`[ih-writer] ${model} call skipped — writer deadline already exceeded`)
@@ -1768,7 +1865,14 @@ async function askWriter(
 
 /** B7: 1 + 2 retries PER DESIGN. Distinct from `ihWriterMaxCallsBudget()` above (the PER-REGEN
  *  budget across every design, W8) — renamed from the pre-W8 export `IH_WRITER_MAX_CALLS` to avoid
- *  colliding with that new, differently-scoped env-var name. */
+ *  colliding with that new, differently-scoped env-var name.
+ *  RULING G3 point 5 (fix round G1, phase-g1-rulings.md): "One call per design. No retries for
+ *  grammar. The retry cap stays for client errors only." There is no grammar left for a retry to
+ *  fix — the model only picks an index, and every pick (valid, malformed, missing, out of range)
+ *  resolves immediately (`runWriterForDesign`'s "a key WAS returned" branch). This cap now bounds
+ *  ONLY the case `askWriter` returns literally nothing usable at all (no "pick" key — the SAME
+ *  shape a transport failure and an empty model response both collapse to), so a single dropped
+ *  connection does not spend the design's whole run on one bad network moment. */
 export const IH_WRITER_RETRY_CAP = 3
 
 export interface WriterRunResult {
@@ -1782,12 +1886,16 @@ export interface WriterDeps {
   openai?: OpenAI | null
 }
 
-/** B7/B8/W8: runs the bounded writer loop for ONE design and returns whether an accepted line
- *  resulted. Eligibility (B8, extended by W8): no call for `unrated-pool`, zero admitted pool
- *  candidates, a non-apparel family (`garmentFamily === 'none'`), fewer than 2 admitted units total,
- *  or an admitted set whose units — each used once, joined with single separators — cannot reach the
- *  contract's floor. Fail-closed (B7): after `IH_WRITER_RETRY_CAP` attempts, `accepted: false` — the
- *  caller falls back to the composer's OWN vetted result, never an empty string over stored content. */
+/** B7/B8/W8, rebuilt as a CHOOSER by RULING G3 (fix round G1, phase-g1-rulings.md). Eligibility
+ *  (B8, extended by W8, UNCHANGED by G3): no call for `unrated-pool`, zero admitted pool candidates,
+ *  a non-apparel family (`garmentFamily === 'none'`), fewer than 2 admitted units total, or an
+ *  admitted set whose units — each used once, joined with single separators — cannot reach the
+ *  contract's floor; every one of these still returns `accepted: false, calls: 0` before any search
+ *  even runs, exactly as before. PAST that point, G3 changes the shape: `enumerateWriterCandidates`
+ *  runs the search (never billable), and `accepted: false` now happens ONLY when that search finds
+ *  ZERO candidates — every OTHER outcome (a model's valid pick, a malformed pick, a missing key, an
+ *  out-of-range index, a client error, a timeout) SHIPS a candidate that has already passed the full
+ *  acceptance oracle, `accepted: true`, because the model's job is now taste, never safety. */
 /** RULING P10 (fix round B5, wire Blocking 3): thrown by `runWriterForDesign` INSTEAD of the bare
  *  underlying error, carrying the number of billable calls ALREADY MADE before the throw (never 0
  *  by assumption) — so a caller's catch block can refund `IH_WRITER_RETRY_CAP - callsMade` instead
@@ -1873,42 +1981,84 @@ export async function runWriterForDesign(args: {
     return { accepted: false, value: '', reasons: [`skip: admitted units cannot reach the floor (best case ${maxPossibleLine.length}c < ${CONTENT_CONTRACT.itemHighlights.min}c)`], calls: 0 }
   }
 
-  const openai = args.deps?.openai ?? (await getLlmClientForRequest().catch(() => null))
-  if (!openai) return { accepted: false, value: '', reasons: ['skip: no LLM client available'], calls: 0 }
-
-  const model = args.model ?? ihWriterModel()
-  const reasonsAll: string[] = []
-  let priorViolations: string[] = []
-  // RULING P10: tracked OUTSIDE the try so the catch below can always read the true count, even
-  // when the throw happens synchronously inside `judgeWriterArrangement`/`runTail`, AFTER the call
-  // that incremented it.
+  // G3 point 1: enumerate every candidate this design's own admitted units can support, ranked
+  // (G3 point 2) best first — a call this cheap, purely local, is never billable, so it happens
+  // BEFORE the client/model exist at all. Wrapped in the SAME try/catch the model-call phase below
+  // uses (RULING P10): a throw from `judgeWriterArrangement`'s own `runTail` call during the search
+  // is a writer-side bug, exactly like a throw used to be mid-retry, and must fall back to the
+  // composer's OWN result — but `callsMade` is 0 here, because no MODEL call has happened yet.
   let callsMade = 0
+  let enumerated: EnumerateWriterCandidatesResult
   try {
-    for (let call = 1; call <= IH_WRITER_RETRY_CAP; call++) {
-      // RULING P9: checked BETWEEN retries — an in-flight design's own loop now honours the SAME
-      // regen-level deadline every OTHER pending design is checked against before it reserves.
-      if (args.deadlineAt !== undefined && Date.now() >= args.deadlineAt) {
-        reasonsAll.push('skip: writer deadline exceeded mid-retry')
-        break
-      }
-      const draft = await askWriter(openai, model, units, args.designName, priorViolations, args.deadlineAt, args.truthCtx.allowedBrand)
-      if (draft === WRITER_DEADLINE_SKIPPED) {
-        // RULING W5: askWriter's OWN deadline check fired — a race against the loop-level check just
-        // above, never a network round trip, so it is NOT a billable call (callsMade unchanged).
-        reasonsAll.push('skip: writer deadline exceeded mid-call')
-        break
-      }
-      callsMade = call
-      const verdict = judgeWriterArrangement(draft, units, { truthCtx: args.truthCtx, runTail: args.runTail, needBrand: args.composed.needBrand })
-      if (verdict.ok) return { accepted: true, value: verdict.value, reasons: reasonsAll, calls: call }
-      reasonsAll.push(...verdict.violations)
-      priorViolations = verdict.violations
-    }
+    enumerated = enumerateWriterCandidates(units, { truthCtx: args.truthCtx, runTail: args.runTail, needBrand: args.composed.needBrand })
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
-    throw new WriterPartialCallsError(`writer-side bug after ${callsMade} call(s): ${message}`, callsMade, reasonsAll)
+    throw new WriterPartialCallsError(`writer-side bug during candidate search (0 calls): ${message}`, 0, [])
   }
-  return { accepted: false, value: '', reasons: reasonsAll, calls: callsMade }
+  console.log(JSON.stringify({
+    tag: 'IH_WRITER_CANDIDATES', design: args.designName,
+    evaluated: enumerated.evaluated, bounded: enumerated.bounded, found: enumerated.candidates.length,
+  }))
+  // G3 point 4: "Zero candidates — the composer's own result stands, with 0 calls." The ONLY case
+  // this function ever returns `accepted: false` for, once admission has produced 2+ units that can
+  // reach the floor — every other failure mode below still SHIPS a candidate, because a candidate
+  // that reaches `enumerated.candidates` has ALREADY passed the full acceptance oracle; the model is
+  // asked for taste, never for a result the writer depends on to be safe.
+  if (enumerated.candidates.length === 0) {
+    return { accepted: false, value: '', reasons: ['skip: zero candidates (the bounded search found none that pass every gate — the composer\'s own result stands)'], calls: 0 }
+  }
+  const candidates = enumerated.candidates
+
+  const openai = args.deps?.openai ?? (await getLlmClientForRequest().catch(() => null))
+  const model = args.model ?? ihWriterModel()
+  let picked = 1 // 1-based — "candidate 1" (index 0) is the ranked-best fallback every failure mode below collapses onto (G3 point 4).
+  let source: 'byModel' | 'byFallback' = 'byFallback'
+  const reasonsAll: string[] = []
+  if (!openai) {
+    reasonsAll.push('fallback: no LLM client available')
+  } else {
+    try {
+      for (let call = 1; call <= IH_WRITER_RETRY_CAP; call++) {
+        // RULING P9: checked BETWEEN retries, exactly as the old compose-retry loop did.
+        if (args.deadlineAt !== undefined && Date.now() >= args.deadlineAt) {
+          reasonsAll.push('fallback: writer deadline exceeded before a usable response')
+          break
+        }
+        const draft = await askWriter(openai, model, candidates, args.designName, args.deadlineAt)
+        if (draft === WRITER_DEADLINE_SKIPPED) {
+          // RULING W5: askWriter's OWN deadline check fired — never a network round trip, so it is
+          // NOT a billable call (callsMade unchanged). G3 point 4: a timeout still SHIPS candidate 1
+          // (unlike the old compose loop, there is no unvetted-line risk in doing so).
+          reasonsAll.push('fallback: writer deadline exceeded mid-call')
+          break
+        }
+        callsMade = call
+        const pickRaw = (draft as { pick?: unknown } | null)?.pick
+        if (pickRaw === undefined || pickRaw === null) {
+          // RULING G3 point 5: no "pick" key at all is indistinguishable from a transport failure
+          // (`askWriter` unifies both into `{}`) — this is the ONE case worth a retry, up to the cap.
+          reasonsAll.push(`retry: call ${call} returned no "pick" key`)
+          continue
+        }
+        // A key WAS returned. RULING G3 point 4: a malformed pick, a missing key, an out-of-range
+        // index are ALL the same safe answer — candidate 1 — and NONE of them is worth a retry (a
+        // retry cannot fix a model that already answered with a well-formed but wrong shape).
+        if (typeof pickRaw === 'number' && Number.isInteger(pickRaw) && pickRaw >= 1 && pickRaw <= candidates.length) {
+          picked = pickRaw
+          source = 'byModel'
+        } else {
+          reasonsAll.push(`fallback: malformed pick (${JSON.stringify(pickRaw)})`)
+        }
+        break
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      throw new WriterPartialCallsError(`writer-side bug after ${callsMade} call(s): ${message}`, callsMade, reasonsAll)
+    }
+  }
+  const chosen = candidates[picked - 1]
+  console.log(JSON.stringify({ tag: 'IH_WRITER_PICK', design: args.designName, candidates: candidates.length, picked, source, calls: callsMade }))
+  return { accepted: true, value: chosen.line, reasons: reasonsAll, calls: callsMade }
 }
 
 // Re-exported so a caller/test can reference the exact regex set the build-time collision guard

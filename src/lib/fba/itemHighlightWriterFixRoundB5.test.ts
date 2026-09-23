@@ -8,7 +8,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   buildAdmittedUnits, judgeWriterArrangement, validateArrangement, renderArrangement,
-  runWriterForDesign, WriterPartialCallsError, ihWriterDeadlineMs,
+  runWriterForDesign, WriterPartialCallsError, ihWriterDeadlineMs, enumerateWriterCandidates,
   type AdmittedUnit, type ArrangementPart,
 } from './itemHighlightWriter'
 import { composeItemHighlightDetailed, type ComposerResult } from './itemHighlightComposer'
@@ -206,21 +206,28 @@ describe('RULING P4: span truth is judged per comma clause, over every contiguou
 
 describe('RULING P9: the deadline is threaded into runWriterForDesign and checked between retries', () => {
   const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Ring-Spun Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }
-  it('a deadline already in the past skips the call entirely — zero calls made, accepted:false', async () => {
+  // RULING G3 (fix round G1, design change): "skips the call entirely" is UNCHANGED (the client
+  // is still never reached) — what changed is what ships. G3 point 4's own words: "a timeout —
+  // candidate 1 ships." A real candidate exists for this pool/spec set (proven directly below), so
+  // the search's own top candidate ships at ZERO calls, never `accepted: false` — there is no
+  // reason to fall back to the composer once a line has already cleared every gate.
+  it('a deadline already in the past skips the CLIENT entirely, but still ships the search\'s own candidate — zero calls made, accepted:true', async () => {
     const client = { chat: { completions: { create: vi.fn(async () => ({ choices: [{ message: { content: '{}' }, finish_reason: 'stop' }] })) } } }
+    const composed = {
+      candidates: ['Soft Graphic Tee', 'Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'],
+      specFacts: ['Classic Fit'], brandPick: null, wearFact: null,
+    }
+    const runTail = runTailFor('THE CEO Retro Sunset', GILDAN, truthCtx)
+    const units = buildAdmittedUnits(composed, { designName: 'Retro Sunset', truthCtx })
+    const expectedTop = enumerateWriterCandidates(units, { truthCtx, runTail }).candidates[0]
+    expect(expectedTop, 'a candidate must exist for this pin to mean anything').toBeDefined()
     const outcome = await runWriterForDesign({
-      // A pool/spec set whose best-case join clears the 97-char floor (avoids the EARLIER
-      // "cannot reach the floor" skip that would otherwise mask the deadline check under test).
-      composed: {
-        candidates: ['Soft Graphic Tee', 'Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'],
-        specFacts: ['Classic Fit'], brandPick: null, wearFact: null,
-      },
-      fallbackHold: null, designName: 'Retro Sunset', truthCtx,
-      runTail: runTailFor('THE CEO Retro Sunset', GILDAN, truthCtx),
+      composed, fallbackHold: null, designName: 'Retro Sunset', truthCtx, runTail,
       deps: { openai: client as never },
       deadlineAt: Date.now() - 1000,
     })
-    expect(outcome.accepted).toBe(false)
+    expect(outcome.accepted).toBe(true)
+    expect(outcome.value).toBe(expectedTop.line)
     expect(outcome.calls).toBe(0)
     expect(client.chat.completions.create).not.toHaveBeenCalled()
     expect(outcome.reasons.join(' ')).toMatch(/deadline exceeded/)
@@ -284,28 +291,23 @@ describe('RULING P10: the K10 catch is exercised by a THROWING DEPS GETTER (not 
     } finally { delete process.env.IH_WRITER }
   })
 
-  it('WriterPartialCallsError carries the ACTUAL calls made before a post-call throw — never 0 when calls were spent', async () => {
+  // RULING G3 (fix round G1, design change): this pin's ORIGINAL premise was that `runTail`'s
+  // throw is reached only AFTER a billable model call (the model composes, its draft is JUDGED,
+  // the judge calls `runTail`) — so `callsMade` had to be `1`, never `0`, or a caller would over-
+  // refund a call it never actually got to spend. Under the chooser, `runTail` is called by
+  // `enumerateWriterCandidates` DURING THE SEARCH — a purely local step that runs BEFORE the
+  // client/model even exist — so a throwing tail is now reached with ZERO calls billed, always.
+  // This is a STRICTLY stronger guarantee, not a regression: a tail bug can no longer waste a real
+  // API call before it is ever caught. Re-pinned for the new architecture below.
+  it('WriterPartialCallsError carries ZERO calls made when the throw happens during the SEARCH (enumerateWriterCandidates), before any client/model exists', async () => {
     const truthCtx: PhraseTruthCtx = { garmentFamily: 'tee', spec: { material: '100% Ring-Spun Cotton', fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }
     const composed = {
       candidates: ['Soft Graphic Tee', 'Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'],
       specFacts: ['Classic Fit'], brandPick: null, wearFact: null,
     }
-    // Build the SAME admitted set the writer would, so the stub client can return a WELL-FORMED
-    // arrangement (validates, renders, clears the band) — the throw must happen at `runTail`, not
-    // be masked by an earlier "malformed"/"under-floor" rejection that never bills a call at all.
-    const units = buildAdmittedUnits(composed, { designName: 'Retro Sunset', truthCtx })
-    const id = (t: string) => units.find((u) => u.text === t)!.id
-    const garmentHeadId = units.find((u) => u.kind === 'garment-head')!.id
-    const draftParts = [
-      { unit: id('Retro Sunset') }, { unit: garmentHeadId }, { glue: 'with' }, { unit: id('Classic Fit') }, { glue: ',' },
-      { unit: id('Soft Graphic Tee') }, { glue: 'and' }, { unit: id('Vintage Beach Vibes') }, { glue: ',' }, { unit: id('Made for Lazy Summer Days') },
-    ]
     let calls = 0
     const client = {
-      chat: { completions: { create: vi.fn(async () => {
-        calls++
-        return { choices: [{ message: { content: JSON.stringify({ parts: draftParts }) }, finish_reason: 'stop' }] }
-      }) } },
+      chat: { completions: { create: vi.fn(async () => { calls++; return { choices: [{ message: { content: '{}' }, finish_reason: 'stop' }] } }) } },
     }
     const throwingTail = (): { value: string; hold: string | null; reason?: string | null } => { throw new Error('tail blew up') }
     let thrown: unknown = null
@@ -317,7 +319,7 @@ describe('RULING P10: the K10 catch is exercised by a THROWING DEPS GETTER (not 
       })
     } catch (e) { thrown = e }
     expect(thrown).toBeInstanceOf(WriterPartialCallsError)
-    expect((thrown as WriterPartialCallsError).callsMade).toBe(1) // the call that produced the arrangement WAS billed
-    expect(calls).toBe(1)
+    expect((thrown as WriterPartialCallsError).callsMade).toBe(0) // the throw happened during the FREE search — no call was ever billed
+    expect(calls).toBe(0) // the client was never even reached
   })
 })

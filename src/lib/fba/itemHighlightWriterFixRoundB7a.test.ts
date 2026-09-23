@@ -16,9 +16,9 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  buildAdmittedUnits, judgeWriterArrangement, validateArrangement, buildWriterPrompt,
-  writerReadabilityVerdict, runWriterForDesign, mandatoryBrandStatus, WRITER_RULE_REGISTRY,
-  type AdmittedUnit, type ArrangementPart, type WriterRuleWhenCtx,
+  buildAdmittedUnits, judgeWriterArrangement, validateArrangement,
+  writerReadabilityVerdict, runWriterForDesign, mandatoryBrandStatus,
+  type AdmittedUnit, type ArrangementPart,
 } from './itemHighlightWriter'
 import { lineCarriesBrand } from './itemHighlightComposer'
 import { lineHasSignificantRepeat } from './productDetailAttrs'
@@ -156,11 +156,19 @@ describe('RULING R1: mandatory units (identity, isBrand) are never filtered; the
   it('identity-sentence-punctuation (TRAILING): runWriterForDesign does NOT skip for "Boss Lady!" — the writer reaches the model (mutation-proved: the pre-E1 predicate turns this RED)', async () => {
     // A stub that immediately accepts the FIRST arrangement it is offered — this pin only needs to
     // observe that the skip did not fire (a real call was made), not re-run the judge.
+    // RULING G3 (fix round G1): a call now happens only when `enumerateWriterCandidates` finds at
+    // least one candidate FIRST (never a wasted call on a family no candidate could ever pass) —
+    // this fixture uses a brand-FREE truth context (no `allowedBrand`) so a candidate genuinely
+    // exists; the shared `truthCtx` above sets `allowedBrand: 'Comfort Colors'` against the `CC`
+    // (brandInCopy: true) blank, under which NO candidate here could ever carry the brand (none of
+    // the admitted units do) and the search correctly finds zero — orthogonal to what this test
+    // pins (the identity-sentence-punctuation skip), so it is isolated out here.
+    const noBrandTruthCtx: PhraseTruthCtx = { ...truthCtx, allowedBrand: null }
     let calls = 0
     const outcome = await runWriterForDesign({
       composed: { candidates: ['Vintage Beach Vibes', 'Made for Lazy Summer Days', 'Great for Weekend Road Trips'], specFacts: ['100% Ring-Spun Cotton'], brandPick: null, wearFact: null, needBrand: false },
-      fallbackHold: null, designName: 'Boss Lady!', truthCtx,
-      runTail: runTailFor('THE CEO Boss Lady! Shirt', CC, truthCtx),
+      fallbackHold: null, designName: 'Boss Lady!', truthCtx: noBrandTruthCtx,
+      runTail: runTailFor('THE CEO Boss Lady! Shirt', PURE_TEE, noBrandTruthCtx),
       deps: { openai: { chat: { completions: { create: async () => { calls++; throw new Error('stub: no arrangement offered, only presence of a call matters here') } } } } as never },
     })
     expect(calls, 'the writer must have reached the model at least once').toBeGreaterThan(0)
@@ -292,65 +300,18 @@ describe('RULING R2: the identity is a persona, not an audience claim', () => {
 // check it teaches.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('RULING R3: the WRITER_RULE_REGISTRY when-predicate class guard', () => {
-  it('the unisex-gender sentence renders whenever ANY offered unit\'s text contains "unisex" — no longer narrowed to a spec-fact unit', () => {
-    // A POOL-sourced "Unisex" phrase (never a spec-fact) — the B1 escape's exact shape.
-    const units: AdmittedUnit[] = [
-      { id: 'u0', text: 'Retro Sunset', kind: 'identity', numberable: false },
-      { id: 'u1', text: 'Unisex Graphic Tee', kind: 'pool', numberable: false },
-    ]
-    const { system } = buildWriterPrompt(units, 'Retro Sunset', [])
-    expect(system).toMatch(/gendered audience word.*"Unisex" unit/)
-  })
-  it('the unisex-gender sentence is WITHHELD when no unit\'s text contains "unisex" at all — still conditional, never pointless weight', () => {
-    const units: AdmittedUnit[] = [{ id: 'u0', text: 'Retro Sunset', kind: 'identity', numberable: false }]
-    const { system } = buildWriterPrompt(units, 'Retro Sunset', [])
-    expect(system).not.toMatch(/gendered audience word.*"Unisex" unit/)
-  })
-
-  // SWEEP (per the ruling: "a SWEEP test generates arrangements from real admitted units across
-  // several families, maps every judge/readability refusal to its registry id, and asserts that
-  // the entry was rendered for that unit set"). Pins: PURE tee, Comfort Colors tee, BLEND sweatshirt
-  // "Unisex Shirt" lines from r9b B2.
-  const SWEEP_FAMILIES: { id: string; truthCtx: PhraseTruthCtx; composed: Parameters<typeof buildAdmittedUnits>[0]; designName: string; unisexUnitText: string }[] = [
-    { id: 'PURE tee', truthCtx: { garmentFamily: 'tee', spec: { material: '100% Ring-Spun Cotton', fit: 'Classic' } as never, allowedBrand: null, audience: 'adult', field: 'highlights' }, composed: { candidates: ['Unisex Graphic Tee', 'Vintage Beach Vibes'], specFacts: ['Classic Fit'], brandPick: null, wearFact: null }, designName: 'Retro Sunset', unisexUnitText: 'Unisex Graphic Tee' },
-    { id: 'Comfort Colors tee', truthCtx: { garmentFamily: 'tee', spec: CC.spec as never, allowedBrand: 'Comfort Colors', audience: 'adult', field: 'highlights' }, composed: { candidates: ['Unisex Beach Tee', 'Vintage Beach Vibes'], specFacts: ['100% Ring-Spun Cotton'], brandPick: 'Comfort Colors Tee', brandOrigin: 'spec', wearFact: null }, designName: 'Retro Sunset', unisexUnitText: 'Unisex Beach Tee' },
-    { id: 'BLEND sweatshirt', truthCtx: { garmentFamily: 'sweatshirt', spec: { material: '52% Cotton / 48% Polyester', fit: 'Classic' } as never, allowedBrand: null, audience: 'adult', field: 'highlights' }, composed: { candidates: ['Unisex Sweatshirt', 'Cozy Crewneck Sweatshirt'], specFacts: ['Classic Fit'], brandPick: null, wearFact: null }, designName: 'Farm Life', unisexUnitText: 'Unisex Sweatshirt' },
-  ]
-  for (const fam of SWEEP_FAMILIES) {
-    it(`${fam.id}: a pool "Unisex" unit's sentence is rendered, and a gender-beside-Unisex line is refused for the TAUGHT reason`, () => {
-      const units = buildAdmittedUnits(fam.composed, { designName: fam.designName, truthCtx: fam.truthCtx })
-      const unisexUnit = units.find((u) => u.text === fam.unisexUnitText)
-      expect(unisexUnit, JSON.stringify(units.map((u) => u.text))).toBeDefined()
-      const { system } = buildWriterPrompt(units, fam.designName, [], fam.truthCtx.allowedBrand)
-      const unisexRuleRendered = system.includes(WRITER_RULE_REGISTRY.find((r) => r.id === 'unisex-gender')!.sentence)
-      expect(unisexRuleRendered, 'the unisex-gender sentence must be rendered for this unit set').toBe(true)
-      // The check the sentence teaches actually fires here too (fidelity: taught AND enforced).
-      const line = `${fam.designName} ${units.find((u) => u.kind === 'garment-head')!.text} with ${unisexUnit!.text}, Birthday Gift for Women`
-      const verdict = writerReadabilityVerdict(line, units)
-      expect(verdict.ok).toBe(false)
-      if (!verdict.ok) expect(verdict.reason).toMatch(/gender audience beside "Unisex"/)
-    })
-  }
-
-  it('the fidelity guard itself: sweeping WRITER_RULE_REGISTRY, every `when`-gated entry\'s predicate is satisfied whenever its OWN sentence text appears reachable in a rendered prompt for a unit set the check fires on', () => {
-    // Structural completeness: every entry with a `when` must actually be exercised by at least one
-    // of the SWEEP_FAMILIES above (unisex-gender) or the brand pins elsewhere in this file (brand,
-    // wear-fact-list-only) — asserted by checking each conditional id is referenced by name in this
-    // file's own test titles/bodies. A cheap but real anti-drift check: every conditional id has a
-    // non-trivial `when` (not the constant `() => true`, which would defeat R3's whole point).
-    const conditional = WRITER_RULE_REGISTRY.filter((r) => r.when)
-    expect(conditional.map((r) => r.id).sort()).toEqual(['brand', 'unisex-gender', 'wear-fact-list-only'])
-    for (const rule of conditional) {
-      const alwaysTrue = rule.when!({ units: [], brandUnit: null, allowedBrand: null })
-      const alwaysFalse = rule.when!({ units: [{ id: 'u0', text: 'x', kind: 'identity', numberable: false }], brandUnit: null, allowedBrand: 'X' })
-      // Not a tautology: at least one of the two probes above must differ, i.e. `when` is not a
-      // constant function (this WOULD be true for 'brand' via `allowedBrand`, false-then-true).
-      void alwaysTrue // (kept for readability; the real assertion is the ONE below)
-      expect(typeof rule.when).toBe('function')
-    }
-  })
-})
+// ─── R3: RETIRED by RULING G3/G4 (fix round G1, phase-g1-rulings.md, design change) ───────────────
+//
+// R3 pinned that a `WRITER_RULE_REGISTRY` entry's `when` predicate was satisfied whenever its
+// sentence was reachable in the RENDERED PROMPT for a given unit set — a class guard against the
+// prompt teaching a rule NARROWER than the check it mirrored. RULING G3 deletes the model's need to
+// be taught any rule at all (it only picks an index among already-accepted candidates), so
+// `buildWriterPrompt` no longer takes `units`, renders no registry sentence, and has no `when`
+// predicate to guard. `WRITER_RULE_REGISTRY` is KEPT (RULING G4: "keep the registry for the
+// validator's messages") and its entries are UNCHANGED — the unisex-gender rule R3 exercised is
+// still enforced exactly as before, through `writerReadabilityVerdict` (unaffected by this round,
+// pinned elsewhere in this file and in `itemHighlightWriterFixRoundB6.test.ts`) — only the "is it
+// TAUGHT" half of R3's guard is gone, because nothing is taught any more.
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // R4 (Blocking, value): a relation clause is counted from the arrangement's GLUE, never by scanning
@@ -513,16 +474,10 @@ describe('RULING R6: the wear fact is list-join only', () => {
     expect(v.ok, JSON.stringify(v)).toBe(true)
   })
 
-  it('the prompt teaches the wear-fact-list-only rule whenever a wear-fact unit is offered, and withholds it otherwise', () => {
-    const { system } = buildWriterPrompt(units, 'Retro Sunset', [], 'Comfort Colors')
-    // RULING S2 (fix round B8a, value Important, spec §2h rule 2): the taught sentence now says
-    // "stand ALONE in its own comma clause" — superseding "is LIST-JOIN ONLY" (a wear fact list-
-    // joined to a NEIGHBOUR read as one fit/cut claim, exactly the shape §2h names).
-    expect(system).toMatch(/A wear-fact unit .* must stand ALONE in its own "," comma clause/)
-    const noWear = buildAdmittedUnits({ candidates: ['Vintage Beach Vibes'], specFacts: ['Classic Fit'], brandPick: null, wearFact: null }, { designName: 'Retro Sunset', truthCtx: { ...truthCtx, allowedBrand: null } })
-    const { system: systemNoWear } = buildWriterPrompt(noWear, 'Retro Sunset', [])
-    expect(systemNoWear).not.toMatch(/A wear-fact unit .* must stand ALONE in its own "," comma clause/)
-  })
+  // RULING G3/G4 (fix round G1): the "prompt teaches the wear-fact-list-only rule" pin that used to
+  // live here is RETIRED — nothing is taught to the model any more. The RULE is unchanged and still
+  // enforced at the grammar layer, pinned by the `validateArrangement` tests immediately above and
+  // below this one.
 
   it('RULING S2 (fix round B8a): "with Can be worn as Oversized" (relation subject, unchanged) vs list-joined to a NEIGHBOUR (NEW named violation, not standing alone) are BOTH refused', () => {
     const parts: ArrangementPart[] = [

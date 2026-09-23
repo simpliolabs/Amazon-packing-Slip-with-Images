@@ -39,7 +39,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   validateArrangement, renderArrangement, judgeWriterArrangement, runWriterForDesign,
-  buildAdmittedUnits, buildWriterPrompt,
+  buildAdmittedUnits, buildWriterPrompt, enumerateWriterCandidates,
   type AdmittedUnit, type ArrangementPart,
 } from '@/lib/fba/itemHighlightWriter'
 import { runIhTail } from '@/lib/fba/listingPipeline'
@@ -105,7 +105,30 @@ describe('G1 (Blocking, truth fix): the retry-escape phase-f1-review.md §2 meas
     }
   })
 
-  it("end to end through the REAL runWriterForDesign: call 1 (bare) refused, call 2 (the model's own comma retry) ALSO refused — the composer's fallback ships, never the laundered line", async () => {
+  // RULING G3 (fix round G1, phase-g1-rulings.md, design change, built in the SAME round as this
+  // file's G1/G2 fix — see `itemHighlightWriterFixRoundG3.test.ts`): the writer no longer COMPOSES,
+  // so there is no more retry loop for a model to launder a refusal through — it can only return an
+  // INDEX into a list of lines `enumerateWriterCandidates` already judged. The property this test
+  // pinned (the retry-escape stays closed) now has to hold at the SEARCH layer instead: the
+  // poisoned line can never become a candidate in the first place, so the model is never OFFERED
+  // it, laundered spelling or not. Re-proven below through the REAL `enumerateWriterCandidates` and
+  // the REAL `runWriterForDesign`, on the EXACT SAME units this test always used.
+  it('END TO END: enumerateWriterCandidates, on these exact units, NEVER offers the laundered comma pairing as a candidate — the search itself never reaches it, so no retry loop is needed to catch it', () => {
+    const truthCtx = truthCtxFor('Classic', '50% Cotton / 50% Polyester')
+    const runTail = runTailFor(truthCtx)
+    const composed = {
+      candidates: ['Fall Graphic Crewneck Sweatshirts', 'Made For Chilly Mornings', 'Relaxed Weekend Layer'],
+      specFacts: ['Unisex Fit'],
+      brandPick: null, brandOrigin: null, wearFact: null, needBrand: false,
+    } as never
+    const units: AdmittedUnit[] = buildAdmittedUnits(composed, { designName: 'Dear Queen', truthCtx })
+    const result = enumerateWriterCandidates(units, { truthCtx, runTail })
+    for (const c of result.candidates) {
+      expect(c.line, 'no candidate may pair "Relaxed Weekend Layer" with "Unisex Fit" in the same relation clause').not.toMatch(/Relaxed Weekend Layer,? with Unisex Fit/)
+    }
+  })
+
+  it("END TO END through the REAL runWriterForDesign: even a client that ANSWERS WITH THE OLD COMPOSED SHAPE (not an index — a stub built to look like the pre-G3 retry escape) cannot ship the laundered line, because it has no \"pick\" key and is treated as a client-error retry, exhausting the cap and shipping the search's OWN top (safe) candidate instead", async () => {
     const truthCtx = truthCtxFor('Classic', '50% Cotton / 50% Polyester')
     const runTail = runTailFor(truthCtx)
     const composed = {
@@ -119,28 +142,22 @@ describe('G1 (Blocking, truth fix): the retry-escape phase-f1-review.md §2 meas
       { unit: idOf('Dear Queen') }, { glue: ',' }, { unit: idOf('Fall Graphic Crewneck Sweatshirts') },
       { glue: ',' }, { unit: idOf('Made For Chilly Mornings') }, { glue: ',' }, { unit: idOf('Relaxed Weekend Layer') },
     ]
-    const BARE = { parts: [...head, { glue: 'with' }, { unit: idOf('Unisex Fit') }] }
+    // The exact old live shape — has no "pick" key at all, so `runWriterForDesign` cannot even
+    // interpret it as a (malformed) pick; it is indistinguishable from a client failure.
     const COMMA = { parts: [...head, { glue: ',' }, { glue: 'with' }, { unit: idOf('Unisex Fit') }] }
-    // The exact live shape: call 1 answers bare (refused), call 2 answers the SAME units with a
-    // comma inserted before "with" — exactly what the prompt's own `pair-truth` sentence tells a
-    // model to try after a `join:` refusal.
-    const answers = [BARE, COMMA]
-    let n = 0
     const client = {
-      chat: { completions: { create: async () => {
-        const a = answers[Math.min(n, answers.length - 1)]
-        n++
-        return { choices: [{ message: { role: 'assistant', content: JSON.stringify(a) }, finish_reason: 'stop' }] }
-      } } },
+      chat: { completions: { create: async () => ({ choices: [{ message: { role: 'assistant', content: JSON.stringify(COMMA) }, finish_reason: 'stop' }] }) } },
     } as never
 
     const out = await runWriterForDesign({
       composed, fallbackHold: null, designName: 'Dear Queen', truthCtx, runTail,
       deps: { openai: client }, model: 'gpt-4.1-mini',
     })
-    expect(out.accepted).toBe(false) // THE FIX: pre-fix this was `true`, calls=2, value=the laundered line
-    expect(out.value).toBe('')
-    expect(out.reasons.join(' ')).toMatch(/fit\/cut claim/)
+    // Ships SOMETHING (the search's own safe top candidate) rather than refusing outright — but it
+    // is NEVER the laundered pairing, because that line was never in the candidate list to begin
+    // with (proven directly above).
+    if (out.accepted) expect(out.value).not.toMatch(/Relaxed Weekend Layer,? with Unisex Fit/)
+    expect(out.value).not.toBe('') // a candidate exists for this family (proven above) — it ships
   })
 })
 
@@ -278,8 +295,8 @@ describe("G2: F1 is narrowed to ',' only — 'and'/'&'/'|'/'—' immediately bef
     expect(v.ok, !v.ok ? v.violation : '').toBe(true)
   })
 
-  it('the prompt/registry is unaffected by this narrowing (out of scope for G1/G2 — G4 is a later round)', () => {
-    const { system } = buildWriterPrompt(units, 'Fall Crewneck', [])
+  it('the chooser prompt (G4, built in THIS round — see itemHighlightWriterFixRoundG3.test.ts) is unaffected by this narrowing: it renders from CANDIDATES, never from the grammar this file pins', () => {
+    const { system } = buildWriterPrompt([{ parts: [], line: 'Fall Crewneck, with 50% Cotton / 50% Polyester', keywordShapedClauses: 0, distinctPoolUnits: 1, lengthFromTarget: 0 }], 'Fall Crewneck')
     expect(typeof system).toBe('string')
   })
 })

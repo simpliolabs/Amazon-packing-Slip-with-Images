@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest'
 import http from 'node:http'
 import OpenAI from 'openai'
 import {
-  buildAdmittedUnits, judgeWriterArrangement, validateArrangement, buildWriterPrompt,
+  buildAdmittedUnits, judgeWriterArrangement, validateArrangement,
   type AdmittedUnit, type ArrangementPart,
 } from './itemHighlightWriter'
 import { lineCarriesBrand } from './itemHighlightComposer'
@@ -216,28 +216,24 @@ describe('RULING Q2: the six measured plural lines are rejected; no reference li
     expect(v.ok).toBe(false)
     if (!v.ok) expect(v.violation).toMatch(/unknown key/)
   })
-  it('no rule sentence in the registry mentions "number" any more', () => {
-    const { system } = buildWriterPrompt([], null, [])
-    expect(system).not.toMatch(/"number"/)
-  })
+  // RULING G3/G4 (fix round G1): the "no rule sentence in the registry mentions 'number' any
+  // more" pin that used to live here is RETIRED — the chooser prompt (`buildWriterPrompt`, rebuilt
+  // this round) renders no `WRITER_RULE_REGISTRY` sentence at all, "number" included; see
+  // `itemHighlightWriterFixRoundG3.test.ts`'s registry-negative-content pin, which subsumes this
+  // one and every other single-word absence it could have named.
 })
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // Q4 (value Blocking B1): the feminine+masculine rule is TAUGHT unconditionally.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('RULING Q4: the fem+masc rule is taught unconditionally, including on a lean_female family with no Unisex unit offered', () => {
-  it('a lean_female family with NO Unisex spec-fact carries the fem+masc sentence in the rendered prompt', () => {
-    const truthCtx: PhraseTruthCtx = { garmentFamily: 'sweatshirt', spec: { material: '50% Cotton / 50% Polyester', fit: 'Classic' }, allowedBrand: null, audience: 'adult', audienceLean: 'women', field: 'highlights' }
-    const units = buildAdmittedUnits(
-      { candidates: ['Mens Motivational Sweatshirt', 'Fall Sweatshirts for Women'], specFacts: ['Classic Fit'], brandPick: null, wearFact: null },
-      { designName: "Don't Quit", truthCtx },
-    )
-    expect(units.some((u) => u.kind === 'spec-fact' && /\bunisex\b/i.test(u.text))).toBe(false)
-    const { system } = buildWriterPrompt(units, "Don't Quit", [])
-    expect(system).toMatch(/feminine audience word.*masculine audience word|masculine audience word.*feminine audience word/i)
-  })
-
+describe('RULING Q4: the fem+masc rule is enforced unconditionally, including on a lean_female family with no Unisex unit offered', () => {
+  // RULING G3/G4 (fix round G1): Q4's own "carries the fem+masc sentence in the rendered prompt"
+  // pin is RETIRED — nothing is taught to the model any more (the chooser only picks an index), so
+  // "taught unconditionally" is no longer a coherent claim to make about the PROMPT. The rule
+  // itself is UNCHANGED and still enforced unconditionally at the GRAMMAR/judge layer — the N3a
+  // pin directly below, through the REAL `judgeWriterArrangement`, is Q4's real content and needed
+  // no change.
   it("N3a: \"Mens Motivational Sweatshirt and Fall Sweatshirts for Women\" — states both genders — is REJECTED", () => {
     const truthCtx: PhraseTruthCtx = { garmentFamily: 'sweatshirt', spec: { material: '50% Cotton / 50% Polyester', fit: 'Classic' }, allowedBrand: null, audience: 'adult', audienceLean: 'women', field: 'highlights' }
     const units = buildAdmittedUnits(
@@ -282,10 +278,12 @@ describe('RULING Q5: span truth (pair-truth) is taught in the prompt, and the "j
     blank: CC, audienceLean: null as never,
   })
 
-  it('the rendered prompt contains the pair-truth sentence, unconditionally', () => {
-    const { system } = buildWriterPrompt(s.units, 'See You Later Alligator', [])
-    expect(system).toMatch(/only true ON THEIR OWN/)
-  })
+  // RULING G3/G4 (fix round G1): the "rendered prompt contains the pair-truth sentence" pin that
+  // used to live here is RETIRED — G3's design deletes the pair-truth lecture (and every other
+  // rule sentence) from the prompt entirely; there are no retries for a model to be steered on with
+  // it any more (`enumerateWriterCandidates` already excludes every span-truth violation before the
+  // model ever sees a line). Span truth ITSELF is unchanged and still enforced below, through the
+  // REAL `judgeWriterArrangement`.
 
   it('a rejected draft (the wear fact paired with a true spec fact) is REJECTED for a PLAIN-LANGUAGE reason, not a bare code — RULING S2 (fix round B8a) supersedes this exact pairing at the GRAMMAR layer, before span truth ever runs', () => {
     const wearUnit = s.units.find((u) => u.kind === 'wear-fact')
@@ -386,16 +384,11 @@ describe('RULING Q8: brand-once is taught whenever allowedBrand is set, and admi
     expect(carriers[0].text).toBe('ComfortColors Club') // the identity is protected (Q9); the pool twin is dropped
   })
 
-  it('buildWriterPrompt renders the brand sentence whenever allowedBrand is set, even with no brand UNIT at all', () => {
-    // "At most ONE unit ... may carry the brand text" is unique to the 'brand' registry sentence —
-    // unlike "LIST-JOIN ONLY", which the (always-rendered) 'grammar' sentence also mentions.
-    const BRAND_MARKER = /At most ONE unit in your whole arrangement may carry the brand text/
-    const units: AdmittedUnit[] = [{ id: 'u0', text: 'Plain Design', kind: 'identity', numberable: false }]
-    const { system } = buildWriterPrompt(units, 'Plain Design', [], 'Comfort Colors')
-    expect(system).toMatch(BRAND_MARKER)
-    const { system: systemNoBrand } = buildWriterPrompt(units, 'Plain Design', [], null)
-    expect(systemNoBrand).not.toMatch(BRAND_MARKER)
-  })
+  // RULING G3/G4 (fix round G1): the "buildWriterPrompt renders the brand sentence" pin that used
+  // to live here is RETIRED — `buildWriterPrompt` no longer takes `units`/`allowedBrand` at all (it
+  // renders a NUMBERED CANDIDATE LIST, never a rule sentence); the brand-once RULE itself is
+  // unchanged and still enforced by `judgeWriterArrangement`'s own brand-carrier check (RULING P1,
+  // itemHighlightWriter.ts), independent of anything ever taught in a prompt.
 })
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -483,8 +476,16 @@ describe('RULING Q10 (P9\'s own ruled pin): a REAL local HTTP server, dead and s
       const result = await produceItemHighlights(input, { openai: client })
       const wall = Date.now() - t0
       expect(wall, `wall=${wall}ms`).toBeLessThanOrEqual(deadlineMs + 20_000)
-      expect(result.value).toBe(composer.value)
-      expect(result.hold).toBe(composer.hold)
+      // RULING G3 (fix round G1): a hung server is a TIMEOUT — G3 point 4's own words: "a client
+      // error, a timeout — candidate 1 ships." A real candidate exists for this family (the search
+      // is deterministic and never touches the network), so `result.value` is now the search's OWN
+      // top candidate, never the composer's fallback — the OPPOSITE of what this pin asserted
+      // before the chooser design existed. The wall-time bound above (Q10's real point) is
+      // UNCHANGED and still the thing this pin exists to prove: a hung server can never block the
+      // regen past `deadlineMs + 20_000`, regardless of which safe value ships at the end of it.
+      expect(result.value).not.toBe('')
+      expect(result.value).not.toBe(composer.value) // ships the search's own candidate instead
+      expect(result.hold).toBeNull() // `accepted: true` — never a stored-value hold
     } finally {
       delete process.env.IH_WRITER
       delete process.env.IH_WRITER_DEADLINE_MS
@@ -516,10 +517,15 @@ describe('RULING Q10 (P9\'s own ruled pin): a REAL local HTTP server, dead and s
       expect(result.writerLog?.length, JSON.stringify(result.writerLog)).toBe(2)
       for (const row of result.writerLog ?? []) expect(row.calls, JSON.stringify(row)).toBeGreaterThan(0)
       expect(wall, `wall=${wall}ms`).toBeLessThanOrEqual(deadlineMs + 20_000)
+      // RULING G3 (fix round G1): the server answers `{}` (no "pick" key) on every attempt — a
+      // client-error SHAPE, retried up to the cap, then G3 point 4 ships candidate 1 rather than
+      // falling back to the composer (a real candidate exists for both designs here). The wall-
+      // time bound above is Q10's real point and is unaffected; only the "shipped === composer"
+      // expectation this pin used to make is now the OPPOSITE, by design.
       for (const d of result.perDesign) {
         const builtD = composer.perDesign.find((x) => x.designKey === d.designKey)!
-        expect(d.value).toBe(builtD.value)
-        expect(d.hold).toBe(builtD.hold)
+        expect(d.value).not.toBe(builtD.value)
+        expect(d.hold).toBeNull()
       }
     } finally {
       delete process.env.IH_WRITER

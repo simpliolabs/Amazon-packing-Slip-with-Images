@@ -33,13 +33,11 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  validateArrangement, renderArrangement, judgeWriterArrangement, buildWriterPrompt,
-  buildWorkedExample, buildAdmittedUnits,
+  validateArrangement, renderArrangement, judgeWriterArrangement,
   type AdmittedUnit, type ArrangementPart,
 } from '@/lib/fba/itemHighlightWriter'
-import { buildItemHighlights, runIhTail } from '@/lib/fba/listingPipeline'
-import { DEFAULT_BLANK_SPECS, type BlankSpecRow } from '@/lib/fba/blankSpecs'
-import type { AnalyzedKeyword } from '@/lib/keyword-engine'
+import { runIhTail } from '@/lib/fba/listingPipeline'
+import { DEFAULT_BLANK_SPECS } from '@/lib/fba/blankSpecs'
 import type { PhraseTruthCtx } from '@/lib/fba/contentTruth'
 
 // ─── the live evidence, verbatim from phase-f1-rulings.md ─────────────────────────────────────────
@@ -152,114 +150,63 @@ describe('F2 (Blocking): a glue token is normalised (trim + case-fold) before ma
   })
 })
 
-describe('F5: the 3 over-length live rejections still refuse, with the precise count (band unchanged)', () => {
+// RULING G5 (fix round G1, phase-g1-rulings.md): "Rebuild the three live over-length shapes as
+// three separate pins, each asserting its own rendered count." The ORIGINAL F5 (below, until this
+// round) represented the PO's 3 live 211/270/318-char rejections with ONE combined case joining
+// EVERY live pool unit at once (`phase-f1-review.md` §8, Minor: "the three over-length cases are
+// represented by one rebuilt case rather than the three live counts — cosmetic"). Three SEPARATE
+// subset sizes below reproduce three DISTINCT overflow counts, each measured and asserted on its
+// own — never one case standing in for three, and never a hand-typed expected number (every
+// `expect` reads `rendered.length` back off the SAME `renderArrangement` call the judge renders
+// with, so a future wording change cannot make this pin quietly assert the wrong number).
+describe('F5/G5: three SEPARATE over-length live-shaped rejections, each with its OWN precise rendered count (band unchanged)', () => {
   const material = '100% Ring-Spun Cotton'
   const truthCtx: PhraseTruthCtx = { garmentFamily: 'sweatshirt', spec: { material, fit: 'Classic' }, allowedBrand: null, audience: 'adult', field: 'highlights' }
   const runTail = (l: string) => runIhTail(l, { titles: [], blankBrand: DEFAULT_BLANK_SPECS[1], truthCtx, capacityFamily: false, site: 'f1-test' })
 
-  it('a line built from every live pool unit joined onto the material fact still overflows 125 and is named with the REAL rendered length', () => {
+  function overLengthCase(poolCount: number) {
+    const pool = LIVE_POOL_UNITS.slice(0, poolCount)
     const units: AdmittedUnit[] = [
       { id: 'id', text: "Don't Quit", kind: 'identity', numberable: false },
-      ...LIVE_POOL_UNITS.map((t, i) => ({ id: `p${i}`, text: t, kind: 'pool' as const, numberable: false })),
+      ...pool.map((t, i) => ({ id: `p${i}`, text: t, kind: 'pool' as const, numberable: false })),
       { id: 'mat', text: material, kind: 'spec-fact', numberable: false },
     ]
     const parts: ArrangementPart[] = [
       { unit: 'id' },
-      ...LIVE_POOL_UNITS.flatMap((_, i) => (i === 0 ? [{ glue: ',' } as ArrangementPart, { unit: `p${i}` } as ArrangementPart] : [{ glue: 'and' } as ArrangementPart, { unit: `p${i}` } as ArrangementPart])),
+      ...pool.flatMap((_, i) => (i === 0 ? [{ glue: ',' } as ArrangementPart, { unit: `p${i}` } as ArrangementPart] : [{ glue: 'and' } as ArrangementPart, { unit: `p${i}` } as ArrangementPart])),
       { glue: ',' }, { glue: 'with' }, { unit: 'mat' },
     ]
-    const rendered = renderArrangement(parts, units)
-    expect(rendered.length).toBeGreaterThan(125)
-    const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail })
-    expect(v.ok).toBe(false)
-    if (!v.ok) expect(v.violations.join(' ')).toMatch(new RegExp(`rendered ${rendered.length} chars, max 125`))
-  })
-})
+    return { units, parts }
+  }
 
-// ─── F3/F4: the worked example + the explicit max-length statement ────────────────────────────────
-
-const kw = (keyword: string, searchVolume: number): AnalyzedKeyword => ({ keyword, searchVolume, themeFit: 3 } as unknown as AnalyzedKeyword)
-const NEVER = /(?!)/
-const BLEND_SWEAT: BlankSpecRow = { match: NEVER, spec: { brand: 'Gildan', brandInCopy: false, fit: 'Classic', material: '50% Cotton / 50% Polyester' } as never, styleCode: 'x', garmentFamily: 'sweatshirt' } as unknown as BlankSpecRow
-const PURE_TEE: BlankSpecRow = { match: NEVER, spec: { brand: 'Gildan', brandInCopy: false, fit: 'Classic', material: '100% Ring-Spun Cotton' } as never, styleCode: 'x', garmentFamily: 'tee' } as unknown as BlankSpecRow
-const HOODIE: BlankSpecRow = { match: NEVER, spec: { brand: 'Gildan', brandInCopy: false, fit: 'Relaxed', material: '80% Cotton / 20% Polyester' } as never, styleCode: 'x', garmentFamily: 'hoodie' } as unknown as BlankSpecRow
-const CC = DEFAULT_BLANK_SPECS[0] // Comfort Colors — mandatory brand (brandInCopy defaults true)
-
-const SWEAT_POOL = ['soft cotton feel', 'cozy crewneck sweatshirt', 'brushed fleece lining', 'made for chilly fall weekends', 'perfect for lazy weekends', 'polyester blend comfort', 'warm layer for winter']
-const TEE_POOL = ['soft graphic tee', 'vintage beach vibes', 'made for lazy summer days', 'great for weekend road trips', 'soft cotton feel', 'relaxed everyday style', 'soft vintage wash']
-const CC_POOL = ['comfort colors tee', 'garment dyed sweatshirt', 'soft ring spun cotton', 'crew neck sweatshirt', 'oversized fit sweatshirt', 'cozy fall layer', 'retro vintage wash']
-
-function familyUnits(o: { name: string; pool: string[]; blank: BlankSpecRow; title?: string }): { units: AdmittedUnit[]; needBrand: boolean } {
-  const title = o.title ?? `THE CEO ${o.name} Shirt`
-  const built = buildItemHighlights({
-    finalTitle: title, pool: o.pool.map((k, i) => kw(k, 5000 - i * 10)), apparelProduct: true,
-    blankBrand: o.blank, netTitles: [title], designTokens: [o.name], capacityFamily: false, brandName: 'THE CEO',
-  })
-  const units = buildAdmittedUnits(built.composed!, { designName: o.name, truthCtx: built.truthCtx! })
-  return { units, needBrand: !!built.composed?.needBrand }
-}
-
-describe('F3 (Important): buildWorkedExample validates + hits the band, for at least 6 families (including a Comfort Colors one)', () => {
-  const FAMILIES: { label: string; o: Parameters<typeof familyUnits>[0] }[] = [
-    { label: 'sweatshirt/blend, no brand', o: { name: "Don't Quit", pool: SWEAT_POOL, blank: BLEND_SWEAT } },
-    { label: 'tee/pure cotton, no brand', o: { name: 'Retro Sunset', pool: TEE_POOL, blank: PURE_TEE } },
-    { label: 'hoodie/blend, no brand', o: { name: 'Cozy Nights', pool: SWEAT_POOL, blank: HOODIE } },
-    { label: 'sweatshirt, Comfort Colors (mandatory brand)', o: { name: 'Fall Vibes', pool: CC_POOL, blank: CC } },
-    { label: 'tee, second identity', o: { name: 'Beach Please', pool: TEE_POOL, blank: PURE_TEE } },
-    { label: 'sweatshirt, second identity, blend', o: { name: 'Give Thanks', pool: SWEAT_POOL, blank: BLEND_SWEAT } },
-  ]
-
-  let passCount = 0
-  for (const f of FAMILIES) {
-    it(`${f.label}: the generated example (when built) passes validateArrangement and the 97-125 band`, () => {
-      const { units, needBrand } = familyUnits(f.o)
-      const example = buildWorkedExample(units)
-      if (!example) return // an acceptable outcome per F3's own doc — never a broken example
-      passCount++
-      expect(example.line.length).toBeGreaterThanOrEqual(97)
-      expect(example.line.length).toBeLessThanOrEqual(125)
-      const v = validateArrangement(example.json, units, needBrand)
-      expect(v.ok, `${f.label}: example did not validate — ${!v.ok ? v.violation : ''}`).toBe(true)
-      if (needBrand) {
-        const brandUnit = units.find((u) => u.isBrand)
-        expect(brandUnit && example.line.includes(brandUnit.text), `${f.label}: example dropped the mandatory brand`).toBe(true)
-      }
+  // Three DIFFERENT subset sizes of the SAME six live pool units — three DIFFERENT overflow
+  // counts, never the same number asserted three times over.
+  for (const poolCount of [3, 5, 6]) {
+    it(`SHAPE (${poolCount} of 6 live pool units, 1 relation clause): overflows 125 and is named with the REAL rendered length`, () => {
+      const { units, parts } = overLengthCase(poolCount)
+      const rendered = renderArrangement(parts, units)
+      expect(rendered.length).toBeGreaterThan(125)
+      const v = judgeWriterArrangement({ parts }, units, { truthCtx, runTail })
+      expect(v.ok).toBe(false)
+      if (!v.ok) expect(v.violations.join(' ')).toMatch(new RegExp(`rendered ${rendered.length} chars, max 125`))
     })
   }
 
-  it('at least 6 of the families above produced a validated, in-band example', () => {
-    expect(passCount).toBeGreaterThanOrEqual(6)
+  it('the three shapes above are genuinely DISTINCT counts, not the same overflow measured three times', () => {
+    const counts = [3, 5, 6].map((n) => renderArrangement(overLengthCase(n).parts, overLengthCase(n).units).length)
+    expect(new Set(counts).size).toBe(3)
+    expect(counts.every((c) => c > 125)).toBe(true)
   })
 })
 
-describe('F4 (Important): the user message states the max length plainly, and shows the example when one was built', () => {
-  it('always states the max and that an over-length line is discarded', () => {
-    const units: AdmittedUnit[] = [
-      { id: 'id', text: "Don't Quit", kind: 'identity', numberable: false },
-      { id: 'pool', text: 'Fall Graphic Sweatshirts for Women', kind: 'pool', numberable: false },
-      { id: 'mat', text: '50% Cotton / 50% Polyester', kind: 'spec-fact', numberable: false },
-    ]
-    const { user } = buildWriterPrompt(units, "Don't Quit", [])
-    expect(user).toMatch(/THE MAXIMUM IS 125 CHARACTERS/)
-    expect(user).toMatch(/DISCARDED/)
-  })
-
-  it('shows the worked example block, with its own JSON, rendered line and char count, when buildWorkedExample succeeds', () => {
-    const { units } = familyUnits({ name: "Don't Quit", pool: SWEAT_POOL, blank: BLEND_SWEAT })
-    const example = buildWorkedExample(units)
-    expect(example).not.toBeNull()
-    const { user } = buildWriterPrompt(units, "Don't Quit", [])
-    if (example) {
-      expect(user).toMatch(/EXAMPLE — a VALID answer for this exact design/)
-      expect(user).toContain(JSON.stringify(example.line))
-      expect(user).toContain(`${example.line.length} chars`)
-    }
-  })
-
-  it('omits the example block (never a broken one) when no admitted-unit combination reaches the band', () => {
-    const units: AdmittedUnit[] = [{ id: 'id', text: 'Hi', kind: 'identity', numberable: false }]
-    expect(buildWorkedExample(units)).toBeNull()
-    const { user } = buildWriterPrompt(units, 'Hi', [])
-    expect(user).not.toMatch(/EXAMPLE — a VALID answer/)
-  })
-})
+// ─── F3/F4: RETIRED by RULING G3/G4 (fix round G1, phase-g1-rulings.md, design change) ────────────
+//
+// F3 pinned `buildWorkedExample` (a single hand-built example arrangement, re-verified only against
+// `validateArrangement` + the band) and F4 pinned that `buildWriterPrompt`'s user message showed it.
+// `phase-f1-review.md` §3 measured F3's own example rejected by the REAL judge 130 of 130 times —
+// verified against the wrong gate from the start. RULING G3 deletes `buildWorkedExample` entirely:
+// every candidate line the model can ever be shown is now a MEMBER of `enumerateWriterCandidates`'s
+// own output, which is verified against the REAL, FULL acceptance path (`judgeWriterArrangement`)
+// by construction — there is no separate "example" to re-verify, and no unverified template can ever
+// exist again. See `itemHighlightWriterFixRoundG3.test.ts` for the successor pins (the search, the
+// ranking, the chooser prompt, and the fallback semantics).

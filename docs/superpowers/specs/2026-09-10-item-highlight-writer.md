@@ -381,6 +381,78 @@ module's runtime identity. Its worst case is the composer's vetted line shipping
   answered: the previous rounds built the SAFETY the writer requires and proved it at scale. This is
   the first round that changes what the field SAYS.
 
+## 3a. AMENDMENT 2026-09-23 (fix round G1, phase-g1-rulings.md) — the writer stops composing and starts choosing
+
+*Why.* Three rounds (F1 through the G1 truth fix) taught the model an arrangement GRAMMAR in prose:
+a closed set of legal joins, a character band, a repeat budget, a worked example built fresh per
+design. Each round made the grammar wider or the prose more precise, and each round found the SAME
+shape of defect one layer down: F1 legalised a shape the truth-scope check hadn't been widened to
+match (closed the SAME round, RULING G1); F3's worked example re-verified itself against its own
+construction gates (`validateArrangement` + the band) rather than the acceptance oracle
+(`judgeWriterArrangement`) and was rejected by the real judge 130 of 130 times it was built; the
+prompt's own retry advice ("put it alone in its own comma clause") told a refused model to make
+EXACTLY the move that laundered a lie. The live shadow run measured what three rounds of teaching
+had bought: 18 calls, 0 accepted lines. Meanwhile a brute-force SEARCH over the SAME family's own
+units — no model, no prose, no grammar lesson — found accepted, in-band lines by construction. The
+model was never the part failing at grammar. Asking a model to satisfy a grammar at all was.
+
+*The design change.* Code enumerates. Code ranks. The model picks an index.
+
+1. **Code enumerates candidates.** From a design's own admitted units, a bounded search
+   (`enumerateWriterCandidates`) builds arrangements from the SAME legal shapes the writer's
+   grammar has always allowed — an optional identity+garment-head prefix (tried BOTH abutted and
+   bare, since the abutment's own bare space trips the tail's sentence-shape rule for an identity
+   ending in trailing punctuation — a shape no version of the composer's own template tried both
+   ways of), the mandatory brand if one exists, a SUBSET of the ordinary pool (never a permutation —
+   order is the composer's own relevance ranking, preserved), exactly one relation clause (readability's
+   own "at least one" rule makes a candidate with none pointless to search), and the wear fact alone
+   at the end. Every arrangement built is judged, in full, by the SAME `judgeWriterArrangement` a
+   model's own answer was always judged by — span truth, the repeat budget, the tail's byte-identity
+   and content/truth net, readability, the push-seam classifier. A candidate that survives has
+   ALREADY shipped through every gate this codebase owns; nothing downstream re-checks it. The bound
+   is explicit and reported, never merely asserted: a cap on the pool units considered, an early
+   prune the instant a partial render exceeds the ceiling (rendered length is monotone as units are
+   added, so nothing built on top of an over-length prefix could ever recover), and a cap on the
+   number of full judge calls spent — a search that hits either cap reports `bounded: true` rather
+   than silently returning less than it could have found.
+2. **Code ranks them.** Fewest keyword-shaped clauses, then closest to the fill target, then most
+   distinct pool units used, then stable order — deterministic, so the same units always rank the
+   same way.
+3. **The model picks.** It is shown the top K (K <= 8) ranked lines, numbered, and returns
+   `{"pick": <integer>}` — nothing else. It cannot write text, so it cannot misspell a rule into
+   existence; there is no rule left for it to misspell.
+4. **Every failure mode collapses onto the same safe answer.** A malformed pick, a missing key, an
+   out-of-range index, a client error, a timeout — candidate 1 (the search's own top-ranked,
+   already-accepted line) ships. The ONLY case that still falls back to the composer's own vetted
+   result, at zero calls, is zero candidates — nothing for the model to have ever been asked to pick
+   from. Every other outcome ships something the full acceptance path has already cleared, so the
+   model's contribution is bounded to taste; it can no longer be the thing that makes an unsafe line
+   ship, because it is never given a channel to describe one.
+5. **One call per design.** The retry cap that used to bound composing retries now bounds only a
+   response with no "pick" key at all — indistinguishable from a client/transport failure — never a
+   grammar retry, because there is no grammar left to retry against.
+
+*What this deletes, and why each piece is gone, not merely unused.* The grammar lesson
+(`WRITER_RULE_REGISTRY`'s prose, rendered into the system message) taught rules a model reading it
+literally still violated (the three-glue case, the wear-fact exemption's own wording) — deleted,
+because the model no longer composes, so it has nothing to apply a grammar TO. The worked example
+(RULING F3's `buildWorkedExample`) is deleted as a FUNCTION, not merely un-called: it existed to show
+one hand-built, hopefully-legal answer; every line the model can now be shown already IS a proven
+answer, so a separate "example, re-verified against the wrong gate" role no longer exists for
+anything to fill. The band lecture and the repeat lecture are deleted from the prompt because both
+are already TRUE of every candidate by the time the model sees it — stating a fact that cannot be
+false teaches nothing. The retry loop that could launder a refusal into an accepted lie (the exact
+shape RULING G1 closed) is deleted with the loop it lived in: a chooser has no failed grammar
+attempt to retry past. `WRITER_RULE_REGISTRY` itself is KEPT — it still documents, in one place,
+every rule the validator/judge enforce — but nothing in it renders into any prompt any more, and a
+test asserts exactly that absence.
+
+*What stays, unchanged.* Every gate — `validateArrangement`'s grammar, `judgeWriterArrangement`'s
+span truth and repeat/readability/push-seam checks, the tail's own content/truth net — is
+IMPORTED, never re-implemented, by the search. The search does not loosen what ships; it only moves
+every one of those gates in front of the model instead of behind a retry message the model had to
+read correctly to satisfy.
+
 ## 4. WHAT STAYS PO-GATED
 
 The Amazon push. Credits. The catalogue split.
