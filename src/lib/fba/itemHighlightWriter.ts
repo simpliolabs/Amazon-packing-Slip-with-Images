@@ -1698,6 +1698,16 @@ const WRITER_CANDIDATE_MAX_REL_UNITS = 6
 const WRITER_CANDIDATE_MAX_EVALUATED = 300
 /** G3 point 3: "the top K (K <= 8) RENDERED LINES". */
 export const WRITER_CANDIDATE_TOP_K = 8
+/** RULING H3(b) (fix round H1): three length buckets spanning the writer's own accepted band —
+ *  the two ENDS read from `CONTENT_CONTRACT.itemHighlights` (never hardcoded), the two INTERNAL
+ *  split points (104, 112) are the ruling's own literal cut points (roughly a third of the way up
+ *  from the floor; two characters past the fill target). Half-open `[lo, hi)` except the last,
+ *  which is closed at `max` (the ruling's own band is inclusive there). */
+const WRITER_CANDIDATE_LENGTH_BUCKETS: readonly [number, number][] = [
+  [CONTENT_CONTRACT.itemHighlights.min, 104],
+  [104, 112],
+  [112, CONTENT_CONTRACT.itemHighlights.max + 1],
+]
 
 /** Appends `unit` to `parts`, joined by `glue` UNLESS `parts` is still empty (nothing to join to
  *  yet) — a pure function (never mutates `parts`), so the search below can branch freely without
@@ -1823,18 +1833,41 @@ export function enumerateWriterCandidates(
   }
   }
 
-  // G3 point 2's ranking: a relation clause present is guaranteed for EVERY candidate here (never a
-  // ranking factor — it is an invariant, enforced above, not a preference); then fewer keyword-
-  // shaped clauses, then closer to the fill target, then more distinct pool units, then stable
-  // (evaluation) order as the final tie-break — deterministic, never `Math.random`, so the SAME
-  // units always rank the SAME way.
+  // RULING H3(a) (fix round H1, phase-h1-rulings.md, Important — supersedes RULING G3 point 2's
+  // key order): a relation clause present is guaranteed for EVERY candidate here (never a ranking
+  // factor — it is an invariant, enforced above, not a preference). Among candidates that have
+  // ALREADY passed the judge, `keywordShapedClauses` was optimising a constraint already
+  // satisfied, at the cost of hiding 12-23 accepted lines per design at/above the fill target from
+  // the model (`phase-g1-review-value.md` IMPORTANT 1) — the rank always preferred the SMALLEST
+  // in-band line, and the OLD top-K slice then removed the fuller ones before the model ever saw
+  // them. The rank's PRIMARY discriminator is now band fit (`lengthFromTarget`, closest to
+  // `CONTENT_CONTRACT.itemHighlights.fillTarget`); `keywordShapedClauses` is demoted to a
+  // tiebreak. Deterministic, never `Math.random` — `Array.prototype.sort` is a stable sort (ES2019),
+  // so the final tiebreak is the candidates' own stable (evaluation) order.
   const ranked = [...candidates].sort((a, b) =>
-    a.keywordShapedClauses - b.keywordShapedClauses ||
     a.lengthFromTarget - b.lengthFromTarget ||
+    a.keywordShapedClauses - b.keywordShapedClauses ||
     b.distinctPoolUnits - a.distinctPoolUnits ||
     0,
   )
-  return { candidates: ranked.slice(0, WRITER_CANDIDATE_TOP_K), evaluated, bounded }
+  // RULING H3(b): the top-K SHOWN must span the OCCUPIED band, not one end of it — taste between
+  // legal lines is the model's entire job; it cannot exercise it on a list that holds one shape.
+  // Rank 1 (closest to the fill target, fewest keyword-shaped clauses) stays the deterministic
+  // fallback every failure mode collapses onto (G3 point 4) — untouched. The REMAINING slots fill
+  // ROUND-ROBIN across three length buckets, in `ranked` order within each bucket, so the model is
+  // always offered both a lean line and a full one, never only whichever end of the band `ranked`
+  // itself clusters at.
+  const top = ranked.length ? [ranked[0]] : []
+  const bucketPools = WRITER_CANDIDATE_LENGTH_BUCKETS.map(([lo, hi]) =>
+    ranked.slice(1).filter((c) => c.line.length >= lo && c.line.length < hi),
+  )
+  let bucketTurn = 0
+  while (top.length < WRITER_CANDIDATE_TOP_K && bucketPools.some((pool) => pool.length > 0)) {
+    const pool = bucketPools[bucketTurn % bucketPools.length]
+    if (pool.length) top.push(pool.shift()!)
+    bucketTurn++
+  }
+  return { candidates: top, evaluated, bounded }
 }
 
 /** W1: the prompt — the admitted units grouped by kind WITH THEIR IDS, the design name EXACTLY as
@@ -1892,6 +1925,17 @@ export function buildWriterPrompt(candidates: readonly WriterCandidate[], design
  *  so `draft === WRITER_DEADLINE_SKIPPED` is an exact, unambiguous test. A plain module-private
  *  `Symbol`, not exported. */
 const WRITER_DEADLINE_SKIPPED: unique symbol = Symbol('writer-deadline-skipped')
+/** RULING H4 (fix round H1, phase-h1-rulings.md, Minor). A well-formed response with no usable
+ *  "pick" is a DECIDED answer, not a transport failure — collapse to candidate 1 immediately, 1
+ *  call; the retry budget is for CLIENT/TRANSPORT errors only (RULING G3 point 5's own wording).
+ *  Before this, the catch block below returned the SAME bare `{}` a real, successfully-received
+ *  response with no "pick" key produces (`parseJsonLoose` on valid-but-keyless JSON, or on empty
+ *  content), so `runWriterForDesign` could not tell a dropped connection from a model that simply
+ *  never uses the key apart — `phase-g1-review-value.md` MINOR 1 measured a model reliably naming
+ *  the key differently burning 3x the design's call budget for the SAME safe answer call 1 would
+ *  have produced. This sentinel marks the CATCH-block case only; a `WRITER_CALL_FAILED` sentinel
+ *  can never come from a real parsed response, so the two are unambiguous. */
+const WRITER_CALL_FAILED: unique symbol = Symbol('writer-call-failed')
 
 /** RULING P9 (fix round B5, wire Blocking 2): `deadlineAt` (an absolute epoch-ms bound, ONE per
  *  regen, threaded down from `runWriterForDesign`) bounds THIS call's own SDK request — never only
@@ -1932,7 +1976,7 @@ async function askWriter(
     return parseJsonLoose<unknown>(content || '{}')
   } catch (e) {
     console.warn(`[ih-writer] ${model} call FAILED: ${e instanceof Error ? e.message : String(e)}`)
-    return {}
+    return WRITER_CALL_FAILED // RULING H4: a genuine client/transport failure — the ONLY case worth a retry.
   }
 }
 
@@ -2083,6 +2127,14 @@ export async function runWriterForDesign(args: {
     return { accepted: false, value: '', reasons: ['skip: zero candidates (the bounded search found none that pass every gate — the composer\'s own result stands)'], calls: 0 }
   }
   const candidates = enumerated.candidates
+  // RULING H5 (fix round H1, phase-h1-rulings.md, Minor): "nothing to choose = no call" — exactly
+  // ONE candidate ships that candidate directly, 0 model calls, exactly the same way 0 candidates
+  // already cost 0 calls above. A model asked to "pick" from a 1-item list is not exercising
+  // taste; it is spending a billable call to confirm what the search already decided.
+  if (candidates.length === 1) {
+    console.log(JSON.stringify({ tag: 'IH_WRITER_PICK', design: args.designName, candidates: 1, picked: 1, source: 'byFallback', calls: 0 }))
+    return { accepted: true, value: candidates[0].line, reasons: ['skip: exactly one candidate — nothing to choose between'], calls: 0 }
+  }
 
   const openai = args.deps?.openai ?? (await getLlmClientForRequest().catch(() => null))
   const model = args.model ?? ihWriterModel()
@@ -2108,12 +2160,21 @@ export async function runWriterForDesign(args: {
           break
         }
         callsMade = call
+        if (draft === WRITER_CALL_FAILED) {
+          // RULING H4: a GENUINE client/transport failure (askWriter's own catch) — the ONLY case
+          // worth a retry, up to the cap (RULING G3 point 5's "for client errors only").
+          reasonsAll.push(`retry: call ${call} failed (client/transport error)`)
+          continue
+        }
         const pickRaw = (draft as { pick?: unknown } | null)?.pick
         if (pickRaw === undefined || pickRaw === null) {
-          // RULING G3 point 5: no "pick" key at all is indistinguishable from a transport failure
-          // (`askWriter` unifies both into `{}`) — this is the ONE case worth a retry, up to the cap.
-          reasonsAll.push(`retry: call ${call} returned no "pick" key`)
-          continue
+          // RULING H4 (fix round H1, phase-h1-rulings.md, Minor — supersedes RULING G3 point 5's
+          // "indistinguishable from a transport failure"): a response that was actually RECEIVED
+          // and parsed (even to `{}`, even empty content) but simply carries no "pick" key is a
+          // DECIDED answer, not a transport failure — a model that reliably omits the key will not
+          // fix itself on a retry. Collapse to candidate 1 immediately; never spend the cap on it.
+          reasonsAll.push(`fallback: call ${call} returned no "pick" key (not a transport failure — collapsing, no retry)`)
+          break
         }
         // A key WAS returned. RULING G3 point 4: a malformed pick, a missing key, an out-of-range
         // index are ALL the same safe answer — candidate 1 — and NONE of them is worth a retry (a

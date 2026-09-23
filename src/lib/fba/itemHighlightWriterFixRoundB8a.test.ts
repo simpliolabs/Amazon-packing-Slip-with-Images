@@ -893,7 +893,13 @@ describe('RULING S6: R1\'s produce*-path brand pins, committed through BOTH prod
       // — a stronger guarantee than the old retry-loop defence this test used to pin.
       const { client, calls } = stubClient({ parts })
       const result = await produceItemHighlights(input, { openai: client })
-      expect(calls.length).toBe(IH_WRITER_RETRY_CAP) // every attempt was the SAME unusable shape
+      // RULING H4 (fix round H1, phase-h1-rulings.md, supersedes this pin's own "every attempt was
+      // retried" comment above): a well-formed response with no usable "pick" key is a DECIDED
+      // answer, not a client/transport error, so it is never retried any more — 1 call, not
+      // `IH_WRITER_RETRY_CAP`. The safety guarantee this test pins (never ships the adversary's own
+      // unbranded line) is unaffected — the search's own candidate list never contained it either
+      // way.
+      expect(calls.length).toBe(1)
       // Whichever safe result shipped (the enumerated candidate or the composer's own fallback),
       // it MUST carry the brand — never the adversary's own unbranded text.
       expect(lineCarriesBrand(result.value, 'Comfort Colors'), result.value).toBe(true)
@@ -938,7 +944,8 @@ describe('RULING S6: R1\'s produce*-path brand pins, committed through BOTH prod
       // SINGLE-design path.
       const { client, calls } = stubClient({ parts })
       const single = await produceItemHighlights(input, { openai: client })
-      expect(calls.length).toBe(IH_WRITER_RETRY_CAP)
+      // RULING H4: superseded — see the comment on the identical assertion in the test above.
+      expect(calls.length).toBe(1)
       expect(lineCarriesBrand(single.value, 'Comfort Colors'), single.value).toBe(true)
       expect(single.value).not.toBe(line) // the adversary's own line never ships
 

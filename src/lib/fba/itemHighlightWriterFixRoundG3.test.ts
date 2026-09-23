@@ -65,6 +65,27 @@ function stubClient(answers: unknown[]) {
   }
 }
 
+/** RULING H4 (fix round H1): a genuine client/transport failure — `askWriter`'s own catch block —
+ *  is the ONLY case still worth a retry. `sequence` entries are either a well-formed answer object
+ *  (a real, successfully-received response) or the literal `'THROW'` (a network/API exception),
+ *  distinct from `stubClient`'s answers, which can never throw. */
+function stubClientFlaky(sequence: (unknown | 'THROW')[]) {
+  let n = 0
+  const calls: unknown[] = []
+  return {
+    calls,
+    client: {
+      chat: { completions: { create: async () => {
+        const a = sequence[Math.min(n, sequence.length - 1)]
+        n++
+        calls.push(a)
+        if (a === 'THROW') throw new Error('simulated client/transport failure')
+        return { choices: [{ message: { role: 'assistant', content: JSON.stringify(a) }, finish_reason: 'stop' }] }
+      } } },
+    } as never,
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // G3 point 1: enumerateWriterCandidates — every candidate returned has ALREADY passed the FULL
 // acceptance path, the search is bounded, and the bound is reported.
@@ -103,19 +124,32 @@ describe('G3 point 1: enumerateWriterCandidates only ever returns judge-accepted
     expect(result.bounded).toBe(false)
   })
 
-  it('MUTATION-CLASS PIN: candidates are RANKED (fewer keyword-shaped clauses, then closer to the fill target, then more distinct pool units) — never merely FOUND in an arbitrary order', () => {
+  it('MUTATION-CLASS PIN (RULING H3, fix round H1 — supersedes the old uniform-sort pin): candidate 1 is the GLOBAL best by band-fit-then-clause-count-then-pool-breadth, and the rest fill round-robin across length buckets so the shown set SPANS the band, never merely FOUND in an arbitrary order', () => {
     const units = realUnits()
     const result = enumerateWriterCandidates(units, { truthCtx, runTail })
-    expect(result.candidates.length).toBeGreaterThan(1) // a vacuous sort-order check needs 2+
+    expect(result.candidates.length).toBeGreaterThan(1) // a vacuous check needs 2+
+    const keyOf = (c: typeof result.candidates[number]) => [c.lengthFromTarget, c.keywordShapedClauses, -c.distinctPoolUnits]
+    const rank1Key = keyOf(result.candidates[0])
+    // Candidate 1 (RULING H3(a)'s new primary key) must never rank STRICTLY WORSE than any other
+    // SHOWN candidate — it is the global best of the full ranked list, never displaced by the
+    // round-robin fill (RULING H3(b), which only orders how the REST are chosen).
     for (let i = 1; i < result.candidates.length; i++) {
-      const a = result.candidates[i - 1]
-      const b = result.candidates[i]
-      const aKey = [a.keywordShapedClauses, a.lengthFromTarget, -a.distinctPoolUnits]
-      const bKey = [b.keywordShapedClauses, b.lengthFromTarget, -b.distinctPoolUnits]
-      // `a` (earlier) must never be STRICTLY WORSE than `b` (later) lexicographically.
+      const key = keyOf(result.candidates[i])
       let cmp = 0
-      for (let k = 0; k < aKey.length && cmp === 0; k++) cmp = aKey[k] - bKey[k]
-      expect(cmp, `candidate ${i - 1} (${JSON.stringify(aKey)}) must rank <= candidate ${i} (${JSON.stringify(bKey)})`).toBeLessThanOrEqual(0)
+      for (let k = 0; k < rank1Key.length && cmp === 0; k++) cmp = rank1Key[k] - key[k]
+      expect(cmp, `candidate 1 (${JSON.stringify(rank1Key)}) must rank <= candidate ${i + 1} (${JSON.stringify(key)})`).toBeLessThanOrEqual(0)
+    }
+    // Within EACH length bucket, the round-robin fill preserves the underlying band-fit rank order
+    // — it only INTERLEAVES buckets, never reorders candidates WITHIN one.
+    const buckets: readonly [number, number][] = [[97, 104], [104, 112], [112, 126]]
+    for (const [lo, hi] of buckets) {
+      const inBucket = result.candidates.slice(1).filter((c) => c.line.length >= lo && c.line.length < hi)
+      for (let i = 1; i < inBucket.length; i++) {
+        const a = keyOf(inBucket[i - 1]); const b = keyOf(inBucket[i])
+        let cmp = 0
+        for (let k = 0; k < a.length && cmp === 0; k++) cmp = a[k] - b[k]
+        expect(cmp, `bucket [${lo},${hi}): ${JSON.stringify(a)} must rank <= ${JSON.stringify(b)}`).toBeLessThanOrEqual(0)
+      }
     }
   })
 
@@ -237,24 +271,35 @@ describe('G3 points 4/5: every failure mode collapses onto candidate 1 (except z
     expect(out.calls).toBe(1)
   })
 
-  it('a MISSING "pick" key ({}) is a client-error SHAPE — retried up to IH_WRITER_RETRY_CAP, then falls back to candidate 1', async () => {
+  it('RULING H4 (fix round H1, supersedes this pin\'s own old title/expectations): a MISSING "pick" key ({}) from a well-formed, successfully-received response is a DECIDED answer, never retried — 1 call, falls back to candidate 1', async () => {
     const cands = expectedCandidates()
     const { client, calls } = stubClient([{}, {}, {}])
     const out = await runWriterForDesign({ composed, fallbackHold: null, designName: 'Dear Queen', truthCtx, runTail, deps: { openai: client } })
     expect(out.accepted).toBe(true)
     expect(out.value).toBe(cands[0].line)
-    expect(out.calls).toBe(IH_WRITER_RETRY_CAP)
-    expect(calls.length).toBe(IH_WRITER_RETRY_CAP)
+    expect(out.calls).toBe(1)
+    expect(calls.length).toBe(1) // never retried — a well-formed keyless response is not a client error
   })
 
-  it('a MISSING "pick" key that RECOVERS on the 2nd call ships the RECOVERED pick, 2 calls, source byModel', async () => {
+  it('RULING H4: a GENUINE client/transport failure (a thrown exception) that RECOVERS on the 2nd call ships the RECOVERED pick, 2 calls, source byModel — the retry budget is for THIS case only', async () => {
     const cands = expectedCandidates()
     expect(cands.length).toBeGreaterThan(1)
-    const { client } = stubClient([{}, { pick: 2 }])
+    const { client, calls } = stubClientFlaky(['THROW', { pick: 2 }])
     const out = await runWriterForDesign({ composed, fallbackHold: null, designName: 'Dear Queen', truthCtx, runTail, deps: { openai: client } })
     expect(out.accepted).toBe(true)
     expect(out.value).toBe(cands[1].line)
     expect(out.calls).toBe(2)
+    expect(calls.length).toBe(2)
+  })
+
+  it('RULING H4: a well-formed response with no "pick" key does NOT recover on a later call, because it is never retried in the first place — the search\'s top candidate ships on call 1 regardless of what a 2nd call would have said', async () => {
+    const cands = expectedCandidates()
+    const { client, calls } = stubClient([{}, { pick: 2 }]) // a 2nd, VALID answer sits unused
+    const out = await runWriterForDesign({ composed, fallbackHold: null, designName: 'Dear Queen', truthCtx, runTail, deps: { openai: client } })
+    expect(out.accepted).toBe(true)
+    expect(out.value).toBe(cands[0].line) // never reaches the 2nd (valid) answer
+    expect(out.calls).toBe(1)
+    expect(calls.length).toBe(1)
   })
 
   it('the writer DEADLINE already passed before the first call ships candidate 1 with ZERO calls (G3 point 4: "a timeout — candidate 1 ships")', async () => {

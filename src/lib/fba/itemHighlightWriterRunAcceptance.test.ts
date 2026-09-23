@@ -61,6 +61,14 @@ function stubArrangementClient(responses: unknown[]) {
   })
   return { client: { chat: { completions: { create: mockCreate } } } as never, create: mockCreate }
 }
+/** RULING H4 (fix round H1): a client that always THROWS — a genuine transport/client error, the
+ *  ONLY shape still worth a retry up to `IH_WRITER_RETRY_CAP` (a well-formed, successfully-parsed
+ *  response with no "pick" key no longer retries at all — see `stubArrangementClient` callers that
+ *  used to rely on a no-"pick" response spending the full cap). */
+function stubThrowingClient() {
+  const mockCreate = vi.fn(async () => { throw new Error('simulated client/transport failure') })
+  return { client: { chat: { completions: { create: mockCreate } } } as never, create: mockCreate }
+}
 
 /** Greedily assembles a VALID arrangement (real admitted units, joined only with "and"/",") that
  *  renders within [min, max] — deterministic, order-preserving over `units`. Returns null if no
@@ -386,7 +394,7 @@ describe('mechanics: a malformed/hallucinating pick is retried, then falls back 
     brandPick: null as string | null, wearFact: null as string | null,
   }
 
-  it('a response with no "pick" key at all is retried IH_WRITER_RETRY_CAP times, then ships the search\'s OWN top candidate', async () => {
+  it('RULING H4 (fix round H1, supersedes this pin\'s own old title): a well-formed response with no "pick" key at all is a DECIDED answer, never retried — 1 call, ships the search\'s OWN top candidate', async () => {
     const { client, create: c } = stubArrangementClient([
       arrangementJson(['u999']), arrangementJson(['u998']), arrangementJson(['u997']),
     ])
@@ -396,7 +404,7 @@ describe('mechanics: a malformed/hallucinating pick is retried, then falls back 
     const r = await runWriterForDesign({ composed: richComposed, fallbackHold: 'thin-candidates', designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
     expect(r.accepted, JSON.stringify(r.reasons)).toBe(true) // G3 point 4: a malformed response never falls all the way back to "no line"
     expect(r.value).toBe(expectedTop.line)
-    expect(c).toHaveBeenCalledTimes(IH_WRITER_RETRY_CAP)
+    expect(c).toHaveBeenCalledTimes(1) // RULING H4: never retried — a well-formed keyless response is not a client error
     console.log('no-pick-key stub — fell back to candidate 1:', JSON.stringify(r.value))
   })
 
@@ -625,10 +633,12 @@ describe('W8/G8: per-regen call budget (shared across designs) + bounded concurr
       // (a RESOLVED blank, material+fit both real) gives the search real room, so a design that
       // reserves genuinely spends its cap chasing the always-no-"pick"-key stub below.
       const input = { groups, pool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: 'Beach Family' }
-      // Every stub response has no "pick" key -> every design that gets to run spends its FULL
-      // IH_WRITER_RETRY_CAP (3) calls retrying, then falls back to its own top candidate. 18 / 3 =
-      // exactly 6 designs can reserve; the other 4 are skipped with 0 calls each.
-      const { client } = stubArrangementClient([arrangementJson(['does-not-exist'])])
+      // RULING H4 (fix round H1): a well-formed no-"pick" response no longer retries at all (1
+      // call, not the full cap), so this pin's ORIGINAL budget-exhaustion math needs a GENUINE
+      // client/transport failure to still spend the full `IH_WRITER_RETRY_CAP` per design — every
+      // stub call now THROWS. 18 / 3 = exactly 6 designs can reserve; the other 4 are skipped with
+      // 0 calls each.
+      const { client } = stubThrowingClient()
       const result = await produceItemHighlightsPerDesign(input, { openai: client as never })
       const totalCalls = (result.writerLog ?? []).reduce((n, r) => n + r.calls, 0)
       expect(totalCalls).toBeLessThanOrEqual(18)
