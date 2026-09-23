@@ -576,6 +576,42 @@ function isArticleEligibleSpecUnit(u: AdmittedUnit): boolean {
   return !!last && ARTICLE_ELIGIBLE_LAST_WORDS.has(last.word.toLowerCase())
 }
 
+/** RULING F1 (fix round F1, phase-f1-rulings.md, live shadow 2026-09-23): the ONE legality check a
+ *  relation join's RIGHT-hand unit must pass, extracted so it can be shared between a BARE relation
+ *  run (`with`/`in` alone, run.length===1) and a relation run PRECEDED by a list join (`, with` /
+ *  `, in`, run.length===2, below) — F1's own wording is "legal when the relation introduces a
+ *  SPEC-class unit, exactly as a bare relation join already is", i.e. the identical target rule,
+ *  never a second copy of it. Returns the SAME violation text either check used to produce inline,
+ *  so no existing pin asserting that exact wording breaks. */
+function relationTargetViolation(relationGlue: string, right: AdmittedUnit): string | null {
+  if (right.isBrand) {
+    // RULING P2 (fix round B5, truth Important T4, compliance/value B2): regardless of grammar
+    // `kind` (a pool-sourced brand is `kind: 'pool'`; a spec-sourced brand is `kind: 'brand'`,
+    // which WOULD otherwise satisfy `SPEC_KINDS` below), the brand unit is list-join-only. Its
+    // own text is "<Brand> <garment noun>", so "with"/"in" reads as a SECOND garment, not an
+    // attribute of this one ("Retro Sunset Shirt with Comfort Colors Tee").
+    return `relation '${relationGlue}' cannot introduce the brand unit '${right.text}' — the brand unit is list-join only ("," "and" "&" "—" "|"), never after "with"/"in"`
+  }
+  // RULING R6 (fix round B7a, value Important): the wear fact is a CLAUSE ("Can be worn as
+  // Oversized"), not an attribute noun a relation can introduce — "with Can be worn as Oversized"
+  // is ungrammatical English, exactly like the brand shape above. Named explicitly (never left to
+  // fall through to the generic "must introduce a spec fact" message below) so the retry names the
+  // SAME rule the prompt teaches.
+  if (right.kind === 'wear-fact') {
+    // RULING T4 (fix round B9a, value Important): rebuilt from the S2 stand-alone rule's OWN
+    // wording ("must stand ALONE in its own ',' comma clause") — the OLD message here still said
+    // "list-join only" and named "," "and" "&" "—" "|" as the wear fact's valid joins, exactly the
+    // pre-S2 rule this message was supposed to have been retired with. A model that followed THIS
+    // message literally (review B8's value lens measured it) was refused on 4 of those 5 joins
+    // 100% of the time by the S2 check it was never told about.
+    return `relation '${relationGlue}' cannot introduce the wear-fact unit '${right.text}' — the wear fact must stand ALONE in its own "," comma clause, never after "with"/"in"`
+  }
+  if (!SPEC_KINDS.has(right.kind)) {
+    return `relation '${relationGlue}' must introduce a spec fact; '${right.text}' is a ${unitClassName(right.kind)} unit`
+  }
+  return null
+}
+
 function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<string, AdmittedUnit>): string | null {
   if (glueRole(parts[0]) !== 'unit') return 'no glue or punctuation may open the line'
   if (glueRole(parts[parts.length - 1]) !== 'unit') return 'no glue or punctuation may close the line'
@@ -594,6 +630,20 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
       return `too many glue tokens in a row ('${run.map((g) => g.glue).join(' ')}') between '${left.text}' and '${right.text}'`
     }
     if (run.length === 2) {
+      // RULING F1 (fix round F1, Blocking): a LIST join may be followed by a RELATION join —
+      // "Sweatshirts for Women, with 50% Cotton / 50% Polyester" — legal under the EXACT SAME
+      // right-hand-unit rule a BARE relation join already enforces (`relationTargetViolation`,
+      // shared, never a second copy). This costs no truth: §2g already records that a relation
+      // bounds the FACT it attaches, not the SUBJECT it hangs it on — the fact here is the blank's
+      // own spec fact, exactly as a bare "with 50% Cotton / 50% Polyester" already was legal. 12 of
+      // 18 live shadow attempts on B0DSCDZC6K (2026-09-23) used exactly this shape and were wrongly
+      // refused before this ruling.
+      if (roles[0] === 'list' && roles[1] === 'relation') {
+        const violation = relationTargetViolation(run[1].glue, right)
+        if (violation) return violation
+        i = j
+        continue
+      }
       if (roles[1] !== 'article' || roles[0] === 'article') {
         return `'${run[0].glue} ${run[1].glue}' is not a legal join between '${left.text}' and '${right.text}' — only a join followed by 'a'/'an' is`
       }
@@ -607,30 +657,9 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
     }
     // run.length === 1
     const role = roles[0]
-    if (role === 'relation' && right.isBrand) {
-      // RULING P2 (fix round B5, truth Important T4, compliance/value B2): regardless of grammar
-      // `kind` (a pool-sourced brand is `kind: 'pool'`; a spec-sourced brand is `kind: 'brand'`,
-      // which WOULD otherwise satisfy `SPEC_KINDS` below), the brand unit is list-join-only. Its
-      // own text is "<Brand> <garment noun>", so "with"/"in" reads as a SECOND garment, not an
-      // attribute of this one ("Retro Sunset Shirt with Comfort Colors Tee").
-      return `relation '${run[0].glue}' cannot introduce the brand unit '${right.text}' — the brand unit is list-join only ("," "and" "&" "—" "|"), never after "with"/"in"`
-    }
-    // RULING R6 (fix round B7a, value Important): the wear fact is a CLAUSE ("Can be worn as
-    // Oversized"), not an attribute noun a relation can introduce — "with Can be worn as Oversized"
-    // is ungrammatical English, exactly like the brand shape above. Named explicitly (never left to
-    // fall through to the generic "must introduce a spec fact" message below) so the retry names the
-    // SAME rule the prompt teaches.
-    if (role === 'relation' && right.kind === 'wear-fact') {
-      // RULING T4 (fix round B9a, value Important): rebuilt from the S2 stand-alone rule's OWN
-      // wording ("must stand ALONE in its own ',' comma clause") — the OLD message here still said
-      // "list-join only" and named "," "and" "&" "—" "|" as the wear fact's valid joins, exactly the
-      // pre-S2 rule this message was supposed to have been retired with. A model that followed THIS
-      // message literally (review B8's value lens measured it) was refused on 4 of those 5 joins
-      // 100% of the time by the S2 check it was never told about.
-      return `relation '${run[0].glue}' cannot introduce the wear-fact unit '${right.text}' — the wear fact must stand ALONE in its own "," comma clause, never after "with"/"in"`
-    }
-    if (role === 'relation' && !SPEC_KINDS.has(right.kind)) {
-      return `relation '${run[0].glue}' must introduce a spec fact; '${right.text}' is a ${unitClassName(right.kind)} unit`
+    if (role === 'relation') {
+      const violation = relationTargetViolation(run[0].glue, right)
+      if (violation) return violation
     }
     // RULING K6 (truth Minor "bare article"): a LONE article with no preceding list/relation join is
     // NEVER legal, regardless of the right-hand unit's kind — `validateGrammar`'s docstring already
@@ -798,10 +827,17 @@ export function validateArrangement(
       // RULING G9 (F8): same unknown-key discipline for a glue part.
       const extra = Object.keys(p).filter((k) => k !== 'glue')
       if (extra.length) return { ok: false, violation: `glue part carries unknown key(s): ${extra.join(', ')}` }
-      if (!GLUE_WORDS.has(p.glue) && !GLUE_PUNCTUATION.has(p.glue)) {
+      // RULING F2 (fix round F1, Blocking): normalise the glue token — trim surrounding whitespace,
+      // case-fold — BEFORE matching it against the closed sets. `' with '`, `'With'` and `'with'` are
+      // ONE token; 1 of 18 live shadow attempts (2026-09-23) sent `' with '` (surrounding spaces) and
+      // was refused for a token "outside the closed glue/punctuation set" even though it named a
+      // legal join. The NORMALISED spelling is what is stored (and later rendered/matched) from here
+      // on — `validateGrammar`/`renderArrangement` never see the model's own padding or casing.
+      const normalizedGlue = p.glue.trim().toLowerCase()
+      if (!GLUE_WORDS.has(normalizedGlue) && !GLUE_PUNCTUATION.has(normalizedGlue)) {
         return { ok: false, violation: `glue token '${p.glue}' is outside the closed glue/punctuation set` }
       }
-      out.push({ glue: p.glue })
+      out.push({ glue: normalizedGlue })
     } else {
       return { ok: false, violation: `part is neither {"unit":...} nor {"glue":...}: ${JSON.stringify(p)}` }
     }
@@ -1500,6 +1536,75 @@ function writerReadabilityFidelitySentence(): string {
   return `READABILITY: split the line at every ${splitChars} into clauses. AT LEAST ONE clause must contain a "${relationWords}" JOIN (a glue token connecting two units) — a "${relationWords}" appearing INSIDE a unit's own text does not count, and a line with ZERO such join clauses reads as a keyword list and is rejected. After that, a RUN OF TWO OR MORE consecutive clauses that all lack a "${relationWords}" join counts as ONE list section (a trailing run of any length still counts once; a SINGLE such clause on its own, between two relation clauses, is ordinary prose and does NOT count) — AT MOST ONE such list section is allowed; a SECOND one, split off by another relation clause, will also be rejected. If the design has an identity unit, the line must also name or evoke it.`
 }
 
+/** RULING F3 (fix round F1, Important): builds ONE legal, IN-BAND example arrangement
+ *  DETERMINISTICALLY from THIS design's own admitted units — the live shadow run (2026-09-23)
+ *  measured 18 attempts, taught only by prose rules, producing ZERO accepted lines. A concrete,
+ *  VALIDATED answer for the EXACT units this design offers teaches the shape no amount of prose
+ *  did. Template, legal by CONSTRUCTION under the CURRENT grammar (never a parallel notion of
+ *  "legal" — every step is re-verified against the real `validateArrangement` before this ever
+ *  returns): identity, then its garment-head directly abutted (rule 1's one legal abutment), then
+ *  the composer's mandatory brand unit (if `needBrand` — added FIRST, unconditionally, because
+ *  omitting it would fail `validateArrangement`'s own brand-required rule regardless of length),
+ *  then ordinary pool units list-joined one at a time until the floor is reached (never past the
+ *  ceiling), then AT MOST ONE relation clause carrying a spec fact (the exact shape F1 exists to
+ *  teach: "<pool units>, with <spec fact>"), then the wear fact alone at the very end. Returns
+ *  `null` — the prompt simply omits the example block — whenever no combination of THIS design's
+ *  own units reaches the band, or the template does not validate for this design's specific unit
+ *  shape; an unvalidated example would teach the model the WRONG thing (F3's own words). */
+export function buildWorkedExample(units: readonly AdmittedUnit[]): { json: { parts: ArrangementPart[] }; line: string } | null {
+  const min = CONTENT_CONTRACT.itemHighlights.min
+  const max = CONTENT_CONTRACT.itemHighlights.max
+  const parts: ArrangementPart[] = []
+  const usedIds = new Set<string>()
+
+  /** Appends `unit` (joined by `glue` when `parts` is already non-empty) IF the result still fits
+   *  the ceiling; returns whether it was appended. Never re-implements `renderArrangement` — every
+   *  trial is rendered by the SAME production function the final line renders with. */
+  const tryAppend = (glue: readonly ArrangementPart[], unit: AdmittedUnit): boolean => {
+    if (usedIds.has(unit.id)) return false
+    const lead = parts.length ? glue : []
+    const trial = [...parts, ...lead, { unit: unit.id }]
+    if (renderArrangement(trial, units).length > max) return false
+    parts.push(...lead, { unit: unit.id })
+    usedIds.add(unit.id)
+    return true
+  }
+
+  const identity = units.find((u) => u.kind === 'identity') ?? null
+  const garmentHead = identity ? units.find((u) => u.kind === 'garment-head') ?? null : null
+  const brandUnit = units.find((u) => u.isBrand) ?? null
+  const wearFact = units.find((u) => u.kind === 'wear-fact') ?? null
+  const relationCandidate = units.find((u) => u.kind === 'spec-fact' && !u.isBrand) ?? null
+  const ordinaryPool = units.filter((u) => u.kind === 'pool' && !u.isBrand)
+
+  if (identity) {
+    tryAppend([], identity)
+    if (garmentHead) tryAppend([], garmentHead) // rule 1's ONE legal abutment: NO glue at all.
+  }
+  // The brand is mandatory whenever it exists in `units` (the SAME fallback `validateArrangement`
+  // itself uses when `needBrand` is omitted — see its own doc comment) — added BEFORE the band-fill
+  // loop below so it is never crowded out once the floor is reached.
+  if (brandUnit && !tryAppend([{ glue: ',' }], brandUnit)) return null // cannot fit the mandatory brand at all
+  for (const u of ordinaryPool) {
+    if (renderArrangement(parts, units).length >= min) break
+    tryAppend([{ glue: ',' }], u)
+  }
+  // The ONE relation clause — the shape F1 exists to teach ("<units>, with <spec fact>") — only
+  // once something already precedes it (a relation join can never OPEN the line).
+  if (relationCandidate && parts.length) tryAppend([{ glue: ',' }, { glue: 'with' }], relationCandidate)
+  // The wear fact stands alone in its own comma clause, at the very END (never the start).
+  if (wearFact && parts.length) tryAppend([{ glue: ',' }], wearFact)
+
+  if (parts.length === 0) return null
+  const line = renderArrangement(parts, units)
+  if (line.length < min || line.length > max) return null
+  const json = { parts }
+  // RULING F3's own words: "an example that does not validate would teach the wrong thing." Never
+  // trust the construction above alone — re-check it against the REAL validator before returning.
+  if (!validateArrangement(json, units).ok) return null
+  return { json, line }
+}
+
 /** W1: the prompt — the admitted units grouped by kind WITH THEIR IDS, the design name EXACTLY as
  *  stored (a misspelled seller name — "Billionare", "Definiton" — is reproduced verbatim), the
  *  closed glue/punctuation sets, and the arrangement contract itself, RENDERED from
@@ -1534,6 +1639,11 @@ export function buildWriterPrompt(units: readonly AdmittedUnit[], designName: st
   // RULING P7 (fix round B5, value Minor M1): " in " is 4 chars (1 space + "in" + 1 space), not
   // 5-7 — split each join word out individually instead of one lumped, imprecise range.
   const joinCosts = '", " = 2 chars, " and " = 5 chars, " with " = 6 chars, " in " = 4 chars, " — "/" | "/" & " = 3 chars, "a "/"an " = 2-3 chars'
+  const min = CONTENT_CONTRACT.itemHighlights.min
+  const max = CONTENT_CONTRACT.itemHighlights.max
+  // RULING F3 (fix round F1): built ONCE per prompt render, from THIS design's own admitted units —
+  // see `buildWorkedExample`'s own doc comment for the template and the `null` fallback.
+  const example = buildWorkedExample(units)
   // RULING S1 (fix round B8a, value Blocking B1, folding in m2): NEVER send the DESIGN NAME line
   // when no identity unit was admitted — `designName` null, OR the name was dropped for a trademark,
   // a celebrity, or an untrue claim (`buildAdmittedUnits`'s identity loop). Before this, a DROPPED
@@ -1553,6 +1663,19 @@ export function buildWriterPrompt(units: readonly AdmittedUnit[], designName: st
     brandUnit ? `REQUIRED BRAND UNIT: id "${brandUnit.id}" (text: ${JSON.stringify(brandUnit.text)}) — list-join only.` : '',
     `Unit character lengths (to help you count toward the ${CONTENT_CONTRACT.itemHighlights.min}-${CONTENT_CONTRACT.itemHighlights.max} band): ${lengths}`,
     `Join costs (added between units, roughly): ${joinCosts}`,
+    // RULING F4 (fix round F1, Important): make the band impossible to miss. Three of 18 live
+    // shadow attempts (2026-09-23) rendered 211-318 chars against a max of 125 — the system
+    // message's one-sentence "must be 97-125 characters" was not read as a HARD limit. State the
+    // max again here, plainly, beside the per-unit costs the model needs to count with.
+    `THE MAXIMUM IS ${max} CHARACTERS. A rendered line over ${max} characters is DISCARDED — not truncated, not accepted with a warning, not fixed up afterward. Add up the units you plan to use plus every join between them BEFORE you answer, and stop choosing units once you are near the limit.`,
+    // RULING F3 (fix round F1, Important): a worked example built by CODE from THIS design's own
+    // admitted units — rules alone produced 18 refusals and 0 accepted lines in the live shadow
+    // run. `example` is `null` whenever this design's own units cannot reach the band or the
+    // template does not validate for this exact shape (`buildWorkedExample`'s own doc comment) —
+    // the block below is simply omitted then, never a broken or unvalidated example.
+    example
+      ? `EXAMPLE — a VALID answer for this exact design (built from the units above, and it passes every rule above): ${JSON.stringify(example.json)} renders to: ${JSON.stringify(example.line)} — ${example.line.length} chars, inside the ${min}-${max} band. This is ONE legal arrangement, not the only one; build your OWN choice of units and joins from what is offered above.`
+      : '',
     priorViolations.length
       ? `Your previous attempt was REJECTED for: ${priorViolations.join('; ')}. Fix these specific problems by choosing a DIFFERENT arrangement — do not repeat the same rejected parts.`
       : '',
