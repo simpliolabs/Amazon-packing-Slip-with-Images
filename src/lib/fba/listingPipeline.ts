@@ -2816,13 +2816,16 @@ export async function produceItemHighlightsPerDesign(
   // is now computed PER DESIGN, from the SAME admitted units `runWriterForDesign` will build (a
   // cheap, pure, local call — never billable): the 4 short-atom designs reserve only 3 each (12
   // total), the 2 long-atom designs reserve 4 each (8 total) — worst case 20, still 2 over the
-  // default 18, so the SAME probe now serves 5 of 6, not the full 6. This is a genuine, measured
-  // improvement (4 -> 5 of 6), not a complete fix — the residual is stated here, per RULING N5's own
-  // "pin the measured N-of-6 so the flip is made with eyes open", rather than silently claimed as
-  // fully closed. Raising `IH_WRITER_MAX_CALLS`'s default is the OTHER half the ruling names and is
-  // deliberately NOT taken here — it is a well-pinned historical constant
-  // (`itemHighlightWriterRunAcceptance.test.ts`'s G8 exact-18 pin) this round has no measured reason
-  // to move, and the PO can raise it via the env var with eyes open once this residual matters live.
+  // (then-)default 18, so the SAME probe served 5 of 6, not the full 6. RULING N5 named this a
+  // genuine, measured improvement (4 -> 5 of 6), not a complete fix, and deliberately did NOT raise
+  // `IH_WRITER_MAX_CALLS`'s default — "this round has no measured reason to move" it.
+  // RULING P4 (round P, Blocking — phase-p1-rulings.md) IS that reason: `deadwhy.ts` measured the
+  // 6th design (MHG, this same family) skipped with `reasons: ["skip: per-regen call budget (18)
+  // exhausted"]` — the composer's own HOLD then ships as `""`, an EMPTY Item Highlight on a real
+  // CHILD PUSH ROW, under nothing more exotic than "the humanizer is on and the chooser throws" (a
+  // client error, not a bug). The default is now 24 (`itemHighlightWriter.ts`'s own P4 doc
+  // comment) — the theoretical worst case for a 6-design family, clear of the measured 20 — and
+  // `itemHighlightWriterHumanizer.test.ts` pins 6 of 6 served under this exact scenario.
   let callsReserved = 0
   const writerLogByIndex: (IhWriterLogRow | null)[] = new Array(built.perDesign.length).fill(null)
   // RULING K10 (fix round B4, wire Important I2): a REGEN-LEVEL wall-time deadline, checked before

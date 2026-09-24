@@ -73,18 +73,27 @@ export function ihWriterModel(raw: string | undefined = process.env.IH_WRITER_MO
 }
 
 /** RULING W8 (F7, F9): the PER-REGEN call budget, counted ACROSS designs — distinct from
- *  `IH_WRITER_RETRY_CAP` below (the per-DESIGN retry cap, 1+2). Default 18. Echoed in `/api/health`
- *  so the bound is readable from outside the container, same convention as every other model/count
- *  pin in that route.
- *  RULING W5 (fix round B7b, wire minor): `Number.parseInt` parses a PREFIX, exactly the P11 defect
- *  already fixed on `ihWriterDeadlineMs` below — `'2.9'` silently became `2` and `/api/health` echoed
- *  a value nobody set. Require the trimmed value to be CLEANLY all-digits first, same as the
- *  deadline; anything else falls back to the default exactly as an absent env var does. */
+ *  `IH_WRITER_RETRY_CAP` below (the per-DESIGN retry cap, 1+2). Echoed in `/api/health` so the
+ *  bound is readable from outside the container, same convention as every other model/count pin
+ *  in that route.
+ *  RULING P4 (round P, Blocking — phase-p1-rulings.md): default RAISED 18 -> 24. N5 (round N)
+ *  sized the per-design reservation to what a design's own admitted units would actually attempt
+ *  (never a uniform worst case) and MEASURED the residual with its eyes open: on this repo's real
+ *  B0DSCDZC6K family, the reservation totals 20 (4 short-atom designs at 3 each + 2 long-atom
+ *  designs at 4 each) against the OLD default of 18 — 2 over, so `deadwhy.ts` (round P) measured
+ *  the LAST design in reservation order (MHG) skipped entirely: `writerLog` reads `accepted=false,
+ *  calls=0, reasons=["skip: per-regen call budget (18) exhausted"]`, and the composer's own hold
+ *  (`under-floor-no-repeat`) ships as `""` — an EMPTY Item Highlight on the CHILD PUSH ROW,
+ *  humanizer-caused starvation N5 named but chose not to close ("a well-pinned historical constant
+ *  this round has no measured reason to move" — P4 is that reason). 24 is `IH_WRITER_RETRY_CAP (3)
+ *  + IH_HUMANIZER_CALL_BUDGET (1)` times every one of this fixture's 6 designs — the THEORETICAL
+ *  worst case for a 6-design family (every design maximally long-atom, every call a client
+ *  failure), comfortably clear of the 20 this round measured, not merely patched to clear it. */
 export function ihWriterMaxCallsBudget(raw: string | undefined = process.env.IH_WRITER_MAX_CALLS): number {
   const trimmed = (raw ?? '').trim()
-  if (!/^[0-9]+$/.test(trimmed)) return 18
+  if (!/^[0-9]+$/.test(trimmed)) return 24
   const n = Number.parseInt(trimmed, 10)
-  return n > 0 ? n : 18
+  return n > 0 ? n : 24
 }
 
 /** RULING K10 (fix round B4, wire Important I2): a REGEN-LEVEL wall-time deadline for the
@@ -2110,10 +2119,10 @@ export function enumerateWriterCandidates(
   // because slot 1 is decided BEFORE an alternate is ever considered, not because of a tiebreak or a
   // post-hoc search over a ranking alternates already competed in.
   // Each group's SOURCE member is the one with NO `altOf` (every alternate names its own source by
-  // that field; exactly one member per group lacks it) — found explicitly, never assumed to be
+  // that field; exactly one member per group lacks it) -- found explicitly, never assumed to be
   // `members[0]`: production's own `humanizeAdmittedUnits` always appends alternates AFTER their
   // source, so `members[0]` is the source in every REAL call, but a test (or any future caller) that
-  // hands this function an alt-before-its-source array must get the identical zero-alt guarantee —
+  // hands this function an alt-before-its-source array must get the identical zero-alt guarantee --
   // the property is "the group's source", never "whichever member happened to sort first".
   const sourceOnlyGroups = ordinaryGroups.map((members) => [members.find((m) => !m.altOf) ?? members[0]])
   const candidatesSourceOnly = searchPass(sourceOnlyGroups)
@@ -2576,12 +2585,45 @@ function humanizerPunctuationMultisetViolation(sourceText: string, rewrite: stri
   for (const [ch, count] of rewriteCounts) if (count > (sourceCounts.get(ch) ?? 0)) return true
   return false
 }
+/** RULING P5 (round P, Important — phase-p1-rulings.md): "O6 bounded punctuation by count but not
+ *  POSITION, so a source's single hyphen or slash is still repositioned, including into a new
+ *  compound word." Measured: `"Sweatshirts - Fall Crewneck"` -> `"Sweatshirts Fall Crewneck -"`
+ *  (the SAME single hyphen, relocated to the tail) and -> `"Sweatshirts Fall-Crewneck"` (glued
+ *  mid-word, MAKING a compound the source never had) both passed O6's multiset check unchanged —
+ *  the count of hyphens (1) never moved, only where it sat. Fenced by CONTEXT: every punctuation
+ *  character in the rewrite must occur between the SAME pair of case-folded neighbouring
+ *  characters (or a string edge, `'\0'`) that character occupied SOMEWHERE in the source — a
+ *  reorder that carries a punctuation mark's own neighbours along with it (there is no such case
+ *  in this net's admitted pool text, but the rule does not depend on that) still passes; one that
+ *  drops it at a NEW edge or glues it into a word it never touched does not. */
+function humanizerPunctuationContexts(text: string): ReadonlySet<string> {
+  const t = text.toLowerCase()
+  const contexts = new Set<string>()
+  for (let i = 0; i < t.length; i++) {
+    if (!isHumanizerPunctuationChar(t[i])) continue
+    contexts.add(`${t[i]}|${i > 0 ? t[i - 1] : '\u0000'}|${i + 1 < t.length ? t[i + 1] : '\u0000'}`)
+  }
+  return contexts
+}
+function humanizerPunctuationPositionViolation(sourceText: string, rewrite: string): boolean {
+  const allowed = humanizerPunctuationContexts(sourceText)
+  const r = rewrite.toLowerCase()
+  for (let i = 0; i < r.length; i++) {
+    if (!isHumanizerPunctuationChar(r[i])) continue
+    const context = `${r[i]}|${i > 0 ? r[i - 1] : '\u0000'}|${i + 1 < r.length ? r[i + 1] : '\u0000'}`
+    if (!allowed.has(context)) return true
+  }
+  return false
+}
 function humanizerCharacterSetViolation(sourceText: string, rewrite: string): boolean {
   const allowed = humanizerAllowedCharSet(sourceText)
   for (const ch of rewrite.toLowerCase()) if (!allowed.has(ch)) return true
   // O6: every character is individually ALLOWED (the set check above passed), but a punctuation
   // character may still be OVER-USED relative to the source's own count of it.
   if (humanizerPunctuationMultisetViolation(sourceText, rewrite)) return true
+  // P5: count is bounded (just above), but a punctuation mark could still be REPOSITIONED —
+  // relocated to a new edge or glued into a word it never touched.
+  if (humanizerPunctuationPositionViolation(sourceText, rewrite)) return true
   return false
 }
 
@@ -2620,6 +2662,29 @@ function humanizerCaseViolation(sourceText: string, rewrite: string): boolean {
     const lower = w.toLowerCase()
     if (HUMANIZER_INSERTABLE_WORDS.has(lower) && w === lower) continue // a genuinely NEW word, in its one canonical (lowercase) spelling
     return true // this exact CASED spelling was never one of the source's own words, and is not a canonically-cased insertion either
+  }
+  // RULING P3 (round P, Blocking — phase-p1-rulings.md): the WORD-level check above reads
+  // `WORD_RE = /[A-Za-z0-9]+.../` (J4.1/J4.2's own tokenizer), which sees ONLY `[A-Za-z0-9]` — a
+  // word built entirely from characters outside that class (an accented Latin letter, Cyrillic, a
+  // German ß) produces ZERO word tokens and is structurally invisible to it: `Café` -> `CafÉ`,
+  // `Piñata` -> `PiÑata` and `ж` -> `Ж` all measured `{ok:true}` (`r3-case.ts`'s exhaustive scan
+  // over U+0080-U+2FFFF: 1,459 surviving code points). A SECOND, per-CHARACTER pass closes exactly
+  // that gap — restricted to characters `WORD_RE` itself cannot match at all (never overlapping
+  // the word-level check's own ASCII letters, so it cannot re-open the gap the FIRST version of
+  // this fix measured on plain ASCII, `phase-p1-review` MINOR: lowering only a source's leading
+  // "E" in "Embroidered" was wrongly `{ok:true}` once a shared insertable-WORD character — the
+  // 'e' in "the" — was let cover an exhausted ASCII 'e' budget it was never meant to). No
+  // insertable-word exemption is needed here at all: every one of the six insertable words
+  // (`for`/`a`/`an`/`the`/`of`/`and`) is pure ASCII, so it can never supply one of these non-ASCII
+  // characters — a non-ASCII cased character in the rewrite must come from the source, full stop. */
+  const isNonWordRuleCased = (ch: string) => ch.toLowerCase() !== ch.toUpperCase() && !/[A-Za-z0-9]/.test(ch)
+  const remainingChars = new Map<string, number>()
+  for (const ch of sourceText) { if (isNonWordRuleCased(ch)) remainingChars.set(ch, (remainingChars.get(ch) ?? 0) + 1) }
+  for (const ch of rewrite) {
+    if (!isNonWordRuleCased(ch)) continue
+    const left = remainingChars.get(ch) ?? 0
+    if (left > 0) { remainingChars.set(ch, left - 1); continue }
+    return true
   }
   return false
 }

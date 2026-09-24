@@ -717,7 +717,7 @@ describe('RULING N5: the shared per-regen call budget reservation, measured thro
     return { chat: { completions: { create: async () => { throw new Error('simulated transport failure') } } } } as never
   }
 
-  it('under total transport failure, the shared budget (default 18) now serves 5 of 6 designs, not the pre-N5 4 of 6 — the 4 short-atom designs reserve 3 each (never 4), never budget-exhausted', async () => {
+  it('RULING P4 (round P): under total transport failure, the shared budget (default RAISED 18 -> 24) now serves 6 of 6 designs, not the pre-P4 5 of 6 (deadwhy.ts measured MHG starved: budget 20 reserved against an 18 budget shipped an EMPTY Item Highlight on a real child push row) — the 4 short-atom designs reserve 3 each (never 4), never budget-exhausted', async () => {
     process.env.IH_WRITER = 'on'
     process.env.IH_HUMANIZER = 'on'
     try {
@@ -726,13 +726,19 @@ describe('RULING N5: the shared per-regen call budget reservation, measured thro
       const served = rows.filter((r) => !r.reasons.some((x) => x.includes('budget')))
       const budgetExhausted = rows.filter((r) => r.reasons.some((x) => x.includes('budget')))
       expect(rows.length).toBe(6)
-      expect(served.length).toBe(5)
-      expect(budgetExhausted.length).toBe(1)
+      expect(served.length).toBe(6)
+      expect(budgetExhausted.length).toBe(0)
       // Every SHORT-atom design (BCSG/DQG/EDG/HDG) that was served reserved (and spent) exactly 3
       // calls — the picker's own retry cap, never the pre-N5 uniform 4.
       for (const key of ['BCSG', 'DQG', 'EDG', 'HDG']) {
         const row = rows.find((r) => r.design === key)!
         if (!row.reasons.some((x) => x.includes('budget'))) expect(row.calls).toBe(3)
+      }
+      // The 2 long-atom designs (BB/MHG) now ALSO run to completion — the humanizer's own 1 call
+      // plus the picker's 3 retries, 4 each — total spend 4*3 + 2*4 = 20, comfortably under 24.
+      for (const key of ['BB', 'MHG']) {
+        const row = rows.find((r) => r.design === key)!
+        expect(row.calls).toBe(4)
       }
     } finally {
       delete process.env.IH_WRITER

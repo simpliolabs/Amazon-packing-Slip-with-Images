@@ -140,18 +140,18 @@ describe('B9: IH_WRITER mode resolution', () => {
     expect(ihWriterModel(undefined)).toBe('gpt-4.1')
     expect(ihWriterModel('gpt-5')).toBe('gpt-5')
   })
-  it('W8: IH_WRITER_MAX_CALLS (the per-regen budget) defaults to 18, parses a positive int, ignores garbage', () => {
-    expect(ihWriterMaxCallsBudget(undefined)).toBe(18)
+  it('W8: IH_WRITER_MAX_CALLS (the per-regen budget) defaults to 24 (RULING P4, round P: raised from 18 — deadwhy.ts measured the OLD default starving the last design of a 6-design family, 20 calls reserved against an 18 budget), parses a positive int, ignores garbage', () => {
+    expect(ihWriterMaxCallsBudget(undefined)).toBe(24)
     expect(ihWriterMaxCallsBudget('5')).toBe(5)
-    expect(ihWriterMaxCallsBudget('0')).toBe(18)
-    expect(ihWriterMaxCallsBudget('-3')).toBe(18)
-    expect(ihWriterMaxCallsBudget('bogus')).toBe(18)
+    expect(ihWriterMaxCallsBudget('0')).toBe(24)
+    expect(ihWriterMaxCallsBudget('-3')).toBe(24)
+    expect(ihWriterMaxCallsBudget('bogus')).toBe(24)
     // RULING W5 (fix round B7b, wire minor 1): strict, like `ihWriterDeadlineMs` below —
     // `Number.parseInt` alone parses only a PREFIX, so '2.9' silently became 2 and '/api/health'
     // echoed a value nobody set (review B6/wire, health2.out.txt: "on/-/2.9/1e3 -> 2").
-    expect(ihWriterMaxCallsBudget('2.9')).toBe(18)
-    expect(ihWriterMaxCallsBudget('1e3')).toBe(18)
-    expect(ihWriterMaxCallsBudget('18ms')).toBe(18)
+    expect(ihWriterMaxCallsBudget('2.9')).toBe(24)
+    expect(ihWriterMaxCallsBudget('1e3')).toBe(24)
+    expect(ihWriterMaxCallsBudget('18ms')).toBe(24)
     expect(ihWriterMaxCallsBudget('  5  ')).toBe(5)
   })
   it('IH_WRITER_RETRY_CAP (the PER-DESIGN retry cap) is 3 — distinct constant from the per-regen budget', () => {

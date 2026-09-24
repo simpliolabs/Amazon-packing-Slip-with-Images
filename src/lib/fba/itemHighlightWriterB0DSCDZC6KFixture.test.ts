@@ -54,6 +54,7 @@
  * state by hand now lives ONLY there, read from that test's own run, never retyped in this comment.
  */
 import { describe, it, expect, afterEach } from 'vitest'
+import { createHash } from 'node:crypto'
 import { buildAdmittedUnits, enumerateWriterCandidates, runWriterForDesign, humanizeAdmittedUnits, isHumanizerEligible, type AdmittedUnit } from '@/lib/fba/itemHighlightWriter'
 import { runIhTail } from '@/lib/fba/listingPipeline'
 import { normalizeAudienceLean, type PhraseTruthCtx } from '@/lib/fba/contentTruth'
@@ -399,4 +400,57 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
       }
     })
   }
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// RULING P4 (round P, Blocking, phase-p1-rulings.md — second half): "the flag-off sha256 gate this
+// programme has cited for fifteen rounds is computed over six EMPTY strings and cannot fail."
+// Review `phase-o1-review-reading.md` IMPORTANT 5 traced the round's own throwaway probe script
+// (`o1/flagoff-sha256.ts`) and found it ran with BOTH `IH_WRITER` and `IH_HUMANIZER` unset — on
+// this fixture the composer HOLDS every design at that configuration, so the "corpus" it hashed was
+// six `""` rows: a sha256 that "never fails" because the six rows behind it have no bytes to move.
+// No committed vitest test ever hashed anything at all (a source-scan of this repo's `*.test.ts`
+// files, before this test, found zero references to `createHash`/`sha256`) — every prior round's
+// citation was to that same one-off probe, re-typed by hand each round, never a durable gate.
+// THIS is that gate, made real and durable: hashed over the corpus review IMPORTANT 5 itself named
+// as "the one that carries bytes" — `IH_WRITER=on` (every row below calls `runWriterForDesign`
+// directly), `IH_HUMANIZER=off` — so every one of the 6 rows is the REAL, non-empty, accepted
+// writer line this fixture ships end to end (RULING N4: 6 of 6 accept), never a hold.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+describe('RULING P4 (round P, Blocking): the flag-off sha256 ship gate, over REAL rows this time', () => {
+  afterEach(() => { delete process.env.IH_HUMANIZER })
+
+  async function corpusRows(): Promise<string[]> {
+    delete process.env.IH_HUMANIZER // this gate's own corpus: writer on, humanizer off — never the both-off, six-empty-string corpus the pre-P4 "gate" hashed.
+    const rows: string[] = []
+    for (const d of fixture.designs) {
+      const truthCtx: PhraseTruthCtx = {
+        garmentFamily: fixture.blank.garmentFamily as 'sweatshirt',
+        spec: { material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex, neck: fixture.blank.neck, sleeve: fixture.blank.sleeve } as never,
+        allowedBrand: null, audience: 'adult', field: 'highlights',
+        audienceLean: leanForDesign(d.designKey), designTokens: [d.designName],
+      } as PhraseTruthCtx
+      const composed = { candidates: d.pool, specFacts: SPEC_FACTS, brandPick: null as string | null, wearFact: null as string | null } as never
+      const runTail = (line: string) => runIhTail(line, { titles: [titleFor(d.designName)], blankBrand: null, truthCtx, capacityFamily: false, site: 'p4-sha256-gate' })
+      const r = await runWriterForDesign({ composed, fallbackHold: 'under-floor-no-repeat', designName: d.designName, truthCtx, runTail, deps: { openai: stubPickOneClient() } })
+      rows.push(`${d.designKey}=${r.value}`)
+    }
+    return rows
+  }
+
+  it('the gate is NOT vacuous: every one of the 6 rows it hashes carries real, non-empty bytes (the pre-P4 "gate" hashed 6 EMPTY strings)', async () => {
+    const rows = await corpusRows()
+    expect(rows.length).toBe(6)
+    for (const row of rows) {
+      const value = row.slice(row.indexOf('=') + 1)
+      expect(value.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('PINNED sha256 over the 6-row real corpus — pasted from this test\'s own run, never typed from memory', async () => {
+    const rows = await corpusRows()
+    const hash = createHash('sha256').update(rows.join('\n')).digest('hex')
+    console.log(JSON.stringify({ tag: 'P4_FLAGOFF_SHA256', hash, rows }))
+    expect(hash).toBe('1c89bd43bd874b09b0ff86a571a7e12e13e546677d454a9c3cf790ad9b9b965e')
+  })
 })
