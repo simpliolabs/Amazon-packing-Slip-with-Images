@@ -239,10 +239,10 @@ describe('FAILURE 2 — cross-design contamination on the EXACT live per-child t
 
   it('the ship door binds the per-child scope to the door itself (source pin — no exit can forget it)', () => {
     const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'listingPipeline.ts'), 'utf8')
-    // U2 (Round U) — the ship door's scope now explicitly opts OUT of phrase-name matching
-    // (`phraseNames: false`), because its Set feeds `foreignTokens` to raw per-token `Set.has()`
-    // consumers (contentTruth.ts, titleBand.ts) that never call `isForeignToDesign`.
-    expect(src).toContain("{ familyTitleText: '', poolKeywords: [], strictNames: true, phraseNames: false }")
+    // The title door's base scope: its Set feeds `foreignTokens` to raw per-token `Set.has()`
+    // consumers (contentTruth.ts, titleBand.ts) that never call `isForeignToDesign` — the ONLY
+    // matching mode designScope.ts has, since Round V deleted the phrase-matching option.
+    expect(src).toContain("{ familyTitleText: '', poolKeywords: [], strictNames: true }")
     // 2026-08-22: the scope now also carries the design's BAND half (facts/pool/truthOk), so the
     // truth net and the pad answer to the same design. Still ONE destructure, still bound at the door.
     expect(src).toContain('const { titleTruthDoor, protect, band } = titleScopeFor(c)')

@@ -1038,12 +1038,12 @@ export async function POST(req: NextRequest) {
             priorPerChildTitles: onlySection && Array.isArray(storedRec?.per_child_titles)
               ? (storedRec?.per_child_titles as { sku: string; asin: string; title: string; designName?: string; designKey?: string }[])
               : null,
-            // T8 (Round T): this field was declared on PipelineInput and read by
-            // rejectForeignBullets's prior-restore path (listingPipeline.ts) but no caller ever
-            // populated it — a dead wire, so a bullet the ship door refused was always DROPPED,
-            // never restored from a clean prior. Wired the same way priorPerChildTitles is, one
-            // line up: the stored per_child_bullets column is already selected into `storedRec`
-            // (`select('*')` above).
+            // T8 (Round T): seeds each design group's stored bullets for a keywords/description-only
+            // partial (listingPipeline.ts grounds those fan-outs on the REAL per-design bullets,
+            // not the broadcast prior). Wired the same way priorPerChildTitles is, one line up: the
+            // stored per_child_bullets column is already selected into `storedRec` (`select('*')`
+            // above). (Round V removed this field's other former reader, the per-child bullets ship
+            // door's now-deleted prior-restore path — see designScope.ts's Round V comment.)
             priorPerChildBullets: onlySection && Array.isArray(storedRec?.per_child_bullets)
               ? (storedRec?.per_child_bullets as { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[])
               : null,
@@ -1238,6 +1238,13 @@ export async function POST(req: NextRequest) {
               emit({ type: 'warning', kind: 'degraded', message: 'Backend keywords came back degraded on this run — kept your previous keywords untouched. Run "Regenerate backend keywords" in a minute to refresh them.' })
             } else if (descPreserved) {
               emit({ type: 'warning', kind: 'degraded', message: 'The description came back under the length floor on this run — kept your previous description untouched. Run "Regenerate description" in a minute to refresh it.' })
+            }
+            // V2 (Round V, cross-design leak controller ruling) — REPORT-ONLY: the flagged
+            // bullets/description bytes already shipped unchanged above (no preserve, nothing was
+            // emptied), this is purely an operator surface so a leak that survived the V4 brief
+            // sanitizer is visible without shell access to the server log.
+            if (result.degradedSections?.includes('cross_design_leak')) {
+              emit({ type: 'warning', kind: 'degraded', message: 'One or more designs\' bullets/description still mention a sibling design\'s name — review the flagged copy before pushing. See the server log (DESIGN_SCOPE_REPORT) for which SKU and sentence.' })
             }
             // AI-health bookkeeping (2026-07-08): a hard error that DIDN'T blank this section (e.g. an
             // enrichment call 429'd while the core call survived) still means the account is degraded —
@@ -2078,6 +2085,11 @@ export async function POST(req: NextRequest) {
           // healthy + persisted) but something inside it degraded — say so instead of silence.
           if (kwPreserved) {
             emit({ type: 'warning', kind: 'degraded', message: 'Backend keywords came back degraded on this run — kept your previous keywords untouched. Run "Regenerate backend keywords" in a minute to refresh them.' })
+          }
+          // V2 (Round V, cross-design leak controller ruling) — REPORT-ONLY, same as the partial
+          // path above: nothing was preserved or emptied, this only surfaces the log line.
+          if (result.degradedSections?.includes('cross_design_leak')) {
+            emit({ type: 'warning', kind: 'degraded', message: 'One or more designs\' bullets/description still mention a sibling design\'s name — review the flagged copy before pushing. See the server log (DESIGN_SCOPE_REPORT) for which SKU and sentence.' })
           }
           const hardF = (openai as { __aiHardError?: string }).__aiHardError
           if (hardF) {

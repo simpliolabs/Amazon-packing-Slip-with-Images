@@ -183,13 +183,15 @@ describe('Round S — a stored identity carrying a sibling\'s name is refused, e
     for (const row of hdgRows) expect(row.bullets).toHaveLength(5)
   }, 30_000)
 
-  /** U1/U5 (Round U) — a REFUSED row must leave the child's LIVE copy untouched, never ship
-   *  anything short. Forces a genuine leak (HDG's OWN stored title is corrupted to literally
-   *  carry BB's slogan, so even after S4's fallback resolution HDG's bullets legitimately name
-   *  BB) and pins that the shipped row is EMPTY — `pushFields.resolveProposed`'s bullets case
-   *  then reads `[]` as "nothing to push" and the SKU's currently-live Amazon bullets stand,
-   *  rather than receiving a shortened or lossy array. */
-  it('U1/U5: a per-child row that genuinely leaks a sibling is REFUSED to empty, never shipped short', async () => {
+  /** V1/V2 (Round V) — CORRECTED. Rounds S/T/U each built, armed and re-shaped a subtractive door
+   *  that edited or emptied a "leaking" per-child row; Round V deletes it entirely (measured
+   *  outcome across all three shapes: designScope.ts's Round V comment above
+   *  `detectForeignBullets`). A row that names a sibling now SHIPS UNCHANGED — never emptied,
+   *  never shortened — and the leak is only REPORTED (a console.warn + `degradedSections:
+   *  ['cross_design_leak']`, which route.ts surfaces as an SSE warning). The stored per-child copy
+   *  is therefore never overwritten by an empty row on this account, by construction: there is no
+   *  code path left that produces one. */
+  it('V1/V2: a per-child row that names a sibling SHIPS UNCHANGED and is only REPORTED, never emptied', async () => {
     const LEAK_BULLETS = [
       "BOLD STATEMENT - Featuring the empowering phrase 'Business B*tch,' this sweatshirt celebrates ambition for every day of the week and beyond.",
       'RELAXED FIT - A classic crewneck cut that layers easily for any season and keeps its shape wash after wash for years.',
@@ -202,11 +204,33 @@ describe('Round S — a stored identity carrying a sibling\'s name is refused, e
       chat: { completions: { create: vi.fn(async () => ({ choices: [{ message: { content: JSON.stringify(leakSink) }, finish_reason: 'stop' }] })) } },
     } as unknown as PipelineInput['openai']
     const input: PipelineInput = { ...makeBaseInput(openai), onlySection: 'bullets' }
-    const result = await runListingPipeline(input)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let result: Awaited<ReturnType<typeof runListingPipeline>>
+    let reportLines: string[]
+    try {
+      result = await runListingPipeline(input)
+      // Read the spy's call history BEFORE mockRestore() — mockRestore() implies mockReset(),
+      // which CLEARS .mock.calls, not merely detaches the mock implementation.
+      reportLines = warnSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('DESIGN_SCOPE_REPORT'))
+    } finally {
+      warnSpy.mockRestore()
+    }
     const hdgRows = result.per_child_bullets?.filter((c) => c.designKey === 'HDG') ?? []
     expect(hdgRows.length).toBeGreaterThan(0)
-    for (const row of hdgRows) expect(row.bullets).toEqual([])
-    // BB genuinely owns the slogan — its row ships the full, real five, never collaterally refused.
+    // Never emptied (the ship door is gone) — still five bullets, and the leaking sentence is
+    // never removed. (Not byte-identical to LEAK_BULLETS: the pipeline's OWN pre-existing
+    // deterministic identity floor — unrelated to this round — may still weave HDG's own resolved
+    // name into whichever bullet doesn't yet carry it; that mechanism is untouched by Round V.)
+    for (const row of hdgRows) {
+      expect(row.bullets).toHaveLength(5)
+      expect(row.bullets.some((b) => b.includes("Business B*tch"))).toBe(true)
+    }
+    // The leak is reported, not silent: a DESIGN_SCOPE_REPORT log line naming HDG, and the
+    // existing degraded-sections/SSE surface flagged (never a persist-skip — see designScope.ts's
+    // Round V comment above `detectForeignBullets`).
+    expect(reportLines.some((m) => m.includes('"design":"HDG"'))).toBe(true)
+    expect(result.degradedSections).toContain('cross_design_leak')
+    // BB genuinely owns the slogan — its row ships the full, real five, never flagged at all.
     const bbRows = result.per_child_bullets?.filter((c) => c.designKey === 'BB') ?? []
     for (const row of bbRows) expect(row.bullets).toHaveLength(5)
   }, 30_000)

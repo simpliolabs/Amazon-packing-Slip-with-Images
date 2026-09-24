@@ -99,7 +99,7 @@ import {
 } from '@/lib/fba/contentTruth'
 import {
   buildForeignDesignTokens, designScopeTokens, fillNormTok, isForeignToDesign,
-  nameMatchesSibling, rejectForeignBullets, rejectForeignDescription,
+  nameMatchesSibling, detectForeignBullets, detectForeignDescription,
 } from '@/lib/fba/designScope'
 import { IH_HOLD_MESSAGES, type IhHoldReason, type PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 // Re-exported for every existing importer (buildItemHighlights callers, tests) — the type + message
@@ -419,8 +419,12 @@ export interface PipelineResult {
    *  description PERSISTING against the 900 floor — the same post-audit blind spot as the 118-byte
    *  backend — so census floor violations now degrade-mark and route into this same preserve.
    *  'title' added (title-floor-baseline task): MEASURE-ONLY, unlike the two above — see the `mark`
-   *  call site's comment for why the route does NOT (yet) auto-preserve on it. */
-  degradedSections?: ('backend_keywords' | 'description' | 'title')[]
+   *  call site's comment for why the route does NOT (yet) auto-preserve on it. 'cross_design_leak'
+   *  added (Round V, cross-design leak controller ruling): a per-child bullets/description row
+   *  still named a sibling design — REPORT-ONLY (V2), the bytes ship unchanged; route.ts surfaces
+   *  it as an SSE warning, same shape as the two flags above, never a persist-skip (there is
+   *  nothing degraded to preserve a prior over). */
+  degradedSections?: ('backend_keywords' | 'description' | 'title' | 'cross_design_leak')[]
 }
 
 // ─── Constants / small helpers ────────────────────────────────────────────────
@@ -2592,13 +2596,7 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
     // per-design STRICT-NAMES ship path can never honor it — an exemption sourced from the
     // family title would be circular here for the same reason it is at the bullets/description/
     // title ship door (`perChildDesignScope`, `familyTitleText: ''`).
-    // U2 (Round U, cross-design leak) — `phraseNames: false`: this composer keeps the ORIGINAL
-    // per-token bag-of-words name matching, unchanged. The phrase-based fix (a multi-word name's
-    // surviving tokens must appear as one contiguous phrase, not any bare one of them) targets the
-    // per-child bullets/description ship door specifically (measured, cost1/cost3.probe.test.ts);
-    // this composer's own pad-budget tests are pinned to specific composed strings under the old
-    // semantics, and `itemHighlightWriter.ts`/this programme is explicitly fenced out of this round.
-    { familyTitleText: '', poolKeywords: pool.map((k) => k.keyword), strictNames: true, phraseNames: false },
+    { familyTitleText: '', poolKeywords: pool.map((k) => k.keyword), strictNames: true },
   )
 
   const perDesign: PerDesignItemHighlight[] = groups.map((g) => {
@@ -10510,20 +10508,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return fromTitle || stored
   }
   const perChildDesignVocab = designGroupContexts.map((c) => ({ key: c.key, name: vocabNameFor(c) }))
-  // `phraseNames: false` (explicit): this scope's Set feeds `titleScopeFor` below, which hands it
+  // This scope's Set feeds `titleScopeFor` below, which hands it
   // out as `foreignTokens` to callers that do their OWN raw per-token `Set.has()` membership check
   // WITHOUT going through `isForeignToDesign` — `contentTruth.ts`'s `scrubMoneyPhrase`
   // (`toks.some((t) => foreignTokens.has(t))`) and several `titleBand.ts` money-tail paths.
-  // U2's phrase-joined multi-token Set entries (e.g. "busines tch") are invisible to a raw
-  // single-token `.has()` check, which silently STOPPED catching "Business B*tch" in the title
-  // pathway when this was briefly the shared default (measured, truthBandGate.test.ts regressing).
-  // Kept OLD/unchanged here; the phrase fix is scoped to its own scope below.
-  const perChildBaseScope = buildForeignDesignTokens(perChildDesignVocab, { familyTitleText: '', poolKeywords: [], strictNames: true, phraseNames: false })
-  // U2 (Round U, cross-design leak) — the PHRASE-AWARE twin of the scope above, used ONLY by the
-  // per-child bullets/description ship door (`rejectForeignBullets`/`rejectForeignDescription`,
-  // both of which call ONLY `isForeignToDesign`, never a raw `Set.has()`) — never handed out as
-  // `foreignTokens` to a raw-membership consumer. See designScope.ts's `phraseNames` doc comment.
-  const perChildBaseScopePhrase = buildForeignDesignTokens(perChildDesignVocab, { familyTitleText: '', poolKeywords: [], strictNames: true, phraseNames: true })
+  const perChildBaseScope = buildForeignDesignTokens(perChildDesignVocab, { familyTitleText: '', poolKeywords: [], strictNames: true })
   /* T5 (Round T) — `refusedIdentityVocab` carries forward the ORIGINAL name of any group S4
    * refused/cleared for its OWN identity (see the rebuild loop below): a cleared name must stay
    * FOREIGN vocabulary to every SIBLING even though it is no longer that design's own identity.
@@ -10547,20 +10536,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const out = new Set(base)
     for (const t of refusedVocabToks) if (!own.has(t)) out.add(t)
     perChildScopeCache.set(key, out)
-    return out
-  }
-  // Phrase-aware twin of `perChildDesignScope` above (same T5 refused-identity union), for the
-  // bullets/description ship door only.
-  const perChildScopeCachePhrase = new Map<string, Set<string>>()
-  const perChildDesignScopePhrase = (key: string): Set<string> => {
-    const hit = perChildScopeCachePhrase.get(key)
-    if (hit) return hit
-    const base = perChildBaseScopePhrase(key)
-    if (!refusedVocabToks.size) { perChildScopeCachePhrase.set(key, base); return base }
-    const own = ownTokensByKey.get(key) ?? new Set<string>()
-    const out = new Set(base)
-    for (const t of refusedVocabToks) if (!own.has(t)) out.add(t)
-    perChildScopeCachePhrase.set(key, out)
     return out
   }
   /** ONE per-child exit scope: the design name to protect, the sibling-design rejector, and the
@@ -10614,6 +10589,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       titleTruthDoor: (t: string, produced: boolean) => titleTruthDoor(t, produced, { protect, reject, truth, foreignTokens: foreign }),
     }
   }
+  // V2 (Round V, cross-design leak controller ruling) — a per-child bullets/description row that
+  // still names a sibling design after V4's upstream brief sanitizer is REPORTED here, never
+  // edited (see designScope.ts's Round V comment above `detectForeignBullets`). Collected across
+  // both fan-outs below and folded into `degradedSections` (existing operator surface — route.ts
+  // already emits an SSE warning + skips nothing on that flag) so a leak is visible without shell
+  // access, and the stored/shipped bytes are never touched on its account.
+  const crossDesignLeakReports: { design: string; sku?: string; asin?: string; field: 'bullets' | 'description'; sample?: string }[] = []
   return censusLog({
     ...r,
     // Third arg = the derived money-keyword candidates (TITLE_MONEY_TAIL) — BROADCAST title only in Phase 1.
@@ -10646,39 +10628,48 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const priorForChild = priorTitleForChild(c)
       return { ...c, title: bandTitle(titleTruthDoor(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false), opts?.titleProduced !== false, null, protect, priorForChild, c.designKey || c.sku || c.asin || 'per-child', band) }
     }),
-    // S2 (Round S, 2026-09-24, live B0DSCDZC6K): per_child_bullets/per_child_descriptions get the
-    // SAME sibling-name rejector per_child_titles already has above — `perChildDesignScope`, built
-    // ONCE with `familyTitleText: ''` (non-circular: neither field's own text can license itself)
-    // and `strictNames: true`, feeding `isForeignToDesign` via `rejectForeignBullets`/
-    // `rejectForeignDescription` (designScope.ts). The push DOES consume both columns per SKU
-    // (pushFields.ts resolveProposed prefers per_child_bullets/per_child_descriptions) — a prior
-    // comment here claimed otherwise ("the push does NOT consume them yet") and was stale and false
-    // at this commit's base ref; a `scrubPub`-only exit (trademark/celebrity scrub, blind to a
-    // sibling's name) is how "Business B*tch" shipped in two other designs' bullets for a month.
-    // T2 (Round T) — `buildForeignDesignTokens` answers an UNKNOWN key (never in the `designs`
-    // list it was built with) with an EMPTY set, never the old dangerous union — measured
-    // (unknownkey.probe.test.ts). U4 (Round U) — DROPPED the `&& own` half of this guard the
-    // title door still keeps (:10512 above): T2 restored `key && own` here as "the same guard the
-    // title door has always used", but T2's own source-level fix already makes an unresolved key
-    // safe (empty set), so requiring `own` too was redundant for the case it was restored for —
-    // and it switched the door fully OFF for exactly the cleared-identity design U3/T5 exist to
-    // protect. Measured (cost4.probe.test.ts): when S4 clears a design's OWN stored name to `''`
-    // (because its identity ratcheted onto a sibling's), `key && own` made `foreign` an empty set
-    // for THAT row, so it shipped the live "Business B*tch" bullet unchanged while its correctly-
-    // named sibling was refused. `perChildDesignScope`/`perChildDesignVocab` are built from
-    // `designGroupContexts`, whose keys ARE the known-keys list `buildForeignDesignTokens` was
-    // built with — `key` alone (not `key && own`) is the right and sufficient guard here.
+    // V1/V2 (Round V, cross-design leak controller ruling) — per_child_bullets/per_child_descriptions
+    // NEVER edit or empty a row on a sibling-name match any more. Rounds S/T/U each built, armed and
+    // re-shaped that door and each shape failed a different way (see designScope.ts's Round V
+    // comment above `detectForeignBullets` for the measured outcomes) — a subtractive net with no
+    // additive producer always ships something short, and a refused row was written straight over
+    // the STORED good copy with no emptiness guard downstream (route.ts's partial-persist branch).
+    // The bytes below are the SAME `scrubPub`-only bytes this exit shipped before Round S ever
+    // started; `perChildDesignScope` (the title door's own, unchanged, per-token scope — no phrase
+    // twin any more) is used ONLY to DETECT and REPORT a sibling mention, via
+    // `detectForeignBullets`/`detectForeignDescription` (designScope.ts), which read but never edit.
+    // Over-reporting is acceptable; editing on this signal is not — the cure for the leak itself is
+    // upstream, at the brief the writer is handed.
     per_child_bullets: r.per_child_bullets?.map((c) => {
       const key = c.designKey || c.sku || c.asin || ''
-      const foreign = key ? perChildDesignScopePhrase(key) : new Set<string>()
+      const foreign = key ? perChildDesignScope(key) : new Set<string>()
       const scrubbed = c.bullets.map((b) => scrubPub(b, 'per-child-bullets'))
-      return { ...c, bullets: rejectForeignBullets(scrubbed, foreign) }
+      const { leaking, leakingBullets } = detectForeignBullets(scrubbed, foreign)
+      if (leaking) {
+        console.warn(JSON.stringify({ tag: 'DESIGN_SCOPE_REPORT', field: 'bullets', design: key, sku: c.sku, asin: c.asin, leaking: leakingBullets }))
+        crossDesignLeakReports.push({ design: key, sku: c.sku, asin: c.asin, field: 'bullets', sample: leakingBullets[0] })
+      }
+      return { ...c, bullets: scrubbed }
     }),
     per_child_descriptions: r.per_child_descriptions?.map((c) => {
       const key = c.designKey || c.sku || c.asin || ''
-      const foreign = key ? perChildDesignScopePhrase(key) : new Set<string>()
-      return { ...c, description: rejectForeignDescription(scrubPub(c.description, 'per-child-description'), foreign) }
+      const foreign = key ? perChildDesignScope(key) : new Set<string>()
+      const scrubbedDesc = scrubPub(c.description, 'per-child-description')
+      const { leaking } = detectForeignDescription(scrubbedDesc, foreign)
+      if (leaking) {
+        console.warn(JSON.stringify({ tag: 'DESIGN_SCOPE_REPORT', field: 'description', design: key, sku: c.sku, asin: c.asin }))
+        crossDesignLeakReports.push({ design: key, sku: c.sku, asin: c.asin, field: 'description' })
+      }
+      return { ...c, description: scrubbedDesc }
     }),
+    // Fold the report above into the SAME operator surface `degradedSections` already reaches
+    // (route.ts's SSE `emit({ type: 'warning', kind: 'degraded', ... })` + the ai-recommendations
+    // partial/full paths) — additive only; never removes an existing degradation flag. Evaluated
+    // AFTER both maps above (object-literal property values run in source order), so
+    // `crossDesignLeakReports` is already populated here.
+    degradedSections: crossDesignLeakReports.length
+      ? [...new Set([...(r.degradedSections ?? []), 'cross_design_leak' as const])]
+      : r.degradedSections,
     // Per-design Item Highlights ship per SKU (PO 2026-08-21) — same publish-boundary scrub + the
     // repeat cap the single-design row gets (capItemHighlightRepeats is idempotent on composer
     // output — this defense-in-depth net refusing is an EDGE case, not the normal path).
@@ -11649,19 +11640,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return out.replace(/\s{2,}/g, ' ').replace(/\s*\|\s*\|\s*/g, ' | ').replace(/^\s*\|\s*/, '').replace(/\s*\|\s*$/, '').trim()
   }
   // NON-EMPTY-FAMILY-TITLE-TEXT-OK (S1, Round S): a CANDIDATE-FILTER on the INPUT keyword pool, not
-  // the ship door — the family's niche vocabulary must stay available to every design (same
-  // reasoning as the title candidate filter above). Circularity does not apply: the produced bullet/
-  // description TEXT is gated separately, at the ship door, by `perChildDesignScope`
-  // (`familyTitleText: ''`) via `rejectForeignBullets`/`rejectForeignDescription` (S2) — this pool
-  // scoper only shapes what a writer may draw FROM, never what it is judged BY.
-  // U2 (Round U, cross-design leak) — phraseNames: false (explicit): `scopeKwsToGroup` below does
-  // its OWN raw per-token `foreign.has(t)` check, never `isForeignToDesign` — a phrase-joined
-  // multi-token Set entry would be invisible to it (same class of bug as `contentTruth.ts`'s
-  // `scrubMoneyPhrase`). This is a candidate-POOL filter, not the ship door, so the original
-  // per-token behavior is also the conservative (more-exclusive, never-under-protective) one here.
+  // a ship exit — the family's niche vocabulary must stay available to every design (same
+  // reasoning as the title candidate filter above). Circularity does not apply: the produced
+  // bullet/description TEXT is only ever REPORTED on (never gated) at the per-child exit (V2, Round
+  // V) — this pool scoper only shapes what a writer may draw FROM, never what it is judged BY.
+  // `scopeKwsToGroup` below does its OWN raw per-token `foreign.has(t)` check, never
+  // `isForeignToDesign` — this is a candidate-POOL filter, not a ship exit.
   const foreignToksFor = buildForeignDesignTokens(
     designGroupContexts.map((c) => ({ key: c.key, name: c.designName })),
-    { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: analysis.map((k) => k.keyword), phraseNames: false },
+    { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: analysis.map((k) => k.keyword) },
   )
   // dropTitleCovered: bullets/description pools dedupe against the group's OWN title (token
   // coverage, not raw substring — "gator" inside "alligator" is NOT coverage; review-caught).
