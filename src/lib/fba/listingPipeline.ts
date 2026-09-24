@@ -97,7 +97,10 @@ import {
   type TruthGarmentFamily,
   type TruthAudienceLean,
 } from '@/lib/fba/contentTruth'
-import { buildForeignDesignTokens, designScopeTokens, fillNormTok, isForeignToDesign } from '@/lib/fba/designScope'
+import {
+  buildForeignDesignTokens, designScopeTokens, fillNormTok, isForeignToDesign,
+  rejectForeignBullets, rejectForeignDescription,
+} from '@/lib/fba/designScope'
 import { IH_HOLD_MESSAGES, type IhHoldReason, type PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 // Re-exported for every existing importer (buildItemHighlights callers, tests) — the type + message
 // map now LIVE in perDesignItemHighlights.ts (pure, no OpenAI import) so the client-side listing page
@@ -2576,6 +2579,14 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
     // never foreign to itself. Calling it PER DESIGN below — instead of unioning every design's
     // result into ONE shared set, which is what made every design's own vocabulary foreign to the
     // (single) shared line — is the fix.
+    // NON-EMPTY-FAMILY-TITLE-TEXT-OK (S1, Round S) — HONEST, NOT CLOSED: `strictNames: true` does
+    // NOT make this call circularity-free (VERDICT.md §2, measured: `isForeignToDesign("Business
+    // B*tch", HDG)` is still `false` here on a contaminated family title, because designScope.ts's
+    // titleToks exemption is mode-independent). The correct cure is the SAME one the ship door
+    // applies to titles/bullets/descriptions — `familyTitleText: ''` — but this function composes
+    // for the Item Highlight, whose hold semantics and writer (`itemHighlightWriter.ts`, PR #682)
+    // merged as a SEPARATE, already-shipped programme this task is explicitly scoped OUT of
+    // touching. Left as a KNOWN, tracked gap rather than silently patched or silently ignored.
     { familyTitleText: input.familyTitleText, poolKeywords: pool.map((k) => k.keyword), strictNames: true },
   )
 
@@ -9853,6 +9864,26 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const backendTruthCtx = truthCtxFor('backend')
   const bulletsTruthCtx = truthCtxFor('bullets')
   const descTruthCtx = truthCtxFor('description')
+  /** S3 (Round S, 2026-09-24, live B0DSCDZC6K) — `bulletsTruthCtx`'s `designTokens` is the FAMILY
+   *  UNION, deliberately (comment above `familyDesignNames`): correct for the BROADCAST bullets,
+   *  which are answerable to every design at once. Handing that SAME union to a truth check inside a
+   *  PER-DESIGN group's own rewrite/pad loop makes `phraseTruthVerdict` treat every SIBLING's name as
+   *  a legitimate token for THIS design too — exactly the mechanism `contentTruth.ts`'s own doc block
+   *  names for the Item Highlight ("THIS design's own name here — never the family-wide union
+   *  titles/bullets/backend use — so a sibling's name is never accidentally exempted"). That lesson
+   *  reached the Item Highlight (`designTokens: [g.designName]`, `listingPipeline.ts:2610`) and never
+   *  reached this one remaining per-design bullets consumer (`gatePerChildMultiDesign`'s terminal
+   *  expander). Same garment/brand/audience inputs as `bulletsTruthCtx` — ONLY `designTokens` narrows
+   *  from the union to the one group's own resolved name. */
+  const bulletsTruthCtxForDesign = (name: string): PhraseTruthCtx | null =>
+    buildPhraseTruthCtx({
+      garmentFamily: truthGarmentFamily,
+      mixedFamilies: familyGarmentFamilies,
+      spec: blankSpec,
+      allowedBrand: garmentBrandCanonical || null,
+      designTokens: name?.trim() ? [name.trim()] : [],
+      audienceLean: apparelProduct ? input.audienceLean : null,
+    }, 'bullets')
   /** THE backend fill's truth gate — phrase AND token level (see fillBackendToBudget). */
   const backendTruthOk = (phrase: string): boolean => !backendTruthCtx || phraseTruthVerdict(phrase, backendTruthCtx).ok
   /* SHIP_BAND_NET (#147) — the FACTS the title band net may pad with. Product attributes only:
@@ -10466,12 +10497,27 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const priorForChild = priorTitleForChild(c)
       return { ...c, title: bandTitle(titleTruthDoor(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false), opts?.titleProduced !== false, null, protect, priorForChild, c.designKey || c.sku || c.asin || 'per-child', band) }
     }),
-    // Per-design bullets/description are PERSISTED (scrubbed the same as their broadcast peers), but
-    // the push does NOT consume them yet — pushExecutor/resolveProposed still send the broadcast
-    // bullets/description to every SKU. Per-design PUSH + UI is the next commit (PR3). Until then
-    // these are generated + stored for the UI/push to read; nothing per-design reaches Amazon.
-    per_child_bullets: r.per_child_bullets?.map((c) => ({ ...c, bullets: c.bullets.map((b) => scrubPub(b, 'per-child-bullets')) })),
-    per_child_descriptions: r.per_child_descriptions?.map((c) => ({ ...c, description: scrubPub(c.description, 'per-child-description') })),
+    // S2 (Round S, 2026-09-24, live B0DSCDZC6K): per_child_bullets/per_child_descriptions get the
+    // SAME sibling-name rejector per_child_titles already has above — `perChildDesignScope`, built
+    // ONCE with `familyTitleText: ''` (non-circular: neither field's own text can license itself)
+    // and `strictNames: true`, feeding `isForeignToDesign` via `rejectForeignBullets`/
+    // `rejectForeignDescription` (designScope.ts). The push DOES consume both columns per SKU
+    // (pushFields.ts resolveProposed prefers per_child_bullets/per_child_descriptions) — a prior
+    // comment here claimed otherwise ("the push does NOT consume them yet") and was stale and false
+    // at this commit's base ref; a `scrubPub`-only exit (trademark/celebrity scrub, blind to a
+    // sibling's name) is how "Business B*tch" shipped in two other designs' bullets for a month.
+    per_child_bullets: r.per_child_bullets?.map((c) => {
+      const key = c.designKey || c.sku || c.asin || ''
+      const foreign = key ? perChildDesignScope(key) : new Set<string>()
+      const priorBullets = (input.priorPerChildBullets ?? []).find((p) => (c.sku && p.sku === c.sku) || (!c.sku && c.asin && p.asin === c.asin))?.bullets ?? []
+      const scrubbed = c.bullets.map((b) => scrubPub(b, 'per-child-bullets'))
+      return { ...c, bullets: rejectForeignBullets(scrubbed, foreign, priorBullets) }
+    }),
+    per_child_descriptions: r.per_child_descriptions?.map((c) => {
+      const key = c.designKey || c.sku || c.asin || ''
+      const foreign = key ? perChildDesignScope(key) : new Set<string>()
+      return { ...c, description: rejectForeignDescription(scrubPub(c.description, 'per-child-description'), foreign) }
+    }),
     // Per-design Item Highlights ship per SKU (PO 2026-08-21) — same publish-boundary scrub + the
     // repeat cap the single-design row gets (capItemHighlightRepeats is idempotent on composer
     // output — this defense-in-depth net refusing is an EDGE case, not the normal path).
@@ -10780,10 +10826,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const resolvedGroups = await Promise.all(designGroupInfo.groups.map((group) => resolveGroupDesignName(group)))
       const titleForeignFor = buildForeignDesignTokens(
         resolvedGroups.map((rg) => ({ key: rg.group.key, name: rg.groupDesignName, identity: rg.groupIdentityPhrases })),
-        // Candidate-FILTER semantics (unlike the ship door): the family's niche vocabulary must stay
-        // available to every design, so the family title + pool-frequency exemptions apply exactly as
-        // they do for the bullets/description partition. STRICT on NAMES — another design's name is
-        // foreign however full of it the shared pool is.
+        // NON-EMPTY-FAMILY-TITLE-TEXT-OK (S1, Round S): this is a CANDIDATE-FILTER, not the ship
+        // door — it shapes the INPUT pool a writer may draw from, never the produced title text. The
+        // family's niche vocabulary must stay available to every design, so the family title + pool-
+        // frequency exemptions apply here exactly as they do for the bullets/description partition
+        // below. STRICT on NAMES — another design's name is foreign however full of it the shared
+        // pool is. Circularity does not apply: the REAL gate is the per-child ship door 30 lines
+        // above (`perChildDesignScope`, `familyTitleText: ''`), which now ALSO covers bullets and
+        // descriptions (S2) — this filter is a backstop for pool quality, not the correctness net.
         { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: candidates.map((c) => c.keyword), strictNames: true },
       )
       const groupResults = await Promise.all(resolvedGroups.map(async (rg) => {
@@ -11067,8 +11117,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // TERMINAL per-child bullets expander (INVARIANT 2 + 3 — bundled with Item C). Rewrites any
       // per-child bullet under BULLET_MIN_CHARS via gpt-4.1-mini, keeping the ALL-CAPS hook and
       // running the same deterministic post-scrub as existing bullets.
+      // S3 (Round S): THIS group's OWN truth ctx (`bulletsTruthCtxForDesign`), never the family
+      // union `bulletsTruthCtx` — this rewrite/pad runs PER DESIGN GROUP, and the union would let
+      // `truthOk` treat a SIBLING's name as a legitimate token for this design's rewrite.
       if (gb.length === 5) gb = await expandShortBulletsTerminal(input.openai, gb, {
-        title: ctx.title, designName: ctx.designName, fit, garmentBrand: brand, truth: bulletsTruthCtx,
+        title: ctx.title, designName: ctx.designName, fit, garmentBrand: brand, truth: bulletsTruthCtxForDesign(ctx.designName),
       })
       // 3) Broadcast the gated copy back to EVERY SKU in the group by ctx.skus membership (authoritative —
       //    the per-child designKey is optional and may be unset). They shared one set, so this is free.
@@ -11317,6 +11370,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Raw per-design name tokens — the backend fan-out's SIBLING-DESIGN BLEED ban reads this directly
   // (stricter than the partition: no niche exemption there; its own groupHay corroboration is the exemption).
   const groupNameToks = new Map(designGroupContexts.map((c) => [c.key, new Set(designScopeTokens(c.designName))]))
+  // NON-EMPTY-FAMILY-TITLE-TEXT-OK (S1, Round S): a CANDIDATE-FILTER on the INPUT keyword pool, not
+  // the ship door — the family's niche vocabulary must stay available to every design (same
+  // reasoning as the title candidate filter above). Circularity does not apply: the produced bullet/
+  // description TEXT is gated separately, at the ship door, by `perChildDesignScope`
+  // (`familyTitleText: ''`) via `rejectForeignBullets`/`rejectForeignDescription` (S2) — this pool
+  // scoper only shapes what a writer may draw FROM, never what it is judged BY.
   const foreignToksFor = buildForeignDesignTokens(
     designGroupContexts.map((c) => ({ key: c.key, name: c.designName })),
     { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: analysis.map((k) => k.keyword) },

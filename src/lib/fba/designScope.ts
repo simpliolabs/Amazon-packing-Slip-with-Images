@@ -122,3 +122,63 @@ export function isForeignToDesign(keyword: string, foreign: Set<string>): boolea
   if (foreign.size === 0) return false
   return designScopeTokens(keyword).some((t) => foreign.has(t))
 }
+
+/**
+ * ROUND S (2026-09-24, B0DSCDZC6K) — S1/S2. Two children advertised a THIRD design's slogan in
+ * shopper-facing bullets because `per_child_bullets`/`per_child_descriptions` reached Amazon
+ * through `scrubPub` alone (a trademark/celebrity scrub, blind to a sibling's name) while
+ * `per_child_titles` already had `isForeignToDesign` at its ship door. These two functions give
+ * bullets and descriptions the SAME rejector, through the SAME predicate, so "is this foreign to
+ * design X?" has one answer everywhere a per-child field ships.
+ */
+
+/** The per-child BULLETS ship-door rejector (S2). `bullets` are THIS child's own scrubbed
+ *  candidates; `foreign` is a per-design foreign-token set built the same way the title door builds
+ *  its own (`buildForeignDesignTokens(..., { familyTitleText: '', strictNames: true })` — see
+ *  listingPipeline.ts's `perChildDesignScope`, reused verbatim rather than a second scope). A bullet
+ *  naming a sibling design is refused: restored from `priorBullets` at the SAME index when that
+ *  prior is itself clean, else DROPPED — never replaced with the sibling's slogan, and never with a
+ *  blank placeholder in its place (a shorter true array beats a longer false one). Idempotent and a
+ *  byte-identical no-op when `foreign` is empty (the overwhelming majority of families). */
+export function rejectForeignBullets(
+  bullets: readonly string[],
+  foreign: Set<string>,
+  priorBullets: readonly string[] = [],
+): string[] {
+  if (!foreign.size) return bullets.map((b) => (b ?? '').trim()).filter(Boolean)
+  const out: string[] = []
+  for (let i = 0; i < bullets.length; i++) {
+    const b = (bullets[i] ?? '').trim()
+    if (!b) continue
+    if (!isForeignToDesign(b, foreign)) { out.push(b); continue }
+    const prior = (priorBullets[i] ?? '').trim()
+    if (prior && !isForeignToDesign(prior, foreign)) out.push(prior)
+    // else: drop this ONE bullet. Never ship a sibling's slogan; never pad the gap with ''.
+  }
+  return out
+}
+
+/** Drop whole `<p>…</p>` / `<li>…</li>` blocks (matched as WHOLE tag pairs, never mid-tag) whose
+ *  text carries a foreign mention — the description door's segment-level reject, HTML-shaped the
+ *  way the title door's phrase sweep is text-shaped. `isForeign` receives each block's raw markup;
+ *  tag names never collide with a design-name token (`bulletTokens` only extracts `[a-z0-9]+`
+ *  runs). Cleans an emptied `<ul></ul>` and collapses the whitespace a removed block leaves behind.
+ *  Idempotent; a no-op on HTML with no `<p>`/`<li>` blocks at all (falls through unmatched, unlike a
+ *  whole-string blank). */
+export function stripForeignHtmlBlocks(html: string, isForeign: (segment: string) => boolean): string {
+  if (!html || !html.trim()) return html
+  let out = html.replace(/<(p|li)\b[^>]*>[\s\S]*?<\/\1>/gi, (block) => (isForeign(block) ? '' : block))
+  out = out.replace(/<ul\b[^>]*>\s*<\/ul>/gi, '')
+  out = out.replace(/\s{2,}/g, ' ').trim()
+  return out
+}
+
+/** The per-child DESCRIPTION ship-door rejector (S2). Whole-string fast path (byte-identical
+ *  no-op on the healthy majority); only when the FULL description carries a foreign mention does it
+ *  pay for the block-level split. Falls back to `''` only when EVERY block names a sibling — which
+ *  the push resolver (`pushFields.resolveProposed`) already treats as "nothing to push" rather than
+ *  a broadcast fallback, so the worst case is a refusal, never a shipped lie. */
+export function rejectForeignDescription(description: string, foreign: Set<string>): string {
+  if (!foreign.size || !description || !isForeignToDesign(description, foreign)) return description
+  return stripForeignHtmlBlocks(description, (seg) => isForeignToDesign(seg, foreign))
+}
