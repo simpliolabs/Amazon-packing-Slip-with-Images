@@ -1424,8 +1424,8 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
   // exclusion a pure function of the unit's KIND, never of its position or its neighbours' commas,
   // so `wearFactCloses` is never read by this walk any more (still a valid, default-`false` parameter
   // of `segmentClauses` for any other caller — this walk simply never opts in).
-  const { clauses: truthClauses } = segmentClauses(truthParts, units, TRUTH_CLAUSE_CLOSERS, true)
-  const CROSS_UNIT_CLAIM_EXEMPT_KINDS: ReadonlySet<AdmittedUnitKind> = new Set(['identity'])
+  const { clauses: truthClauses } = segmentClauses(truthParts, units, TRUTH_CLAUSE_CLOSERS)
+  const CROSS_UNIT_CLAIM_EXEMPT_KINDS: ReadonlySet<AdmittedUnitKind> = new Set(['identity', 'wear-fact'])
   const truthById = new Map(units.map((u) => [u.id, u] as const))
   const renderClaimSpan = (parts: readonly ArrangementPart[]): string => renderArrangement(parts, units).trim()
   const reportSpanViolation = (span: string, verdict: { ok: false; reason: PhraseTruthReason }): JudgeWriterLineResult => {
@@ -1816,7 +1816,7 @@ const WRITER_CANDIDATE_MAX_POOL_UNITS = 8
 // depth 5 itself was already only 1.3% of offered candidates and read worse (a spec-sheet run of 5
 // attribute nouns in a row) than every depth-2/3 line it competed with. Lowering the cap to 5 costs
 // zero observed acceptance and shrinks the search.
-const WRITER_CANDIDATE_MAX_REL_UNITS = 6
+const WRITER_CANDIDATE_MAX_REL_UNITS = 5
 /** At most this many full `judgeWriterArrangement` calls (each already running its own `runTail`)
  *  are spent evaluating candidates for ONE design, across every subset/relation-unit/relation-glue/
  *  wear-fact combination — the search stops the INSTANT this is reached, never merely warns after

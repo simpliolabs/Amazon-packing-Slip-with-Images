@@ -1,47 +1,55 @@
 {
   "asin": "B0DSCDZC6K",
-  "note": "RULING I6 (round I, phase-i1-rulings.md, Minor). Three rounds (F1/G1/H1) measured acceptance on this family from a prior session's own scratch directory, never committed, so no later round or reviewer could re-run the same measurement. Landed here as a FIXTURE (identity phrases, pool units, blank specs, the six design keys) — not production code. Per fba-generation-invariants-retrospective.md / unisex-lean-vs-a-women-pool-starves-the-field.md: a Gildan 18000 sweatshirt family, Classic fit, 50/50 cotton-poly blend, family lean UNISEX (48 of 69 real keywords were gendered and correctly refused by the truth rule, which is why the real family holds at 97 for most designs and is not reproduced verbatim here). This fixture instead gives each design a SYNTHETIC pool that deliberately carries one fit/cut-carrying phrase alongside ordinary ones (the exact class phase-h1-review-truth.md's t8-scale.ts swept, and the live 'relaxed unisex fit' defect came from) plus 1-2 ordinary keyword phrases, so a future round measures the SAME shape of family H1/I1 exist to guard, not the shape that trivially never carries the class at all.",
+  "note": "RULING K4 (fix round K1, phase-k1-rulings.md, Important — closing review I1's IMPORTANT 2, which found the PRIOR version of this same file synthetic under the live ASIN, the third time a synthetic number had been presented as the live one; RULING H6/I6 exist to stop exactly that). Every field below is either (a) sourced from a recorded artefact, cited inline, or (b) a structural default this codebase gives every OTHER fixture of the same shape, called out as such — nothing here is invented to make a number land.\n\n(a) RECORDED: designKeys/designNames — the PO, this session (phase-k1-rulings.md, RULING K4): BB='Business B*tch', BCSG='Billionaire Coming Soon', DQG='Don't Quit', EDG='Entrepreneur Definition', HDG='Hustle Definition', MHG='Mother Hustler'. The LIVE store currently holds two typos the PO is correcting: 'Billionare Coming Soon' (BCSG) and 'Hustle Definiton' (HDG) — this fixture carries the CORRECTED spellings; production listing_content on B0DSCDZC6K may still read the typo'd form until the PO's own correction ships. designKey 'BB' (Business B*tch) is recorded as SKIP AT ADMISSION — 1 admitted unit only (phase-i1-review-value.md §1) — so it is omitted from `designs` below rather than given an invented pool.\n\n(a) RECORDED: pool — verbatim from the PO's own live shadow run (IH_WRITER=shadow, B0DSCDZC6K, 2026-09-23, sha f4317ce), phase-f1-report.md §0: 'Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'. This is the family's ONE shared pool (the shadow run named it once, not per design) — every design below is given the SAME six phrases, never a per-design invention.\n\n(a) RECORDED: blank — Gildan 18000, 50/50 (cotton/polyester) crewneck, Classic fit, lean_female (RULING K4, phase-k1-rulings.md). `material` is written '50% Cotton / 50% Polyester' to match this repo's own spelling convention for a 50/50 blend (phase-i1-review-value.md's own value-live-pool.ts probe, which measured this SAME family's fill band, used the identical string for the identical blank).\n\n(b) STRUCTURAL DEFAULT, not independently recorded for this ASIN: `brandInCopy: false` — every Gildan-blank fixture in this codebase (blankSpecs.ts's own Gildan rows; every writer probe built on a Gildan blank) carries this value, because Gildan does not print its own name on the garment; called out here rather than silently assumed.\n\n`specFacts` is DERIVED, not recorded: the composer's own admitted-spec-fact convention for a Classic-fit, 50/50-material, GENDERED-lean (female) family is `['<fit> Fit', '<material>']`, with the 'Unisex Fit' filler withheld because the lean is gendered (`buildAdmittedUnits`'s own genderedLean rule, itemHighlightWriter.ts) — never a fact this fixture invents.",
   "blank": {
     "brand": "Gildan",
     "brandInCopy": false,
     "fit": "Classic",
-    "material": "Cotton/Polyester Blend",
-    "unisex": true,
+    "material": "50% Cotton / 50% Polyester",
+    "unisex": false,
     "garmentFamily": "sweatshirt",
     "styleCode": "18000",
-    "audienceLean": "unisex"
+    "audienceLean": "women"
   },
-  "specFacts": ["Classic Fit", "Unisex Fit", "Cotton Polyester Blend"],
+  "specFacts": ["Classic Fit", "50% Cotton / 50% Polyester"],
+  "pool": [
+    "Embroidered Sweatshirts for Women",
+    "Sweatshirts for Women Trendy",
+    "Graphic Crewneck Sweatshirts Women",
+    "Fall Graphic Sweatshirts for Women",
+    "Fun Sweatshirts for Women",
+    "Fall Crewneck"
+  ],
   "designs": [
     {
-      "designKey": "A",
+      "designKey": "BCSG",
+      "designName": "Billionaire Coming Soon",
+      "liveTypo": "Billionare Coming Soon",
+      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
+    },
+    {
+      "designKey": "DQG",
       "designName": "Don't Quit",
-      "pool": ["Relaxed Weekend Layer", "Perfect for Layering Season", "Cute Crewnecks"]
+      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
     },
     {
-      "designKey": "B",
-      "designName": "Boss Definition",
-      "pool": ["Oversized Cozy Layer", "Made For Chilly Mornings", "Cute Crewnecks"]
+      "designKey": "EDG",
+      "designName": "Entrepreneur Definition",
+      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
     },
     {
-      "designKey": "C",
-      "designName": "Real King",
-      "pool": ["Slim Everyday Layer", "Perfect for Layering Season", "Embroidered Sweatshirts for Women"]
+      "designKey": "HDG",
+      "designName": "Hustle Definition",
+      "liveTypo": "Hustle Definiton",
+      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
     },
     {
-      "designKey": "D",
-      "designName": "Self Made",
-      "pool": ["Heavyweight Winter Warmth", "Cute Crewnecks", "Made For Chilly Mornings"]
-    },
-    {
-      "designKey": "E",
-      "designName": "Beast Mode",
-      "pool": ["Boxy Streetwear Layer", "Perfect for Layering Season", "Cozy Autumn Pullover"]
-    },
-    {
-      "designKey": "F",
-      "designName": "Relax I'm a CEO",
-      "pool": ["Relaxed Weekend Layer", "Cozy Autumn Pullover", "Embroidered Sweatshirts for Women"]
+      "designKey": "MHG",
+      "designName": "Mother Hustler",
+      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
     }
-  ]
+  ],
+  "omitted": {
+    "BB": "designKey BB ('Business B*tch') is recorded as SKIP AT ADMISSION (1 admitted unit only, phase-i1-review-value.md §1) — omitted from `designs` rather than given an invented pool; a future round that needs BB's own admission shape should re-derive it from that report, not from a guess here."
+  }
 }
