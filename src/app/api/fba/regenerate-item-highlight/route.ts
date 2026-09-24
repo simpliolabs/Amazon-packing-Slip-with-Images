@@ -236,7 +236,9 @@ export async function POST(req: NextRequest) {
       }))
       const built = await produceItemHighlightsPerDesign({
         groups, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow,
-        familyTitleText: title,
+        // T3 (Round T): '' — `title` is the family/parent title; ih2.probe.test.ts measured it
+        // licensing one design's slogan into every sibling's line.
+        familyTitleText: '',
         // TASK 5 FIX ROUND 1 (2026-09-06, Important #1): same family/per-design lean source the
         // pipeline's own multi-design branch reads (listingPipeline.ts:11874-11875) — resolved PER
         // DESIGN inside buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.

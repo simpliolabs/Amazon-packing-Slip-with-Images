@@ -109,8 +109,10 @@ describe('buildForeignDesignTokens — every call site is empty OR justified (S1
     const emptySites = sites.filter((s) => s.empty)
     // truthBandHarness's two title-door simulations + listingPipeline's one real per-child title
     // door (`perChildDesignScope`, reused verbatim by S2 for bullets/descriptions — NOT a second
-    // call site, which is exactly why the count above stays at 4/2, not 5/2 or 6/2).
-    expect(emptySites.length).toBe(3)
+    // call site) + T3 (Round T, cross-design leak): the Item Highlight per-design composer's own
+    // call now ALSO passes '' unconditionally (closing the circularity S1 left "honest, not
+    // closed") — 4 empty in listingPipeline.ts, not 3.
+    expect(emptySites.length).toBe(4)
   })
 })
 

@@ -2579,15 +2579,20 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
     // never foreign to itself. Calling it PER DESIGN below — instead of unioning every design's
     // result into ONE shared set, which is what made every design's own vocabulary foreign to the
     // (single) shared line — is the fix.
-    // NON-EMPTY-FAMILY-TITLE-TEXT-OK (S1, Round S) — HONEST, NOT CLOSED: `strictNames: true` does
-    // NOT make this call circularity-free (VERDICT.md §2, measured: `isForeignToDesign("Business
-    // B*tch", HDG)` is still `false` here on a contaminated family title, because designScope.ts's
-    // titleToks exemption is mode-independent). The correct cure is the SAME one the ship door
-    // applies to titles/bullets/descriptions — `familyTitleText: ''` — but this function composes
-    // for the Item Highlight, whose hold semantics and writer (`itemHighlightWriter.ts`, PR #682)
-    // merged as a SEPARATE, already-shipped programme this task is explicitly scoped OUT of
-    // touching. Left as a KNOWN, tracked gap rather than silently patched or silently ignored.
-    { familyTitleText: input.familyTitleText, poolKeywords: pool.map((k) => k.keyword), strictNames: true },
+    // T3 (Round T, cross-design leak) — CLOSED: this call now ALWAYS passes '' regardless of
+    // `input.familyTitleText`, exactly like the ship door does. Measured (ih2.probe.test.ts) with
+    // the live contaminated family title, this per-design SHIP path composed "Business Bitch
+    // Motivation Wear" into FIVE of six sibling designs' Item Highlights — a per-SKU field, and
+    // IH_WRITER=off means this deterministic composer is the LIVE path regardless of the writer
+    // programme. The earlier "HONEST, NOT CLOSED" carve-out here covered `itemHighlightWriter.ts`
+    // (PR #682, a separate programme this task stays out of) — it never covered THIS caller, and
+    // ruling S1's acceptance ("TRUE at every per-design caller, measured") was not met without
+    // fixing it. `input.familyTitleText` is intentionally unused below: the field stays on the
+    // input type (other callers may still document their own family-title text), but this
+    // per-design STRICT-NAMES ship path can never honor it — an exemption sourced from the
+    // family title would be circular here for the same reason it is at the bullets/description/
+    // title ship door (`perChildDesignScope`, `familyTitleText: ''`).
+    { familyTitleText: '', poolKeywords: pool.map((k) => k.keyword), strictNames: true },
   )
 
   const perDesign: PerDesignItemHighlight[] = groups.map((g) => {
@@ -10430,10 +10435,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const byAsin = !bySku && c.asin ? rows.find((p) => p.asin === c.asin && (p.title ?? '').trim()) : undefined
     return (bySku ?? byAsin)?.title?.trim() || input.priorTitle?.trim() || null
   }
+  /* T1 (Round T, cross-design leak) — CLOSED: this scope used to be built from `r.per_child_titles`,
+   * an OUTPUT the bullets/description partials never produce (`partialResult` hardcodes
+   * `per_child_titles: undefined`, and per-child titles are populated only inside the title branch a
+   * section regen skips). So on the exact click the PO means by "just regenerate" (bullets-only or
+   * description-only), the design list was `[]`, `perChildDesignScope(key)` returned an empty set for
+   * every key, and S2's two new rejectors took their `if (!foreign.size)` no-op path — measured
+   * (shipdoor.probe.test.ts) byte-identical before and after S1/S2 shipped. `designGroupContexts` is
+   * the one source that exists on EVERY path that can reach this door: the full title regen populates
+   * it in the title branch (:10678), and the section-regen rebuild (below, :11370ish) populates it
+   * from stored per-child titles BEFORE the bullets/description stages run — never from an output one
+   * path does not produce. */
   const perChildDesignScope = buildForeignDesignTokens(
-    [...new Map((r.per_child_titles ?? [])
-      .map((c) => [c.designKey || c.sku || c.asin || '', (c.designName ?? '').trim()] as const)
-      .filter(([k, n]) => !!k && !!n)).entries()].map(([key, name]) => ({ key, name })),
+    designGroupContexts.map((c) => ({ key: c.key, name: c.designName })),
     { familyTitleText: '', poolKeywords: [], strictNames: true },
   )
   /** ONE per-child exit scope: the design name to protect, the sibling-design rejector, and the
@@ -10528,16 +10542,27 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // comment here claimed otherwise ("the push does NOT consume them yet") and was stale and false
     // at this commit's base ref; a `scrubPub`-only exit (trademark/celebrity scrub, blind to a
     // sibling's name) is how "Business B*tch" shipped in two other designs' bullets for a month.
+    // T2 (Round T) — `key && own`, the SAME guard the title door has always used (:10460 below),
+    // restored here: `designKey` is OPTIONAL on this stored row, so an unset one fell back to the
+    // SKU — a key `perChildDesignScope` was never built with. `buildForeignDesignTokens` used to
+    // answer an UNKNOWN key with the UNION of every design's vocabulary (nothing is "own"), so
+    // `isForeignToDesign(<this child's OWN name>, foreign)` came back TRUE — measured
+    // (unknownkey.probe.test.ts): 3 own bullets in, 2 shipped, the identity bullet DROPPED, and the
+    // description's own `<p>` deleted. Fixed at BOTH ends: `buildForeignDesignTokens` (designScope.ts)
+    // now answers an unrecognized key with an EMPTY set (never the union), and this guard additionally
+    // never even calls it without a resolved own-name, matching the title door byte-for-byte.
     per_child_bullets: r.per_child_bullets?.map((c) => {
       const key = c.designKey || c.sku || c.asin || ''
-      const foreign = key ? perChildDesignScope(key) : new Set<string>()
+      const own = (c.designName ?? '').trim()
+      const foreign = key && own ? perChildDesignScope(key) : new Set<string>()
       const priorBullets = (input.priorPerChildBullets ?? []).find((p) => (c.sku && p.sku === c.sku) || (!c.sku && c.asin && p.asin === c.asin))?.bullets ?? []
       const scrubbed = c.bullets.map((b) => scrubPub(b, 'per-child-bullets'))
       return { ...c, bullets: rejectForeignBullets(scrubbed, foreign, priorBullets) }
     }),
     per_child_descriptions: r.per_child_descriptions?.map((c) => {
       const key = c.designKey || c.sku || c.asin || ''
-      const foreign = key ? perChildDesignScope(key) : new Set<string>()
+      const own = (c.designName ?? '').trim()
+      const foreign = key && own ? perChildDesignScope(key) : new Set<string>()
       return { ...c, description: rejectForeignDescription(scrubPub(c.description, 'per-child-description'), foreign) }
     }),
     // Per-design Item Highlights ship per SKU (PO 2026-08-21) — same publish-boundary scrub + the
@@ -12478,7 +12503,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           identityPhrases: c.identityPhrases ?? [],
         })),
         pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow,
-        familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`,
+        // T3 (Round T, cross-design leak): '' — see the composer's own doc comment; this caller's
+        // contaminated value is exactly how "Business Bitch..." shipped into 5 sibling designs.
+        familyTitleText: '',
         // TASK 5 (2026-09-06): same family/per-design lean source the title path reads
         // (input.audienceLean / input.audienceLeanByDesign) — resolved per design INSIDE
         // buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.

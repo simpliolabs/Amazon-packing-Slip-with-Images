@@ -65,8 +65,12 @@ export interface DesignScopeOpts {
 
 /**
  * Build the per-design FOREIGN-token resolver. `foreignFor(key)` = the set of folded tokens a pool
- * phrase must NOT carry to be composable for design `key`. Keys unknown to the resolver get the
- * union of every vocabulary minus niche (nothing is "own") — callers always pass a real key.
+ * phrase must NOT carry to be composable for design `key`. T2 (Round T, cross-design leak): a key
+ * UNKNOWN to the resolver (not one of `designs`) gets an EMPTY set — nothing is foreign, a
+ * byte-identical pass-through. It used to get the UNION of every OTHER vocabulary (nothing is
+ * "own"), the single most dangerous answer for exactly the caller this guards against: one that
+ * failed to resolve a real key and fell back to something else (a SKU), where the union then made
+ * that row's OWN name/words look foreign to itself.
  */
 export function buildForeignDesignTokens(designs: DesignVocab[], opts: DesignScopeOpts): (key: string) => Set<string> {
   const nameToks = new Map(designs.map((d) => [d.key, new Set(designScopeTokens(d.name))]))
@@ -91,8 +95,20 @@ export function buildForeignDesignTokens(designs: DesignVocab[], opts: DesignSco
     for (const [t, c] of tokKwCount) if (c >= poolThresh) poolToks.add(t)
   }
   const nameShareThresh = Math.max(2, Math.ceil(nameToks.size * 0.5))
+  const knownKeys = new Set(designs.map((d) => d.key))
   const cache = new Map<string, Set<string>>()
   return (key: string): Set<string> => {
+    // T2 (Round T, cross-design leak) — an UNKNOWN key (never in `designs`) used to fall through to
+    // `own = new Set()`, which made the loop below treat NOTHING as this key's own vocabulary and
+    // return the UNION of every design's foreign tokens — the most dangerous possible answer for a
+    // caller that failed to resolve a real key. Measured (unknownkey.probe.test.ts): a
+    // per_child_bullets row whose `designKey` is unset falls back to its SKU, a key this resolver was
+    // never built with, and `isForeignToDesign("Hustle Definiton", foreign)` came back TRUE against
+    // ITS OWN name — 3 bullets in, 2 shipped, the identity bullet dropped, and `pushFields.ts` then
+    // pushes that short array over the live five. An unrecognized key gets EMPTY (nothing is foreign)
+    // — the doc comment above ("callers always pass a real key") was aspirational, not enforced; this
+    // makes the failure mode fail-OPEN (byte-identical pass-through) instead of fail-DANGEROUS.
+    if (!knownKeys.has(key)) return new Set<string>()
     const hit = cache.get(key)
     if (hit) return hit
     const own = ownToks.get(key) ?? new Set<string>()

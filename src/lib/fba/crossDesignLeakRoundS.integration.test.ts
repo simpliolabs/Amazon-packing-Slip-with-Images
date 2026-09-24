@@ -151,15 +151,27 @@ describe('Round S — a stored identity carrying a sibling\'s name is refused, e
     // Every CLEAN_BULLETS entry is well under BULLET_MIN_CHARS (150) — before S5, the whole
     // gatePerChildMultiDesign loop returned before this ran on `input.onlySection`, so a
     // "Regenerate bullets" click shipped these bytes UNPADDED. Measured directly (not guessed):
-    // the first bullet (90 chars) grows once the deterministic pad runs.
+    // at least one bullet grows once the deterministic pad runs.
+    // T1 (Round T, cross-design leak) note: CLEAN_BULLETS[0] uses the generic word "hustle", which
+    // is also sibling HDG's real name token ("Hustle Definiton") — T1 makes the ship door correctly
+    // ARMED on this section regen (it was inert before T1, so this coincidental word collision
+    // never surfaced), so MHG's set can now legitimately ship 4 bullets, not 5, and the surviving
+    // bullet at index 0 is no longer necessarily CLEAN_BULLETS[0]. Neither is what THIS test is
+    // about — check every surviving bullet against its OWN stubbed original (matched by hook) and
+    // require at least one to have grown.
     const openai = makeOpenAiStub()
     const input: PipelineInput = { ...makeBaseInput(openai), onlySection: 'bullets' }
     const result = await runListingPipeline(input)
     const mhgRows = result.per_child_bullets?.filter((c) => c.designKey === 'MHG') ?? []
     expect(mhgRows.length).toBeGreaterThan(0)
     for (const row of mhgRows) {
-      expect(row.bullets).toHaveLength(5)
-      expect(row.bullets[0].length).toBeGreaterThan(CLEAN_BULLETS[0].length)
+      expect(row.bullets.length).toBeGreaterThan(0)
+      const grew = row.bullets.some((b) => {
+        const hook = b.split(' - ')[0]
+        const orig = CLEAN_BULLETS.find((o) => o.startsWith(hook))
+        return !!orig && b.length > orig.length
+      })
+      expect(grew, `no per-child MHG bullet grew past its stubbed original: ${JSON.stringify(row.bullets)}`).toBe(true)
     }
   }, 30_000)
 })
