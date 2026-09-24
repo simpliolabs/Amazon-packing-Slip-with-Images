@@ -44,8 +44,8 @@ describe('ROUND M6/J1-J7: humanizerRewriteVerdict — J4, the net, over GENERATE
     expect(humanizerRewriteVerdict(unit('Graphic Crewneck Sweatshirts Women'), 'Graphic Crewneck Sweatshirts for Women', CTX)).toEqual({ ok: true })
   })
 
-  it('ACCEPTS a no-op rewrite (model says the phrase already reads naturally, returns it unchanged)', () => {
-    expect(humanizerRewriteVerdict(unit('Fall Crewneck'), 'Fall Crewneck', CTX)).toEqual({ ok: true })
+  it('RULING O5 (round O, Important — supersedes this test\'s own pre-O name): REFUSES a no-op rewrite (model says the phrase already reads naturally, returns it unchanged) — an identity rewrite is no longer admitted as an "alternate": it would be a byte-identical duplicate unit consuming a pool-group slot (O1) and a ballot slot a REAL alternate could use instead', () => {
+    expect(humanizerRewriteVerdict(unit('Fall Crewneck'), 'Fall Crewneck', CTX)).toEqual({ ok: false, reason: 'identity' })
   })
 
   it('REJECTS empty/whitespace-only text — never ships a blank unit', () => {
@@ -105,7 +105,12 @@ describe('ROUND M6/J1-J7: humanizerRewriteVerdict — J4, the net, over GENERATE
     // now adjacent to "Cotton" — a composition claim the blank's 50/50 material does not back.
     const source = unit('Real Deal Cotton')
     expect(source.text).not.toBe('Real Cotton Deal')
-    const before = humanizerRewriteVerdict(source, 'Real Deal Cotton', CTX) // sanity: source's own text passes
+    // RULING O5 (round O): an IDENTITY rewrite (byte-identical to the source) is refused on its own
+    // now, before any other check runs — so the sanity control below is a genuine REORDER, not the
+    // source's own literal text, keeping "Real" un-adjacent to "Cotton" (still truthful) while
+    // proving the net accepts a reorder at all before testing the one that lies.
+    expect(source.text).not.toBe('Cotton Deal Real')
+    const before = humanizerRewriteVerdict(source, 'Cotton Deal Real', CTX) // sanity: a truthful reorder passes
     expect(before).toEqual({ ok: true })
     const v = humanizerRewriteVerdict(source, 'Real Cotton Deal', CTX)
     expect(v).toEqual({ ok: false, reason: 'truth:material-lie' })
@@ -165,10 +170,13 @@ describe('ROUND M6/J1-J7: J2 — eligibility (POOL-class, never the brand carrie
 
 describe('ROUND M6/J1-J7: J6 — coverage is preserved, and pinned', () => {
   it('for every ACCEPTED rewrite in the property suite above, every keyword the SOURCE covered is still covered by the REWRITE (structural: J4.1 already pins content-multiset equality under `coverageTokens`, so `isCovered` cannot move)', () => {
+    // RULING O5 (round O): an IDENTITY pair (`['Fall Crewneck', 'Fall Crewneck']`, pre-O) is no
+    // longer "accepted" at all — refused as `identity` before any other check runs — so it is
+    // dropped here rather than asserted as `{ ok: true }`. A genuine reorder replaces it.
     const ACCEPTED_PAIRS: [string, string][] = [
       ['Sweatshirts for Women Trendy', 'Trendy Sweatshirts for Women'],
       ['Graphic Crewneck Sweatshirts Women', 'Graphic Crewneck Sweatshirts for Women'],
-      ['Fall Crewneck', 'Fall Crewneck'],
+      ['Fall Graphic Sweatshirts for Women', 'Graphic Fall Sweatshirts for Women'],
     ]
     // A representative keyword universe — single tokens and short phrases drawn from (and adjacent
     // to) both lines, so the sweep actually exercises `isCovered`'s cross-token logic, not just the
@@ -603,6 +611,41 @@ describe('RULING N2: enumerateWriterCandidates — alternates are mutually exclu
     const withAlt = enumerateWriterCandidates([alt, ...units], { truthCtx, runTail })
     expect(withAlt.candidates[0]?.line).toBe(rank1.line) // unchanged — source spelling wins the tie
     expect(withAlt.candidates[0]?.usesAlternateSpelling).toBe(0)
+  })
+
+  it('RULING O5 (round O, Important): the 8-slot ballot never shows the SAME rendered line twice — two DIFFERENT pool units (never alternates of each other, so the O1 group exclusion does not apply) that happen to carry byte-identical text produce two DIFFERENT `parts`, and only ONE rendering reaches the shown ballot', () => {
+    const identity: AdmittedUnit = { id: 'u0', text: 'Hustle Definition', kind: 'identity', numberable: false }
+    const garmentHead: AdmittedUnit = { id: 'g0', text: 'Sweatshirt', kind: 'garment-head', numberable: false }
+    const spec1: AdmittedUnit = { id: 's0', text: '50% Cotton / 50% Polyester', kind: 'spec-fact', numberable: false }
+    const spec2: AdmittedUnit = { id: 's1', text: 'Classic Fit', kind: 'spec-fact', numberable: false }
+    const spec3: AdmittedUnit = { id: 's2', text: 'Unisex Fit', kind: 'spec-fact', numberable: false }
+    // Two SEPARATE pool units, unrelated (no `altOf` on either), that happen to carry the exact same
+    // text — the shape a duplicated/near-duplicate pool phrase produces upstream of this function,
+    // never something `enumerateWriterCandidates` itself invents.
+    const poolA: AdmittedUnit = { id: 'p0', text: 'Fall Crewneck', kind: 'pool', numberable: true }
+    const poolB: AdmittedUnit = { id: 'p1', text: 'Fall Crewneck', kind: 'pool', numberable: true }
+    const truthCtx: PhraseTruthCtx = {
+      garmentFamily: 'sweatshirt', spec: { material: '50% Cotton / 50% Polyester', fit: 'Classic', unisex: true } as never,
+      allowedBrand: null, audience: 'adult', field: 'highlights', audienceLean: 'unisex', designTokens: ['Hustle Definition'],
+    } as PhraseTruthCtx
+    const runTail = (line: string) => runIhTail(line, { titles: ['Hustle Definition Sweatshirt'], blankBrand: null, truthCtx, capacityFamily: false, site: 'o5-dedupe-test' })
+    const targetLine = 'Hustle Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit'
+    // Precondition: BOTH `poolA` alone and `poolB` alone really do reach that exact byte-identical
+    // rendering when evaluated independently (proving the duplicate is real, not a test fiction) —
+    // checked by re-running the search on each pool unit ALONE.
+    const onlyA = enumerateWriterCandidates([identity, garmentHead, spec1, spec2, spec3, poolA], { truthCtx, runTail })
+    const onlyB = enumerateWriterCandidates([identity, garmentHead, spec1, spec2, spec3, poolB], { truthCtx, runTail })
+    expect(onlyA.candidates.some((c) => c.line === targetLine)).toBe(true)
+    expect(onlyB.candidates.some((c) => c.line === targetLine)).toBe(true)
+    // The actual property: with BOTH units offered together, the ballot shows that rendered line
+    // AT MOST ONCE — never twice, regardless of which unit (`p0` or `p1`) produced it.
+    const result = enumerateWriterCandidates([identity, garmentHead, spec1, spec2, spec3, poolA, poolB], { truthCtx, runTail })
+    const occurrences = result.candidates.filter((c) => c.line === targetLine).length
+    expect(occurrences).toBeLessThanOrEqual(1)
+    // And the ballot is never left SHORT because of the dedupe when a genuinely different line was
+    // available to fill the slot instead (sanity: more than one distinct line is shown here).
+    expect(new Set(result.candidates.map((c) => c.line)).size).toBe(result.candidates.length)
+    expect(result.candidates.length).toBeGreaterThan(1)
   })
 })
 

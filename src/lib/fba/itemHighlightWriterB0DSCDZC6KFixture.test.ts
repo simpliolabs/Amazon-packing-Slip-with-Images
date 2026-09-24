@@ -34,20 +34,24 @@
  * into this test's `truthCtx`, because the live Item Highlights path has no such field yet (a real
  * gap, filed, not fixed this round — see the fixture's own `note`).
  *
- * THE CORRECTED RESULT (RULING N4 — the mechanism, restated correctly for the THIRD time). Five of
- * the pool's six phrases are gendered ("for Women") and are correctly refused by
- * `phraseTruthVerdict`'s forced-gender rule for the four designs that inherit the family's unisex
- * default — every real composer run logs `truthDrops: {"audience-lean-lie":5}`, never 6. The sixth,
- * `Fall Crewneck`, names no gender, is admitted, and carries the rank-1 line of every design. With
- * the blank's `neck`/`sleeve` now supplied (RULING N3), `specFacts` derives a FOURTH and FIFTH fact
- * ("Crew Neck", "Long Sleeve") beside `50% Cotton / 50% Polyester`/`Classic Fit`/`Unisex Fit` — and
- * **6 of 6 designs accept**, including DQG ("Don't Quit"), the family's shortest design name, whose
- * naive best-case join (measured: 7 admitted units before N3, 100c, already clearing the 97c floor —
- * `evaluated=0` was an outcome of `enumerateWriterCandidates`'s own grammar-constrained search never
- * finding an in-band arrangement, NOT of the floor pre-check, as RULING M2's "94c vs 97c" wording
- * wrongly implied — see `phase-m1-review-reading.md` §3) now clears the search too, at 107c. The
- * mechanism M2 filed (a floor-vs-name-length problem) is RETIRED, not merely restated: the fixture's
- * OWN incompleteness was the finding, not a genuine band/name-length limit.
+ * THE CORRECTED RESULT (RULING N4 — the mechanism, restated correctly for the THIRD time; RULING O4,
+ * round O, Blocking, retires hand-typing any of its numbers a FOURTH time). The pool's gendered
+ * phrases ("for Women") are correctly refused by `phraseTruthVerdict`'s forced-gender rule for the
+ * designs that inherit the family's unisex default; the exact `truthDrops` count every real
+ * composer run logs is pinned below, never retyped here. The ungendered phrase, `Fall Crewneck`,
+ * names no gender, is admitted, and carries the rank-1 line of every design. With the blank's
+ * `neck`/`sleeve` now supplied (RULING N3), `specFacts` derives further facts ("Crew Neck",
+ * "Long Sleeve") beside `50% Cotton / 50% Polyester`/`Classic Fit`/`Unisex Fit` — and every design
+ * in the family accepts, including DQG ("Don't Quit"), the family's shortest design name, whose
+ * naive best-case join now clears the accept floor where it previously did not
+ * (`evaluated=0` was an outcome of `enumerateWriterCandidates`'s own grammar-constrained search never
+ * finding an in-band arrangement, NOT of the floor pre-check, as RULING M2's own wording wrongly
+ * implied — see `phase-m1-review-reading.md` §3). The mechanism M2 filed (a floor-vs-name-length
+ * problem) is RETIRED, not merely restated: the fixture's OWN incompleteness was the finding, not a
+ * genuine band/name-length limit. RULING O4 pins DQG's exact admitted-unit count, its naive-join
+ * length against the accept floor, and `SPEC_FACTS.length` against a fresh `ihSpecFactFillers` call
+ * as real assertions (below, in the dedicated "RULING O4" test) — every number that sentence used to
+ * state by hand now lives ONLY there, read from that test's own run, never retyped in this comment.
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { buildAdmittedUnits, enumerateWriterCandidates, runWriterForDesign, humanizeAdmittedUnits, isHumanizerEligible, type AdmittedUnit } from '@/lib/fba/itemHighlightWriter'
@@ -55,6 +59,7 @@ import { runIhTail } from '@/lib/fba/listingPipeline'
 import { normalizeAudienceLean, type PhraseTruthCtx } from '@/lib/fba/contentTruth'
 import { ihSpecFactFillers } from '@/lib/fba/productDetailAttrs'
 import { titleCasePhrase } from '@/lib/fba/titleBand'
+import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import fixture from './__fixtures__/b0dscdzc6k-item-highlights-2026-09-23.json'
 
 function stubPickOneClient() {
@@ -122,6 +127,45 @@ describe('RULING M1/N3/N4 fixture: the committed B0DSCDZC6K family, specFacts DE
     expect(SPEC_FACTS).toContain('Unisex Fit')
     expect(SPEC_FACTS).toContain('Crew Neck')
     expect(SPEC_FACTS).toContain('Long Sleeve')
+  })
+
+  // RULING O4 (round O, Blocking, fourth consecutive round — phase-o1-rulings.md): the fixture's
+  // own `note` field used to state DQG's unit count, its naive-join-vs-floor comparison, and
+  // `SPEC_FACTS.length` by hand — and got at least one of the three wrong in every one of the last
+  // four rounds (most recently: "94c vs 97c", when the committed blank's own naive join is 124c).
+  // The structural cure is HERE, not more careful prose: these three relations are now PINNED as
+  // actual assertions, computed from the SAME functions the note used to describe, and the fixture
+  // note itself carries no number at all any more (it points back at this test). Every number below
+  // is pasted from this test's own run (`npx vitest run itemHighlightWriterB0DSCDZC6KFixture.test.ts`),
+  // never typed from memory.
+  it('RULING O4: DQG\'s admitted unit count, its naive-join-vs-floor relation, and SPEC_FACTS.length against ihSpecFactFillers on the committed blank are PINNED — this test fails the instant any of the three drifts, instead of a hand-typed sentence silently going stale', () => {
+    const d = fixture.designs.find((x) => x.designKey === 'DQG')!
+    const truthCtx: PhraseTruthCtx = {
+      garmentFamily: fixture.blank.garmentFamily as 'sweatshirt',
+      spec: { material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex, neck: fixture.blank.neck, sleeve: fixture.blank.sleeve } as never,
+      allowedBrand: null, audience: 'adult', field: 'highlights',
+      audienceLean: leanForDesign('DQG'), designTokens: [d.designName],
+    } as PhraseTruthCtx
+    const composed = { candidates: d.pool, specFacts: SPEC_FACTS, brandPick: null as string | null, wearFact: null as string | null } as never
+    const units: AdmittedUnit[] = buildAdmittedUnits(composed, { designName: d.designName, truthCtx })
+    const naiveJoin = units.map((u) => u.text).join(', ')
+    console.log(JSON.stringify({
+      tag: 'O4_DQG_PIN', specFactsLength: SPEC_FACTS.length, dqgUnitCount: units.length,
+      naiveJoinLength: naiveJoin.length, floor: CONTENT_CONTRACT.itemHighlights.min,
+    }))
+    // SPEC_FACTS.length against a FRESH, independent call to ihSpecFactFillers on the SAME blank —
+    // never the module-level `SPEC_FACTS` const compared to itself.
+    const freshSpecFacts = ihSpecFactFillers({
+      material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex,
+      neck: fixture.blank.neck, sleeve: fixture.blank.sleeve,
+    } as never)
+    expect(SPEC_FACTS.length).toBe(freshSpecFacts.length)
+    expect(SPEC_FACTS.length).toBe(5) // pasted from this test's own O4 run — material/fit/unisex/neck/sleeve
+    // DQG's admitted unit count on the COMMITTED (whole recorded) blank.
+    expect(units.length).toBe(9) // pasted from this test's own O4 run
+    // The naive-join-vs-floor relation the note's retracted "94c vs 97c" sentence got wrong.
+    expect(naiveJoin.length).toBe(124) // pasted from this test's own O4 run
+    expect(naiveJoin.length).toBeGreaterThan(CONTENT_CONTRACT.itemHighlights.min) // the floor CLEARS
   })
 
   // RULING M5: NOT `mixedFamilies` — the live Item Highlights path (`PerDesignItemHighlightsInput`,
@@ -236,12 +280,16 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
     } as never
   }
 
-  // MEASURED (2026-09-24, this fixture, this stub table, POST RULING O1/O2/O3 — round O,
+  // MEASURED (2026-09-24, this fixture, this stub table, POST RULING O1/O2/O3/O5 — round O,
   // re-measured from this test's own run after RULING N2 was superseded): BB/MHG (women lean) admit
-  // all 6 pool phrases; the humanizer accepts a rewrite for every one of them, and each survives as
-  // an ALTERNATE unit alongside its (unchanged) source, never replacing it — `eligibleAfter` is
-  // therefore `eligibleBefore` immediately followed by the six alternate spellings, 12 entries, not
-  // 6. Rank 1 is GUARANTEED zero-alt (RULING O2), but is NOT byte-identical before/after any more:
+  // all 6 pool phrases, but this stub table's REWRITES map is the identity rewrite for four of the
+  // six ('Embroidered Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun
+  // Sweatshirts for Women', 'Fall Crewneck' each map to themselves) — RULING O5 (round O, Important)
+  // now refuses an identity rewrite before any other check runs (it would be a byte-identical
+  // duplicate unit, never a genuine alternate), so only the REMAINING two (genuinely-reworded)
+  // rewrites survive as ALTERNATE units: `eligibleAfter` is `eligibleBefore` followed by those TWO
+  // alternates, 8 entries, not 12. Rank 1 is GUARANTEED zero-alt (RULING O2), but is NOT
+  // byte-identical before/after any more:
   // RULING O1 groups a source and its alternates into ONE pool slot instead of excluding the
   // alternates from the search's fixed evaluation budget entirely, so the search now spends part of
   // that same budget exploring alt-carrying branches — the exact zero-alt candidate the bounded
@@ -267,7 +315,7 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
       eligibleBefore: ['Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
       eligibleAfter: [
         'Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck',
-        'Embroidered Sweatshirts for Women', 'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck',
+        'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women',
       ],
       rank1Before: 'Business B*tch, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
       rank1After: 'Business B*tch, Graphic Crewneck Sweatshirts Women, with 50% Cotton / 50% Polyester, Classic Fit, Long Sleeve',
@@ -301,7 +349,7 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
       eligibleBefore: ['Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
       eligibleAfter: [
         'Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck',
-        'Embroidered Sweatshirts for Women', 'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck',
+        'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women',
       ],
       rank1Before: 'Mother Hustler, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
       rank1After: 'Mother Hustler, Graphic Crewneck Sweatshirts Women, with 50% Cotton / 50% Polyester, Classic Fit, Long Sleeve',

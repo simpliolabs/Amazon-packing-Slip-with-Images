@@ -1931,9 +1931,8 @@ export function enumerateWriterCandidates(
   // depend only on where the SOURCE sits, never on where the alternate happened to land. A unit
   // with no `altOf` is its own one-member group, so a candidate built from it is byte-identical to
   // the pre-O1 single-unit-per-bit behaviour whenever no alternate exists at all (flag off, a
-  // dead/malformed humanizer, or N5's short-atom skip), which is what makes rank 1 byte-identical
-  // to flag-off in that case — additive, not a behaviour change, in every case that does not carry
-  // an alternate.
+  // dead/malformed humanizer, or N5's short-atom skip) — additive, not a behaviour change, in every
+  // case that does not carry an alternate.
   const allOrdinaryPool = units.filter((u) => u.kind === 'pool' && !u.isBrand)
   const altGroupKey = (u: AdmittedUnit): string => u.altOf ?? u.id
   const groupOrder: string[] = []
@@ -2112,13 +2111,25 @@ export function enumerateWriterCandidates(
   // `remaining`'s own order within each bucket, so the model is always offered both a lean line and
   // a full one, never only whichever end of the band `ranked` itself clusters at.
   const top = ranked.length ? [rank1] : []
+  // RULING O5 (round O, Important — phase-o1-rulings.md): the 8-slot ballot could show the SAME
+  // rendered line twice — two different `parts` (e.g. a source-only arrangement and one that
+  // happens to render identically, or two candidates that differ only in a unit the model never
+  // sees distinguished) reaching the same bytes — consuming a slot a genuinely DIFFERENT line
+  // could have used. Deduped by RENDERED BYTES (`.line`), never by `parts` identity, seeded with
+  // rank 1's own line so it can never be shown a second time either.
+  const shownLines = new Set<string>(top.map((c) => c.line))
   const bucketPools = WRITER_CANDIDATE_LENGTH_BUCKETS.map(([lo, hi]) =>
     remaining.filter((c) => c.line.length >= lo && c.line.length < hi),
   )
   let bucketTurn = 0
   while (top.length < WRITER_CANDIDATE_TOP_K && bucketPools.some((pool) => pool.length > 0)) {
     const pool = bucketPools[bucketTurn % bucketPools.length]
-    if (pool.length) top.push(pool.shift()!)
+    while (pool.length && shownLines.has(pool[0].line)) pool.shift()
+    if (pool.length) {
+      const c = pool.shift()!
+      top.push(c)
+      shownLines.add(c.line)
+    }
     bucketTurn++
   }
   return { candidates: top, evaluated, bounded }
@@ -2421,7 +2432,7 @@ function isBrandCarrierText(text: string, allowedBrand: string | null | undefine
 
 export type HumanizerRejectReason =
   | 'empty' | 'character-set' | 'content-word-multiset' | 'inserted-word' | 'relation-glue-in-unit'
-  | 'duplicate-function-word' | 'boundary-function-word' | 'case'
+  | 'duplicate-function-word' | 'boundary-function-word' | 'case' | 'identity'
   | 'length' | `truth:${PhraseTruthReason}` | 'trademark' | 'celebrity' | 'brand-parity'
 
 /** RULING N1 (round N, phase-n1-rulings.md, Blocking): the WORD_RE tokenizer J4.1/J4.2 both read
@@ -2441,9 +2452,42 @@ function humanizerAllowedCharSet(sourceText: string): Set<string> {
   allowed.add(' ')
   return allowed
 }
+/** Characters this net treats as PUNCTUATION for the multiset check below — everything that is
+ *  neither a letter/digit (governed at the WORD level by J4.1/J4.2, which already bound how many
+ *  times any given word, and so its own letters, may occur) nor a plain space. */
+function isHumanizerPunctuationChar(ch: string): boolean {
+  return !/^[a-z0-9 ]$/.test(ch)
+}
+/** RULING O6 (round O, Important — phase-o1-rulings.md, closing `phase-n1-review-net.md` IMPORTANT
+ *  2): N1's doc comment and report both call this a character MULTISET, but the implementation
+ *  above (`humanizerAllowedCharSet`) is a plain character SET — once the source carries a
+ *  character once, the rewrite could repeat and reposition it without limit. Measured:
+ *  `"Sweatshirts - Fall Crewneck"` -> `"Sweatshirts-Fall-Crewneck-"` (one hyphen becomes three, one
+ *  of them trailing) and `"50/50 Fall Crewneck"` -> `"Fall//// Crewneck 50/50"` (one slash becomes
+ *  five) were both wrongly `{ok:true}`. Scoped to PUNCTUATION only (`isHumanizerPunctuationChar`) —
+ *  ordinary letters/digits/space are deliberately left SET-governed here, because their own
+ *  frequency is already bounded by the word-level checks (J4.1's content multiset, J4.2's closed
+ *  insertion set); re-counting them here would duplicate that control, not add one. */
+function humanizerPunctuationMultisetViolation(sourceText: string, rewrite: string): boolean {
+  const sourceCounts = new Map<string, number>()
+  for (const ch of sourceText.toLowerCase()) {
+    if (!isHumanizerPunctuationChar(ch)) continue
+    sourceCounts.set(ch, (sourceCounts.get(ch) ?? 0) + 1)
+  }
+  const rewriteCounts = new Map<string, number>()
+  for (const ch of rewrite.toLowerCase()) {
+    if (!isHumanizerPunctuationChar(ch)) continue
+    rewriteCounts.set(ch, (rewriteCounts.get(ch) ?? 0) + 1)
+  }
+  for (const [ch, count] of rewriteCounts) if (count > (sourceCounts.get(ch) ?? 0)) return true
+  return false
+}
 function humanizerCharacterSetViolation(sourceText: string, rewrite: string): boolean {
   const allowed = humanizerAllowedCharSet(sourceText)
   for (const ch of rewrite.toLowerCase()) if (!allowed.has(ch)) return true
+  // O6: every character is individually ALLOWED (the set check above passed), but a punctuation
+  // character may still be OVER-USED relative to the source's own count of it.
+  if (humanizerPunctuationMultisetViolation(sourceText, rewrite)) return true
   return false
 }
 
@@ -2486,20 +2530,6 @@ function humanizerCaseViolation(sourceText: string, rewrite: string): boolean {
   return false
 }
 
-/** RULING N2 (round N)'s "cheap deterministic hygiene that is objectively right and needs no
- *  referee": walks `rewriteWordsRaw` LEFT TO RIGHT, greedily consuming `sourceWordsRaw`'s own
- *  multiset budget (exactly the same accounting `multisetAdditions` already does, order-aware here
- *  because the two hygiene rules below are positional) — a word whose occurrence exceeds what the
- *  source's own budget can cover at that point is one this rewrite ADDED, i.e. an insertion. */
-function humanizerInsertionMask(sourceWordsRaw: readonly string[], rewriteWordsRaw: readonly string[]): boolean[] {
-  const remaining = new Map<string, number>()
-  for (const w of sourceWordsRaw) remaining.set(w, (remaining.get(w) ?? 0) + 1)
-  return rewriteWordsRaw.map((w) => {
-    const left = remaining.get(w) ?? 0
-    if (left > 0) { remaining.set(w, left - 1); return false }
-    return true
-  })
-}
 /** "Embroidered for for Sweatshirts Women" — two adjacent identical function words. Checked
  *  unconditionally on the rewrite's own rendered word order, regardless of which occurrence (if any)
  *  the source already carried: two adjacent copies of the SAME function word read as a typo/glitch
@@ -2510,16 +2540,27 @@ function humanizerAdjacentDuplicateFunctionWord(rewriteWordsRaw: readonly string
   }
   return false
 }
-/** "for Sweatshirts for Embroidered Women for" — a modifier may not cross the head/be stranded by an
- *  inserted function word sitting at either edge of the line. Keyed on `humanizerInsertionMask` (an
- *  edge word the SOURCE itself already carried there is untouched — this rule is about what the
- *  rewrite ADDED at the boundary, never about the source's own shape). */
-function humanizerBoundaryInsertedFunctionWord(rewriteWordsRaw: readonly string[], inserted: readonly boolean[]): boolean {
+/** "for Sweatshirts for Embroidered Women for" — a modifier may not cross the head/be stranded by a
+ *  function word sitting at either edge of the line.
+ *  RULING O5 (round O, Important — phase-o1-rulings.md, closing `phase-n1-review-net.md` IMPORTANT
+ *  1): keyed on POSITION, not on `humanizerInsertionMask`'s multiset budget. That budget is a
+ *  greedy LEFT-TO-RIGHT consumption of the source's own word counts, order-blind — on this net's
+ *  dominant pool shape (four of six phrases already contain "for" somewhere), a "for" at either
+ *  edge was always "covered" by that budget and never refused, measured: `"Embroidered Sweatshirts
+ *  for Women"` -> `"for Embroidered Sweatshirts Women"` and -> `"Embroidered Sweatshirts Women
+ *  for"` both wrongly ACCEPTED. A function word at either edge of the REWRITE is refused unless the
+ *  SOURCE carried a function word at THAT SAME edge — "an edge word the source itself already
+ *  carried THERE is untouched", now actually checked against "there", never merely against the
+ *  source's word BUDGET. */
+function humanizerBoundaryInsertedFunctionWord(sourceWordsRaw: readonly string[], rewriteWordsRaw: readonly string[]): boolean {
   if (!rewriteWordsRaw.length) return false
-  const first = 0
-  const last = rewriteWordsRaw.length - 1
-  return (inserted[first] && HUMANIZER_INSERTABLE_WORDS.has(rewriteWordsRaw[first]))
-    || (inserted[last] && HUMANIZER_INSERTABLE_WORDS.has(rewriteWordsRaw[last]))
+  const firstRw = rewriteWordsRaw[0]
+  const lastRw = rewriteWordsRaw[rewriteWordsRaw.length - 1]
+  const firstSrc = sourceWordsRaw[0]
+  const lastSrc = sourceWordsRaw[sourceWordsRaw.length - 1]
+  const firstBad = HUMANIZER_INSERTABLE_WORDS.has(firstRw) && firstRw !== firstSrc
+  const lastBad = HUMANIZER_INSERTABLE_WORDS.has(lastRw) && lastRw !== lastSrc
+  return firstBad || lastBad
 }
 
 /** J4 — THE NET, deterministic, per unit, failing CLOSED to the original: EVERY check below must
@@ -2532,6 +2573,13 @@ export function humanizerRewriteVerdict(
 ): { ok: true } | { ok: false; reason: HumanizerRejectReason } {
   const rewrite = (rewriteRaw ?? '').trim()
   if (!rewrite) return { ok: false, reason: 'empty' }
+  // RULING O5 (round O, Important — phase-o1-rulings.md): an IDENTITY rewrite (byte-identical to
+  // the source it was derived from) was previously admitted as a genuine "alternate" — it passes
+  // every check below trivially, because it IS the source — producing a byte-identical duplicate
+  // unit that still consumes one of `enumerateWriterCandidates`'s scarce pool-group member slots
+  // (O1) and one of the 8-slot ballot's positions (a real alternate could have used either). Refused
+  // here, before any other check runs, so it never allocates an alt unit at all.
+  if (rewrite === source.text) return { ok: false, reason: 'identity' }
   // J4.2's SECOND, independent check, first (cheapest, and the one the coverage check ALONE cannot
   // make): coverageTokens DROPS stopwords before comparing, so multiset equality alone would let
   // ANY stopword in — 'with'/'in' included — which is exactly the relation-glue-inside-a-unit defect
@@ -2563,8 +2611,7 @@ export function humanizerRewriteVerdict(
   // adjacent identical function words ("Embroidered for for Sweatshirts Women"), and no inserted
   // function word stranded at either edge of the line.
   if (humanizerAdjacentDuplicateFunctionWord(rewriteWordsRaw)) return { ok: false, reason: 'duplicate-function-word' }
-  const insertionMask = humanizerInsertionMask(sourceWordsRaw, rewriteWordsRaw)
-  if (humanizerBoundaryInsertedFunctionWord(rewriteWordsRaw, insertionMask)) return { ok: false, reason: 'boundary-function-word' }
+  if (humanizerBoundaryInsertedFunctionWord(sourceWordsRaw, rewriteWordsRaw)) return { ok: false, reason: 'boundary-function-word' }
   // J4.3: length.
   if (rewrite.length > source.text.length + 6) return { ok: false, reason: 'length' }
   // J4.4: truth, re-run on the REWRITE — never trusted from multiset equality alone. A pure
