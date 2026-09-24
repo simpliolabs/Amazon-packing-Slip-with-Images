@@ -471,11 +471,23 @@ const PUNCTUATION_ATTACH_LEFT: ReadonlySet<string> = new Set([','])
 const LIST_GLUE: ReadonlySet<string> = new Set(['and', ',', '—', '|', '&'])
 const RELATION_GLUE: ReadonlySet<string> = new Set(['with', 'in'])
 const ARTICLE_GLUE: ReadonlySet<string> = new Set(['a', 'an'])
-/** RULING P4 (fix round B5) / RULING H1 (fix round H1): a TRUTH clause is scoped to "one comma
- *  clause" — never `—`/`|`/`&`, which stay WITHIN the same truth clause (so a list-joined lying
- *  pair like "X and Y & Z with W" is still judged as one span). Passed to `segmentClauses` as its
+/** RULING P4 (fix round B5) / RULING H1 (fix round H1) / RULING I1 (round I, phase-i1-rulings.md,
+ *  Blocking — the class fix): a TRUTH clause is scoped to "one comma clause" — never `—`/`|`/`&`,
+ *  which stay WITHIN the same truth clause (so a list-joined lying pair like "X and Y & Z with W"
+ *  is still judged as one span). H1 additionally stopped a `,` from closing the clause while a
+ *  relation was ALREADY open (chaining a further fact). Review H1 (phase-h1-review-truth.md,
+ *  Blocking 1) proved that was not enough: a plain LIST comma between two pool units, reached
+ *  BEFORE any relation glue is seen, still closed the clause under the pre-I1 `{','}` closer set —
+ *  so whether a pool phrase and a later relation fact land in the SAME truth clause depended on
+ *  WHERE in the pool list that phrase sat, not on the unit sequence itself
+ *  ("P, Q, with R" -> Q+R judged, P isolated; "Q, P, with R" -> P+R judged, Q isolated). RULING I1's
+ *  rule: the judged span set must be a function of the unit sequence alone. `TRUTH_CLAUSE_CLOSERS`
+ *  is now EMPTY — no glue token, by itself, closes a truth clause — so the walk below never splits
+ *  the pool/relation run at all; only `segmentClauses`'s existing relation-hand-off branch (a comma
+ *  reached while a relation is open, handing off to a non-fact unit — RULING S2, the wear fact
+ *  "stands alone") still closes anything, unchanged from H1. Passed to `segmentClauses` as its
  *  `closers` set from the truth walk only; readability keeps the wider `GLUE_PUNCTUATION` default. */
-const TRUTH_CLAUSE_CLOSERS: ReadonlySet<string> = new Set([','])
+const TRUTH_CLAUSE_CLOSERS: ReadonlySet<string> = new Set([])
 
 /** §2c's unit classes, NARROWED by RULING R6 (fix round B7a, value Important): `SPEC` used to union
  *  three kinds a relation join may introduce (a blank spec fact, the brand phrase, the sanctioned
@@ -1022,6 +1034,17 @@ export function segmentClauses(
   parts: readonly ArrangementPart[],
   units: readonly AdmittedUnit[],
   closers: ReadonlySet<string> = GLUE_PUNCTUATION,
+  // RULING I1 (round I, phase-i1-rulings.md): the TRUTH walk passes an EMPTY `closers` set so a
+  // plain list comma between two ordinary units never closes a clause any more (see there). RULING
+  // S2 (fix rounds B7a/B8a) still requires the wear fact to stand ALONE in its own clause — never
+  // merged with a neighbour, by design, because "Can be worn as Oversized" combined with almost
+  // ANY neighbouring phrase reads as an unbacked fit/cut claim. With `closers` empty that isolation
+  // would be lost too (the wear fact would fall into whichever neighbour's now-unclosed clause), so
+  // this flag — set ONLY by the truth walk — makes a `,` immediately before or after a wear-fact
+  // unit close a clause UNCONDITIONALLY, regardless of `closers`/`relationOpen`. Readability's own
+  // call (the default, `wearFactCloses` false) is unaffected: it already isolates the wear fact via
+  // its own wider `GLUE_PUNCTUATION` closer set.
+  wearFactCloses: boolean = false,
 ): SegmentClausesResult {
   const byId = new Map(units.map((u) => [u.id, u] as const))
   const clauses: SegmentedClause[] = []
@@ -1035,6 +1058,14 @@ export function segmentClauses(
   }
   parts.forEach((part, idx) => {
     if ('unit' in part) { current.push(idx); return }
+    if (wearFactCloses && part.glue === ',') {
+      const prevUnitPartIdx = current.length ? current[current.length - 1] : undefined
+      const prevPart = prevUnitPartIdx !== undefined ? parts[prevUnitPartIdx] : undefined
+      const prevUnit = prevPart && 'unit' in prevPart ? byId.get(prevPart.unit) : undefined
+      const next = parts[idx + 1]
+      const nextUnit = next && 'unit' in next ? byId.get(next.unit) : undefined
+      if (prevUnit?.kind === 'wear-fact' || nextUnit?.kind === 'wear-fact') { close(); return }
+    }
     if (part.glue === ',' && relationOpen) {
       // H1: does this comma CHAIN a further relation-target fact into the clause that is already
       // open, or does it hand off to a DIFFERENT clause (a pool unit, the brand, or the wear fact —
@@ -1326,21 +1357,42 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
   // MECHANIC (because widening the clause boundary alone measures nothing): `phraseTruthVerdict`
   // stops at a `,` inside the STRING it is handed, so a wider clause whose rendered span still
   // reads "...A, B" would still be judged as if it stopped at the comma — the identical hole, now
-  // with a green-looking test. `truthRenderParts` rewrites every one of those STACKING commas
-  // (never the comma that opens the relation, which stays dropped above) to the list glue `and` —
-  // the spelling `phraseTruthVerdict` judges strictly — so the span this walk renders for the
-  // oracle reads "...A and B", matching the ONE-clause-two-facts reading the grammar and spec
-  // already state. The real OUTPUT `line` (rendered above, from the UNMODIFIED `v.parts`) is
-  // never touched by this — `truthRenderParts` exists only to decide what gets judged. RULING P4
-  // scopes a TRUTH clause to "one comma clause" — never `—`/`|`/`&` (readability's own, WIDER,
-  // clause boundary) — so this call passes a comma-only `closers` set, exactly the boundary the
-  // pre-H1 truth walk always used.
-  const { clauses: truthClauses, chainedCommaIdx } = segmentClauses(truthParts, units, TRUTH_CLAUSE_CLOSERS)
-  const truthRenderParts: ArrangementPart[] = truthParts.map((p, idx) => (chainedCommaIdx.has(idx) ? { glue: 'and' } : p))
+  // with a green-looking test.
+  // RULING I1 (round I, phase-i1-rulings.md, Blocking — the class fix): H1's mechanic covered only
+  // the STACKING comma inside an already-open relation. Review H1 (Blocking 1) found the SAME hole
+  // one level up — a plain LIST comma between two POOL units, reached before any relation glue, so
+  // whether a pool phrase shares a truth clause with a later relation fact depended on where in the
+  // list it sat (order-dependent), not on the unit sequence. `TRUTH_CLAUSE_CLOSERS` is now EMPTY
+  // (above), so `segmentClauses` no longer closes the clause on ANY plain list comma — the whole
+  // pool run and the relation clause it eventually opens are ONE truth clause, unless
+  // `segmentClauses`'s own relation-hand-off branch (RULING S2, a comma reached while a relation is
+  // ALREADY open, handing off to a non-fact unit) closes it, exactly as it always did. Extending
+  // H1's OWN rewrite mechanic to match (per the ruling's own wording): EVERY surviving list comma
+  // in `truthParts` — not only the ones `segmentClauses` happens to flag as "chained" under the now
+  // -empty closer set — is rewritten to the list glue `and` before being handed to
+  // `phraseTruthVerdict`, which stops at a literal `,` inside the string. The real OUTPUT `line`
+  // (rendered above, from the UNMODIFIED `v.parts`) is never touched by this — `truthRenderParts`
+  // exists only to decide what gets judged. A comma that `segmentClauses` DOES still close on (the
+  // S2 hand-off) can safely be rewritten too: it is never part of any span this walk renders, because
+  // every span comes from ONE clause's own `unitIdx`, and a closed comma always sits at a clause
+  // boundary, never inside one clause's index range.
+  const { clauses: truthClauses } = segmentClauses(truthParts, units, TRUTH_CLAUSE_CLOSERS, true)
+  const truthRenderParts: ArrangementPart[] = truthParts.map((p) => ('unit' in p ? p : (p.glue === ',' ? { glue: 'and' } : p)))
+  // RULING I1: with the truth clause now spanning the WHOLE pool/relation run (above), a clause can
+  // hold many more units than before, so the pair search is walked WIDTH-FIRST (the narrowest
+  // contiguous sub-span first, then wider ones) rather than anchored at the clause's first unit.
+  // This keeps the reported span the TIGHTEST one that actually carries the lie, instead of always
+  // dragging in every unit that happens to precede it in THIS particular ordering — the span search
+  // itself must not reintroduce an order dependency the ruling just removed from clause scoping.
+  // P4 still requires a CONTIGUOUS sub-span (never skipping over an intervening unit), so two
+  // orderings that put a different unit BETWEEN the same lying pair still render different (but
+  // both truthful) violation text — that residual difference is the intervening unit genuinely being
+  // part of the claim's context, not a punctuation or order escape.
   for (const clause of truthClauses) {
     const unitIdx = clause.unitIdx
-    for (let a = 0; a < unitIdx.length - 1; a++) {
-      for (let b = a + 1; b < unitIdx.length; b++) {
+    for (let w = 1; w < unitIdx.length; w++) {
+      for (let a = 0; a + w < unitIdx.length; a++) {
+        const b = a + w
         const span = renderArrangement(truthRenderParts.slice(unitIdx[a], unitIdx[b] + 1), units).trim()
         const spanVerdict = phraseTruthVerdict(span, ctx.truthCtx)
         if (!spanVerdict.ok) {
