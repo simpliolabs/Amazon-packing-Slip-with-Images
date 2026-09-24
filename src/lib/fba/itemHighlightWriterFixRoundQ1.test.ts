@@ -97,9 +97,9 @@ describe('RULING Q2 (round Q, Blocking): AUDIENCE_NOUN_RE derived from LEAN_FEM_
     expect(v).toEqual({ ok: false, reason: 'audience-noun-crossing' })
   })
 
-  it('"Moms" — outside the 22-word canonical core, so the DETERMINISTIC net alone does not refuse it (measured, not asserted false) — closed instead by RULING Q3\'s safe-default referee, proved end to end below', () => {
+  it('SUPERSEDED by RULING R1 (round R, phase-r1-rulings.md): "Moms" is outside this 22-word canonical core, but R1\'s vocabulary-free structural check ("a word directly after \'for\' in the source is a protected relation object, whatever it means") now refuses the SAME flip deterministically — never reaching the referee at all. See `itemHighlightWriterFixRoundR1.test.ts` for the full pin (Lady\'s, Guy\'s, Adult\'s, Moms, Teens, Mamas).', () => {
     const v = humanizerRewriteVerdict(unit('Embroidered Sweatshirts for Moms'), 'Sweatshirts for the Embroidered Moms', { ...CTX, audienceLean: 'unisex' })
-    expect(v).toEqual({ ok: true }) // reaches the ballot as an [ALT] — Q3 refuses it there.
+    expect(v).toEqual({ ok: false, reason: 'audience-noun-crossing' })
   })
 })
 

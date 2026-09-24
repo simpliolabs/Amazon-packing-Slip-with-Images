@@ -454,3 +454,91 @@ describe('RULING P4 (round P, Blocking): the flag-off sha256 ship gate, over REA
     expect(hash).toBe('1c89bd43bd874b09b0ff86a571a7e12e13e546677d454a9c3cf790ad9b9b965e')
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// RULING R3 (round R, Blocking, phase-r1-rulings.md — "the gate must see the ballot, not one
+// slot"). RULING P4's gate (above) hashes the SHIPPED value under a chooser that always picks slot
+// 1 — it can only ever notice rank 1 change. RULING R2 measured that round Q's OWN bug (pass 2
+// re-running a whole redundant search even on a flag-off ballot) moved candidates BELOW rank 1
+// without ever moving rank 1 itself, so the P4 gate stayed GREEN through the entire round-Q
+// regression it was cited against. Two new pins close that blind spot, over the SAME 6-design
+// fixture: (1) hashing the FULL ballot `enumerateWriterCandidates` returns — every slot, never only
+// the one a pick-1 chooser would reveal — and (2) a SECOND shipped-value corpus sha, alongside the
+// existing pick-1 one, under a chooser that always picks the LAST ballot option: a change below
+// slot 1 moves what "last" IS, so this sha can go red exactly when the pick-1 sha would not.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+describe('RULING R3 (round R, Blocking): the gate sees the WHOLE ballot, not slot 1 alone', () => {
+  afterEach(() => { delete process.env.IH_HUMANIZER })
+
+  async function fullBallotRows(): Promise<string[]> {
+    delete process.env.IH_HUMANIZER // this gate's own corpus: the flag-off SEARCH, never the humanizer.
+    const rows: string[] = []
+    for (const d of fixture.designs) {
+      const truthCtx: PhraseTruthCtx = {
+        garmentFamily: fixture.blank.garmentFamily as 'sweatshirt',
+        spec: { material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex, neck: fixture.blank.neck, sleeve: fixture.blank.sleeve } as never,
+        allowedBrand: null, audience: 'adult', field: 'highlights',
+        audienceLean: leanForDesign(d.designKey), designTokens: [d.designName],
+      } as PhraseTruthCtx
+      const composed = { candidates: d.pool, specFacts: SPEC_FACTS, brandPick: null as string | null, wearFact: null as string | null } as never
+      const units = buildAdmittedUnits(composed, { designName: d.designName, truthCtx })
+      const runTail = (line: string) => runIhTail(line, { titles: [titleFor(d.designName)], blankBrand: null, truthCtx, capacityFamily: false, site: 'r3-full-ballot-gate' })
+      const en = enumerateWriterCandidates(units, { truthCtx, runTail })
+      rows.push(`${d.designKey}=${JSON.stringify(en.candidates.map((c) => c.line))}`)
+    }
+    return rows
+  }
+
+  it('the full-ballot gate is NOT vacuous: every one of the 6 rows carries at least one rendered line', async () => {
+    const rows = await fullBallotRows()
+    expect(rows.length).toBe(6)
+    for (const row of rows) {
+      const lines: string[] = JSON.parse(row.slice(row.indexOf('=') + 1))
+      expect(lines.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('PINNED sha256 over the FULL 8-slot ballot per design (every slot `enumerateWriterCandidates` returns, not just what a pick-1 chooser would reveal) — pasted from this test\'s own run', async () => {
+    const rows = await fullBallotRows()
+    const hash = createHash('sha256').update(rows.join('\n')).digest('hex')
+    console.log(JSON.stringify({ tag: 'R3_FULLBALLOT_SHA256', hash, rows }))
+    expect(hash).toBe('ff958d46447cbc8b3e28ccc3b10f77df30e529afdfeecab1997a29775c15a27f')
+  })
+
+  async function shippedRows(pick: 'first' | 'last'): Promise<string[]> {
+    delete process.env.IH_HUMANIZER
+    const rows: string[] = []
+    for (const d of fixture.designs) {
+      const truthCtx: PhraseTruthCtx = {
+        garmentFamily: fixture.blank.garmentFamily as 'sweatshirt',
+        spec: { material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex, neck: fixture.blank.neck, sleeve: fixture.blank.sleeve } as never,
+        allowedBrand: null, audience: 'adult', field: 'highlights',
+        audienceLean: leanForDesign(d.designKey), designTokens: [d.designName],
+      } as PhraseTruthCtx
+      const composed = { candidates: d.pool, specFacts: SPEC_FACTS, brandPick: null as string | null, wearFact: null as string | null } as never
+      const runTail = (line: string) => runIhTail(line, { titles: [titleFor(d.designName)], blankBrand: null, truthCtx, capacityFamily: false, site: 'r3-shipped-gate' })
+      const client = { chat: { completions: { create: async (req: { messages: { role: string; content: string }[] }) => {
+        const user = req.messages.find((m) => m.role === 'user')?.content ?? ''
+        const opts = [...user.matchAll(/^(\d+)\.\s/gm)].map(([, i]) => Number(i))
+        const picked = pick === 'first' ? opts[0] : opts[opts.length - 1]
+        return { choices: [{ message: { content: JSON.stringify({ pick: picked }) }, finish_reason: 'stop' }] }
+      } } } } as never
+      const r = await runWriterForDesign({ composed, fallbackHold: 'under-floor-no-repeat', designName: d.designName, truthCtx, runTail, deps: { openai: client } })
+      rows.push(`${d.designKey}=${r.value}`)
+    }
+    return rows
+  }
+
+  it('PINNED sha256, pick-1 chooser — the SAME shape as the P4 gate above, reproduced here so the pair sits together', async () => {
+    const rows = await shippedRows('first')
+    const hash = createHash('sha256').update(rows.join('\n')).digest('hex')
+    expect(hash).toBe('1c89bd43bd874b09b0ff86a571a7e12e13e546677d454a9c3cf790ad9b9b965e')
+  })
+
+  it('PINNED sha256, pick-LAST chooser — a SEPARATE corpus that moves independently of the pick-1 one, proving this gate sees below slot 1 (mutating RULING R2\'s own fix back to Q\'s shared-space pass 2 must move THIS sha without necessarily moving the pick-1 one)', async () => {
+    const rows = await shippedRows('last')
+    const hash = createHash('sha256').update(rows.join('\n')).digest('hex')
+    console.log(JSON.stringify({ tag: 'R3_PICKLAST_SHA256', hash, rows }))
+    expect(hash).toBe('0e6a29f0e4f4c06cca6dcdd2a64a374b54ec9fb8febb9acc231e73b4a1fec50e')
+  })
+})

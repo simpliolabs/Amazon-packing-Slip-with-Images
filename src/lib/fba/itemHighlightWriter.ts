@@ -2187,13 +2187,42 @@ export function enumerateWriterCandidates(
   // combination pass 1 already judged costs pass 2 nothing, and every evaluation pass 2's own
   // budget DOES spend is on a combination that selects at least one alternate — the harder question
   // this round's own name calls out.
+  // RULING R2 (round R, Blocking, phase-r1-rulings.md — "'additive' must mean the whole ballot").
+  // Measured: with the flag on, 5 of 8 slots were EVICTED on BB and MHG, and 3 of the 5
+  // replacements carried no alternate at all — `searchPass(ordinaryGroups, ...)` searches the
+  // FULL alt-carrying group set (source AND alternate members), which also contains every
+  // all-source combination pass 1 already ranked; pass 2's own FRESH 300-evaluation budget can
+  // reach all-source combinations pass 1's budget-limited walk never got to (they render
+  // different final text, so the shared `seen` de-dupe cannot skip them), and those merely-new
+  // ZERO-alt candidates were mixed into `remaining` and could evict a genuine pass-1 slot below
+  // rank 1. Worse: with the flag OFF, `humanizeAdmittedUnits` never allocates an alternate, so
+  // every group here already has exactly one member — `searchPass(ordinaryGroups, ...)` is then
+  // IDENTICAL in shape to pass 1's own `searchPass(sourceOnlyGroups, ...)`, so pass 2 ran a whole
+  // SECOND, redundant 300-evaluation search over the SAME space every time, doubling the flag-off
+  // evaluation count (300 -> 600) for zero gain and letting a budget-order artifact of the second
+  // search surface DIFFERENT candidates below slot 1 than pass 1 alone would have ranked there —
+  // this is the exact property RULING P4's flag-off ship gate exists to pin, and it moved without
+  // this round's own fix. Two changes close both defects at once:
+  // 1. Pass 2 is skipped ENTIRELY — no second search, zero extra evaluations — whenever no group
+  //    has more than one member, i.e. no `altOf` unit was ever allocated for this design. A
+  //    zero-alternate pool is now bit-for-bit unaffected by pass 2 existing at all, which is also
+  //    exactly the flag-off case.
+  // 2. When pass 2 DOES run, its OWN contribution to the ballot is filtered to candidates that
+  //    ACTUALLY carry an alternate (`usesAlternateSpelling > 0`) — an all-source combination pass 2
+  //    happens to reach on its own fresh budget is thrown away here, never allowed to compete with
+  //    or evict a pass-1-ranked source-only slot. Every source-only slot therefore stays EXACTLY
+  //    where pass 1 ranked it (`rankedSourceOnly.slice(1)`, untouched); only genuinely alt-carrying
+  //    candidates may occupy the remaining slots — "additive" is now true of the WHOLE ballot, not
+  //    only slot 1.
+  const anyGroupHasAlternates = ordinaryGroups.some((members) => members.length > 1)
   const pass2Budget = { count: 0, max: WRITER_CANDIDATE_ALT_MAX_EVALUATED }
-  const candidatesWithAlternates = searchPass(ordinaryGroups, pass2Budget)
+  const candidatesWithAlternates = anyGroupHasAlternates
+    ? searchPass(ordinaryGroups, pass2Budget).filter((c) => c.usesAlternateSpelling > 0)
+    : []
   // RULING O1 (preserved): slot 1's guarantee must NOT remove alternates from competing for slots
   // 2..K on their own band-fit/readability merits. `remaining` is therefore the UNION of every
-  // source-only candidate OTHER than the one used for slot 1, plus every NEW (necessarily
-  // alt-carrying, by the shared-`seen` dedupe above) candidate pass 2 found — never a re-ranking that
-  // could displace `rank1`.
+  // source-only candidate OTHER than the one used for slot 1, plus every alt-carrying candidate
+  // pass 2 found (R2, above) — never a re-ranking that could displace `rank1`.
   const remaining = [...rankedSourceOnly.slice(1), ...candidatesWithAlternates].sort(compareWriterCandidates)
   // RULING H3(b): the top-K SHOWN must span the OCCUPIED band, not one end of it — taste between
   // legal lines is the model's entire job; it cannot exercise it on a list that holds one shape.
@@ -2878,16 +2907,43 @@ function isAudienceNoun(word: string): boolean { return AUDIENCE_NOUN_RE.test(wo
 // only the FIRST — the old `wordImmediatelyBefore` (`Array.prototype.findIndex`) hid a crossing
 // behind a noun's own first, unrelated occurrence ("Ladies Embroidered Sweatshirts for Ladies" ->
 // "Ladies Sweatshirts for the Embroidered Ladies" measured ACCEPT, `w8-crossing.ts`).
+/** RULING R1 (round R, Blocking, phase-r1-rulings.md — "stop enumerating audiences; close the
+ *  CLASS"). Q2's own lexicon (`isAudienceNoun`, derived from `LEAN_FEM_CORE`/`LEAN_MASC_CORE`) is
+ *  STILL a lexicon, and still the defect one layer down: `Lady's`, `Gal's`, `Guy's`, `Dude's`,
+ *  `Bro's` and `Gent's`/`Adult's` all pass the claim flip because `WORD_RE` (line 536) swallows a
+ *  `'s`/`’s` suffix INTO the token while only `wom[ae]n`/`m[ae]n` carry the apostrophe in the core's
+ *  OWN grammar — and `Moms`, `Teens` and `Mamas` pass end to end to a fully compliant referee
+ *  because they are not in ANY lexicon at all (measured: a reviewer's independent enumeration
+ *  accepted 79 of 567 flips). Widening the word list again is the exact treadmill this round exists
+ *  to end ("if you find yourself adding a word to a set, you are closing a seventh instance").
+ *  The rule needs no vocabulary: a word is a protected RELATION OBJECT — regardless of what it
+ *  MEANS, so `isRelationObjectInSource` below never inspects the word itself — the instant the
+ *  SOURCE puts it directly after the function word "for" anywhere. "Embroidered Sweatshirts for
+ *  Moms" marks "moms" this way without this module ever knowing what a Mom is; "Sweatshirts for the
+ *  Embroidered Moms" moves "Embroidered" to sit directly before that SAME word, which is refused
+ *  below exactly as a lexicon hit always was. `isAudienceNoun`'s lexicon is KEPT alongside this
+ *  (an OR, never a replacement — RULING Q2's fence and its 38-word pins stay load-bearing for a
+ *  mid-phrase audience noun that never follows "for") — this only closes the gap the lexicon is
+ *  structurally unable to see, for any word at all, not merely six more of them. */
+function isRelationObjectInSource(word: string, sourceWordsRaw: readonly string[]): boolean {
+  for (let j = 1; j < sourceWordsRaw.length; j++) {
+    if (sourceWordsRaw[j] === word && sourceWordsRaw[j - 1] === 'for') return true
+  }
+  return false
+}
+function isProtectedRelationNoun(word: string, sourceWordsRaw: readonly string[]): boolean {
+  return isAudienceNoun(word) || isRelationObjectInSource(word, sourceWordsRaw)
+}
 function humanizerAudienceCrossingViolation(sourceWordsRaw: readonly string[], rewriteWordsRaw: readonly string[]): boolean {
   for (let i = 1; i < rewriteWordsRaw.length; i++) {
     const noun = rewriteWordsRaw[i].toLowerCase()
-    if (!isAudienceNoun(noun)) continue
+    if (!isProtectedRelationNoun(noun, sourceWordsRaw)) continue
     const modifierLower = rewriteWordsRaw[i - 1].toLowerCase()
-    // A function word (one of the six insertable words) directly before the audience noun is
+    // A function word (one of the six insertable words) directly before the protected noun is
     // ordinary grammar ("for Women"), never a relocated FACT — only a genuine content word can
-    // carry a fact across. An audience noun itself sitting there (e.g. two adjacent gendered words)
+    // carry a fact across. A protected noun itself sitting there (e.g. two adjacent gendered words)
     // is not "a modifier" either, by the same reasoning.
-    if (HUMANIZER_INSERTABLE_WORDS.has(modifierLower) || isAudienceNoun(modifierLower)) continue
+    if (HUMANIZER_INSERTABLE_WORDS.has(modifierLower) || isProtectedRelationNoun(modifierLower, sourceWordsRaw)) continue
     // Legal the instant the SOURCE already carried this exact adjacency SOMEWHERE — reordering an
     // adjacency the source itself already asserted is not a NEW claim, it is the same claim moved.
     let legalInSource = false
