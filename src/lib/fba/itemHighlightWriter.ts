@@ -1913,23 +1913,39 @@ export function enumerateWriterCandidates(
   // unit the real validator would refuse regardless.
   const allRelationCandidates = units.filter((u) => SPEC_KINDS.has(u.kind) && !u.isBrand)
   const relationCandidates = allRelationCandidates.slice(0, WRITER_CANDIDATE_MAX_REL_UNITS)
-  const allOrdinaryPool = units.filter((u) => u.kind === 'pool' && !u.isBrand)
-  const ordinaryPool = allOrdinaryPool.slice(0, WRITER_CANDIDATE_MAX_POOL_UNITS)
   const byId = new Map(units.map((u) => [u.id, u] as const))
-  // N2 (round N, Blocking): a source unit and its humanizer ALTERNATE(s) (`altOf` naming the
-  // source's own id) are MUTUALLY EXCLUSIVE — the same underlying pool fact must never appear twice
-  // in one line. Grouped by the source's own id (a unit with no `altOf` is its own one-member
-  // group), so this generalizes to any number of alternates per unit without hardcoding "exactly
-  // two". `n <= WRITER_CANDIDATE_MAX_POOL_UNITS` (8) keeps this O(n^2) pair scan trivial.
+  // RULING O1 (round O, Blocking — phase-o1-rulings.md, supersedes N2's mask-conflict approach): a
+  // source unit and its humanizer ALTERNATE(s) (`altOf` naming the source's own id) are grouped by
+  // that shared identity BEFORE the pool is capped to `WRITER_CANDIDATE_MAX_POOL_UNITS` — one
+  // alt-group costs ONE slot in the pool subset search (one mask bit), never one slot PER MEMBER.
+  // Before this, sources and alternates were flat, independent units in one array:
+  // `.slice(0, WRITER_CANDIDATE_MAX_POOL_UNITS)` truncated whichever alternates did not fit in the
+  // first 8 (dropped from the search entirely — never evaluated), and any survivor was appended at
+  // the ARRAY'S TAIL (`humanizeAdmittedUnits` always appends alternates after every source), so it
+  // occupied the mask's HIGHEST bit(s) — reached only after `WRITER_CANDIDATE_MAX_EVALUATED` (300)
+  // was already exhausted by lower masks. Measured: `phase-n1-review-net.md` BLOCKING 4 — 0 of 8
+  // shown candidates carried an alternate on either humanizing design, for every rewrite tried;
+  // reversing only the array ORDER (a probe, never the fix) gave 8 of 8, proving the mechanism.
+  // Grouping FIRST (by first-occurrence order, which is always the SOURCE's own position — a
+  // source always precedes its own alternates in the array) makes an alt-group's bit position
+  // depend only on where the SOURCE sits, never on where the alternate happened to land. A unit
+  // with no `altOf` is its own one-member group, so a candidate built from it is byte-identical to
+  // the pre-O1 single-unit-per-bit behaviour whenever no alternate exists at all (flag off, a
+  // dead/malformed humanizer, or N5's short-atom skip), which is what makes rank 1 byte-identical
+  // to flag-off in that case — additive, not a behaviour change, in every case that does not carry
+  // an alternate.
+  const allOrdinaryPool = units.filter((u) => u.kind === 'pool' && !u.isBrand)
   const altGroupKey = (u: AdmittedUnit): string => u.altOf ?? u.id
-  const poolConflictPairs: [number, number][] = []
-  for (let i = 0; i < ordinaryPool.length; i++) {
-    for (let j = i + 1; j < ordinaryPool.length; j++) {
-      if (altGroupKey(ordinaryPool[i]) === altGroupKey(ordinaryPool[j])) poolConflictPairs.push([i, j])
-    }
+  const groupOrder: string[] = []
+  const groupMembersByKey = new Map<string, AdmittedUnit[]>()
+  for (const u of allOrdinaryPool) {
+    const key = altGroupKey(u)
+    let members = groupMembersByKey.get(key)
+    if (!members) { members = []; groupMembersByKey.set(key, members); groupOrder.push(key) }
+    members.push(u)
   }
-  const maskHasConflict = (mask: number): boolean =>
-    poolConflictPairs.some(([i, j]) => (mask & (1 << i)) !== 0 && (mask & (1 << j)) !== 0)
+  const allOrdinaryGroups = groupOrder.map((key) => groupMembersByKey.get(key)!)
+  const ordinaryGroups = allOrdinaryGroups.slice(0, WRITER_CANDIDATE_MAX_POOL_UNITS)
 
   // Every PREFIX variant to try: identity+garmentHead-abutted (rule 1's usual shape) AND, whenever
   // a garmentHead exists, identity ALONE (no abutment). Both are legal by construction — the
@@ -1960,25 +1976,39 @@ export function enumerateWriterCandidates(
   const seen = new Set<string>() // de-dupe an identical rendered PARTS shape reached two ways
   const candidates: WriterCandidate[] = []
   let evaluated = 0
-  let bounded = allOrdinaryPool.length > ordinaryPool.length || allRelationCandidates.length > relationCandidates.length
+  let bounded = allOrdinaryGroups.length > ordinaryGroups.length || allRelationCandidates.length > relationCandidates.length
+  // `distinctPoolUnits`'s membership check (below) is against the SAME capped set the search
+  // itself draws from — the union of every member (source AND alternate) of every group the search
+  // considered — never merely the sources, so an accepted alternate still counts as a pool unit.
+  const ordinaryPoolCapped = ordinaryGroups.flat()
 
-  const n = ordinaryPool.length
+  const n = ordinaryGroups.length
   outer:
   for (const prefix of prefixVariants) {
   for (let mask = 0; mask < (1 << n); mask++) {
-    // N2: never a source unit AND its own alternate spelling together in one candidate.
-    if (maskHasConflict(mask)) continue
-    // Build THIS subset's pool clause, pruning the INSTANT it is already over the ceiling — G3
-    // point 1's "prune on the band early": rendered length is monotonically non-decreasing as units
-    // are appended, so no later addition (relation, wear fact) could ever bring it back in band.
-    let poolParts = prefix
-    let overMax = false
+    // RULING O1: build THIS subset's pool clause as the CARTESIAN PRODUCT of "which member (source,
+    // or one of its alternates) represents each SELECTED group" — a source and its own alternate(s)
+    // are mutually exclusive by construction (only one member per group ever enters one candidate),
+    // never a post-hoc mask-conflict filter. Pruned the INSTANT a partial line is already over the
+    // ceiling — G3 point 1's own "prune on the band early": rendered length is monotonically
+    // non-decreasing as units are appended, so no later addition (relation, wear fact, or a further
+    // group) could ever bring an over-length partial back in band.
+    let poolPartsVariants: ArrangementPart[][] = [prefix]
     for (let i = 0; i < n; i++) {
       if (!(mask & (1 << i))) continue
-      poolParts = appendUnit(poolParts, [{ glue: ',' }], ordinaryPool[i])
-      if (renderArrangement(poolParts, units).length > max) { overMax = true; break }
+      const members = ordinaryGroups[i]
+      const next: ArrangementPart[][] = []
+      for (const parts of poolPartsVariants) {
+        for (const member of members) {
+          const appended = appendUnit(parts, [{ glue: ',' }], member)
+          if (renderArrangement(appended, units).length > max) continue
+          next.push(appended)
+        }
+      }
+      poolPartsVariants = next
+      if (poolPartsVariants.length === 0) break
     }
-    if (overMax) continue
+    if (poolPartsVariants.length === 0) continue
 
     // Readability's OWN "at least one relation clause" rule means a candidate with none would only
     // ever be refused — never searched. Both relation words are tried: they are structurally
@@ -1988,6 +2018,7 @@ export function enumerateWriterCandidates(
     // SUBSET of relation candidates is tried, in order, as ONE open clause (WRITER_CANDIDATE_MAX_
     // REL_UNITS's own doc comment) — never only a single relation-target unit.
     const rn = relationCandidates.length
+    for (const poolParts of poolPartsVariants) {
     for (let relMask = 1; relMask < (1 << rn); relMask++) {
       const relSelected: AdmittedUnit[] = []
       for (let i = 0; i < rn; i++) if (relMask & (1 << i)) relSelected.push(relationCandidates[i])
@@ -2015,13 +2046,14 @@ export function enumerateWriterCandidates(
             parts: finalParts,
             line: verdict.value,
             keywordShapedClauses: shapes.filter(Boolean).length,
-            distinctPoolUnits: finalParts.filter((p) => 'unit' in p && ordinaryPool.some((u) => u.id === p.unit)).length,
+            distinctPoolUnits: finalParts.filter((p) => 'unit' in p && ordinaryPoolCapped.some((u) => u.id === p.unit)).length,
             lengthFromTarget: Math.abs(verdict.value.length - target),
-            // N2: count of this candidate's OWN parts that are a humanizer alternate spelling.
+            // N2/O1: count of this candidate's OWN parts that are a humanizer alternate spelling.
             usesAlternateSpelling: finalParts.filter((p) => 'unit' in p && !!byId.get(p.unit)?.altOf).length,
           })
         }
       }
+    }
     }
   }
   }
@@ -2037,14 +2069,18 @@ export function enumerateWriterCandidates(
   // `CONTENT_CONTRACT.itemHighlights.fillTarget`); `keywordShapedClauses` is demoted to a
   // tiebreak. Deterministic, never `Math.random` — `Array.prototype.sort` is a stable sort (ES2019),
   // so the final tiebreak is the candidates' own stable (evaluation) order.
-  // RULING N2 (round N, Blocking): a FOURTH, LAST tiebreak — prefer fewer humanizer-alternate units,
-  // i.e. prefer the design's own SOURCE spelling, when every earlier discriminator ties. This is
-  // deliberately the lowest-priority key: the model's taste (via the chooser, `askWriter`'s "pick")
-  // and the earlier band-fit/readability discriminators decide FIRST; this only breaks a genuine tie
-  // between two candidates that are otherwise indistinguishable, and — since no alternate unit is
-  // ever allocated when the flag is off, the client is dead/malformed, or N5's short-atom skip
-  // fires — is a no-op (every candidate's `usesAlternateSpelling` is 0) in exactly those cases,
-  // which is what makes rank 1 byte-identical to flag-off in them BY CONSTRUCTION.
+  // RULING N2 (round N, Blocking) named this a FOURTH, LAST tiebreak — prefer fewer humanizer-
+  // alternate units when every earlier discriminator ties — and its own doc comment (and round N's
+  // report) claimed that made rank 1 byte-identical to flag-off "BY CONSTRUCTION" whenever an
+  // alternate exists at all. RULING O2 (round O, Blocking — phase-o1-rulings.md) measured that
+  // claim FALSE: `lengthFromTarget` is the PRIMARY key, and an accepted alternate can be closer to
+  // the fill target than every zero-alt candidate (it is usually a few characters LONGER or
+  // SHORTER than its own source, which is exactly what changes band fit), so an alt-carrying
+  // candidate can legitimately win `ranked[0]` outright — the tiebreak below never even runs.
+  // Measured end to end (`q9-deadclient.ts`): a dead/malformed HUMANIZER keeps rank 1 byte-
+  // identical to flag-off, but once the humanizer succeeds, "humanizer OK + chooser throws/
+  // malformed/no-pick-key/out-of-range/deadline" all ship an alternate — the exact failure modes
+  // `runWriterForDesign`'s `picked = 1` fallback (G3 point 4) collapses onto.
   const ranked = [...candidates].sort((a, b) =>
     a.lengthFromTarget - b.lengthFromTarget ||
     a.keywordShapedClauses - b.keywordShapedClauses ||
@@ -2052,16 +2088,32 @@ export function enumerateWriterCandidates(
     a.usesAlternateSpelling - b.usesAlternateSpelling ||
     0,
   )
+  // RULING O2: source precedence for SLOT 1 is now a PROPERTY, not merely the last tiebreak's
+  // preference — rank 1 (the fallback every failure mode above collapses onto) is the BEST
+  // candidate that carries NO humanizer alternate, found by SEARCHING: `ranked` already sorts
+  // with alternate-count as the LAST tiebreak, so among candidates tied on every earlier key a
+  // zero-alt one always precedes an alt-carrying one — the FIRST zero-alt entry in `ranked` is
+  // therefore identical to what a zero-alt-only sort would put first. This is a search, not a
+  // re-sort, so it costs nothing new and changes nothing about how the OTHER candidates rank.
+  // `rank1Index === -1` only when NOT ONE evaluated candidate is alternate-free (every accepted
+  // arrangement had to use an alternate to reach the band at all) — an edge case the search cannot
+  // rule out by construction, so it falls back to `ranked[0]` rather than throwing.
+  const rank1Index = ranked.findIndex((c) => c.usesAlternateSpelling === 0)
+  const rank1 = rank1Index === -1 ? ranked[0] : ranked[rank1Index]
+  // RULING O1: slot 1's guarantee must NOT remove alternates from competing for slots 2..K on their
+  // own band-fit/readability merits — `remaining` is `ranked` with only the ONE entry used for slot
+  // 1 spliced out, never the whole alt-carrying tail. This is what lets an alternate the referee
+  // never saw before (BLOCKING 4) actually reach the shown ballot now.
+  const remaining = rank1Index === -1 ? ranked.slice(1) : [...ranked.slice(0, rank1Index), ...ranked.slice(rank1Index + 1)]
   // RULING H3(b): the top-K SHOWN must span the OCCUPIED band, not one end of it — taste between
   // legal lines is the model's entire job; it cannot exercise it on a list that holds one shape.
-  // Rank 1 (closest to the fill target, fewest keyword-shaped clauses) stays the deterministic
-  // fallback every failure mode collapses onto (G3 point 4) — untouched. The REMAINING slots fill
-  // ROUND-ROBIN across three length buckets, in `ranked` order within each bucket, so the model is
-  // always offered both a lean line and a full one, never only whichever end of the band `ranked`
-  // itself clusters at.
-  const top = ranked.length ? [ranked[0]] : []
+  // Rank 1 (above) stays the deterministic fallback every failure mode collapses onto (G3 point 4,
+  // now also O2) — untouched. The REMAINING slots fill ROUND-ROBIN across three length buckets, in
+  // `remaining`'s own order within each bucket, so the model is always offered both a lean line and
+  // a full one, never only whichever end of the band `ranked` itself clusters at.
+  const top = ranked.length ? [rank1] : []
   const bucketPools = WRITER_CANDIDATE_LENGTH_BUCKETS.map(([lo, hi]) =>
-    ranked.slice(1).filter((c) => c.line.length >= lo && c.line.length < hi),
+    remaining.filter((c) => c.line.length >= lo && c.line.length < hi),
   )
   let bucketTurn = 0
   while (top.length < WRITER_CANDIDATE_TOP_K && bucketPools.some((pool) => pool.length > 0)) {
@@ -2369,7 +2421,7 @@ function isBrandCarrierText(text: string, allowedBrand: string | null | undefine
 
 export type HumanizerRejectReason =
   | 'empty' | 'character-set' | 'content-word-multiset' | 'inserted-word' | 'relation-glue-in-unit'
-  | 'duplicate-function-word' | 'boundary-function-word'
+  | 'duplicate-function-word' | 'boundary-function-word' | 'case'
   | 'length' | `truth:${PhraseTruthReason}` | 'trademark' | 'celebrity' | 'brand-parity'
 
 /** RULING N1 (round N, phase-n1-rulings.md, Blocking): the WORD_RE tokenizer J4.1/J4.2 both read
@@ -2392,6 +2444,45 @@ function humanizerAllowedCharSet(sourceText: string): Set<string> {
 function humanizerCharacterSetViolation(sourceText: string, rewrite: string): boolean {
   const allowed = humanizerAllowedCharSet(sourceText)
   for (const ch of rewrite.toLowerCase()) if (!allowed.has(ch)) return true
+  return false
+}
+
+/** RULING O3 (round O, Blocking — phase-o1-rulings.md): a rewrite may RE-ORDER a source's own
+ *  words; it may never RE-CASE them. `humanizerCharacterSetViolation` above (N1) and the content/
+ *  insertion checks (J4.1/J4.2) all compare `.toLowerCase()`, and nothing anywhere in this net, the
+ *  truth oracle or the terminal net (`ihContentRuleViolations`, `productDetailAttrs.ts`) reads
+ *  case — so `EMBROIDERED SWEATSHIRTS FOR WOMEN`, `embroidered sweatshirts for women` and
+ *  `eMbRoIdErEd SwEaTsHiRtS fOr WoMeN` were all `{ok:true}` (measured, `q1-chars.ts` rows 30-32)
+ *  and reached the push seam (`q9-deadclient.ts`), one ALL-CAPS clause beside title-cased siblings
+ *  on a field this repo's own scorer already calls a suppression risk
+ *  (`syncListingContent.ts:889`, "Amazon policy flags 3+ caps words and can suppress the listing").
+ *  Checked per RAW WORD (the same `WORD_RE` tokenizer J4.1/J4.2 read, case PRESERVED this time,
+ *  never folded), as a multiset against the source's own cased words — a reordering rewrite (every
+ *  legitimate humanization this net has ever accepted, e.g. "Sweatshirts for Women Trendy" ->
+ *  "Trendy Sweatshirts for Women") still passes, because every one of its words is byte-identical
+ *  in case to a source word, just relocated. The six INSERTABLE function words (J4.2) are exempt
+ *  from the source's own casing budget — they are new words by definition — but ONLY in their one
+ *  canonical (lowercase) spelling — but ONLY when the source's own budget cannot already cover the
+ *  exact cased word (checked FIRST, below): a source that happens to already start with "The" (a
+ *  pool phrase's own title-cased leading article) must let a rewrite relocate that SAME "The",
+ *  case preserved, without being told it is an "inserted" word merely because it is also a member
+ *  of the six-word closed set — the canonical-form allowance exists for words the rewrite adds
+ *  BEYOND the source's own budget, never for one the source already owned at that exact casing. */
+function humanizerRawWordsCased(text: string): string[] {
+  return [...text.matchAll(WORD_RE)].map((m) => m[0])
+}
+function humanizerCaseViolation(sourceText: string, rewrite: string): boolean {
+  const sourceWordsCased = humanizerRawWordsCased(sourceText)
+  const rewriteWordsCased = humanizerRawWordsCased(rewrite)
+  const remaining = new Map<string, number>()
+  for (const w of sourceWordsCased) remaining.set(w, (remaining.get(w) ?? 0) + 1)
+  for (const w of rewriteWordsCased) {
+    const left = remaining.get(w) ?? 0
+    if (left > 0) { remaining.set(w, left - 1); continue } // exact-case reuse of one of the source's own words
+    const lower = w.toLowerCase()
+    if (HUMANIZER_INSERTABLE_WORDS.has(lower) && w === lower) continue // a genuinely NEW word, in its one canonical (lowercase) spelling
+    return true // this exact CASED spelling was never one of the source's own words, and is not a canonically-cased insertion either
+  }
   return false
 }
 
@@ -2464,6 +2555,10 @@ export function humanizerRewriteVerdict(
   // the punctuation hole (review `phase-m1-review-net.md` IMPORTANT 2: a `,`/`|`/`—`/`:`/`&` the
   // source did not carry is just another character outside the allowed set, never a separate rule).
   if (humanizerCharacterSetViolation(source.text, rewrite)) return { ok: false, reason: 'character-set' }
+  // O3 (round O, Blocking): case. Placed immediately after N1 (the last check able to see a
+  // character N1 itself would already refuse) and before N2's hygiene rules, which are unaffected
+  // by casing either way.
+  if (humanizerCaseViolation(source.text, rewrite)) return { ok: false, reason: 'case' }
   // N2 (round N)'s cheap deterministic hygiene — objectively right, needs no referee: no two
   // adjacent identical function words ("Embroidered for for Sweatshirts Women"), and no inserted
   // function word stranded at either edge of the line.

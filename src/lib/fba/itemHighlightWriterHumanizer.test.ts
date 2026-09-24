@@ -341,7 +341,14 @@ describe('ROUND M6/J1-J7 + RULING N2: J5 — provenance, end to end (an accepted
                 if (system.includes('rewrite a NUMBERED list')) {
                   return { choices: [{ message: { content: JSON.stringify({ rewrites: [{ i: 1, text: 'Graphic Crewneck Sweatshirts for Women' }, { i: 2, text: 'Fall Crewneck' }] }) }, finish_reason: 'stop' }] }
                 }
-                return { choices: [{ message: { content: JSON.stringify({ pick: 1 }) }, finish_reason: 'stop' }] }
+                // RULING O2 (round O): rank 1 is now GUARANTEED zero-alt by construction, so the
+                // alt-carrying candidate is no longer necessarily "candidate 1" — the model picks it
+                // by CONTENT (scanning the numbered list it was actually shown), never by a hardcoded
+                // index that assumed where it would land.
+                const user = req.messages.find((m) => m.role === 'user')?.content ?? ''
+                const opts = [...user.matchAll(/^(\d+)\.\s(.+)$/gm)].map(([, i, text]) => ({ i: Number(i), text }))
+                const hit = opts.find((o) => o.text.includes('Graphic Crewneck Sweatshirts for Women'))
+                return { choices: [{ message: { content: JSON.stringify({ pick: hit ? hit.i : 1 }) }, finish_reason: 'stop' }] }
               },
             },
           },
@@ -358,8 +365,8 @@ describe('ROUND M6/J1-J7 + RULING N2: J5 — provenance, end to end (an accepted
       // it just because an alternate exists.
       expect(sawSourceSpellingAtTail).toBe(true)
       expect(sawAltSpellingAtTail).toBe(true)
-      // The MODEL's own pick (candidate 1, which here carries the alternate — verified by a separate
-      // ranking probe) is what actually ships; code never decided which reads better.
+      // The MODEL's own pick — whichever numbered candidate the stub found carrying the alternate —
+      // is what actually ships; code never decided which reads better.
       expect(r.value).toContain('Graphic Crewneck Sweatshirts for Women')
       expect(r.calls).toBe(2) // 1 humanize + 1 pick — J7's typical case
     } finally { delete process.env.IH_HUMANIZER }
@@ -445,8 +452,8 @@ describe('RULING N1: humanizerRewriteVerdict — the character-set check (fullwi
     expect(humanizerRewriteVerdict(source, 'Crewneck Fall', CTX)).toEqual({ ok: true })
   })
 
-  it('is case-insensitive, matching J4.1/J4.2\'s own case-folded comparisons — a casing-only change is never mistaken for a foreign character', () => {
-    expect(humanizerRewriteVerdict(unit('fall crewneck'), 'Fall Crewneck', CTX)).toEqual({ ok: true })
+  it('N1 ITSELF is case-insensitive, matching J4.1/J4.2\'s own case-folded comparisons — a casing-only change is never mistaken for a FOREIGN character by the character-set check specifically; RULING O3 (round O, Blocking) adds a SEPARATE, later check that DOES refuse a casing-only change on its own (case is a different defect than an out-of-alphabet character) — the net\'s overall verdict for a pure re-casing is now `case`, not `ok:true`, which is the fix, not a regression: see the dedicated RULING O3 describe block below', () => {
+    expect(humanizerRewriteVerdict(unit('fall crewneck'), 'Fall Crewneck', CTX)).toEqual({ ok: false, reason: 'case' })
   })
 
   // MUTATION PROOF (DISCIPLINE): executed by copying `itemHighlightWriter.ts` aside, commenting out
@@ -473,8 +480,10 @@ describe('RULING N2: humanizerRewriteVerdict — no adjacent duplicate function 
     const source = unit('Sweatshirts for Women Trendy')
     // "for Sweatshirts Women Trendy" reorders + the source's own "for" now opens the line — legal
     // under J4.1/J4.2 (same words, only "for" is inserted-set anyway) but stranded at the edge.
-    // Use a genuinely INSERTED "the" at the front to isolate the boundary rule from a reorder.
-    expect(humanizerRewriteVerdict(source, 'The Sweatshirts for Women Trendy', CTX)).toEqual({ ok: false, reason: 'boundary-function-word' })
+    // Use a genuinely INSERTED "the" at the front, in its own canonical lowercase spelling (RULING
+    // O3 refuses a RE-CASED inserted word before this check ever runs — lowercase isolates the
+    // boundary rule on its own, from a reorder AND from a casing defect).
+    expect(humanizerRewriteVerdict(source, 'the Sweatshirts for Women Trendy', CTX)).toEqual({ ok: false, reason: 'boundary-function-word' })
   })
 
   it('REFUSES an inserted function word stranded at the END of the line', () => {
@@ -522,7 +531,7 @@ describe('RULING N2: enumerateWriterCandidates — alternates are mutually exclu
     return { units, truthCtx, runTail }
   }
 
-  it('HDG: appending a net-legal, LONGER alternate ("Crewneck for Fall", +4c) for the sole pool unit "Fall Crewneck" moves rank 1 from the SOURCE spelling (101c, 9c from the 110c fill target) to the ALTERNATE (105c, 5c from target) — the primary rank discriminator (band fit), not the source-preferring tiebreak, decides here', () => {
+  it('RULING O1/O2 (round O, supersedes this describe block\'s own title): appending a net-legal, LONGER alternate ("Crewneck for Fall") for the sole pool unit "Fall Crewneck" does NOT move rank 1 off the SOURCE spelling any more — RULING O2 measured the pre-O behaviour this test used to assert (band fit alone deciding rank 1, ahead of source-preference) as the exact mechanism that let a dead/malformed CHOOSER ship an unrefereed alternate (`phase-n1-review-net.md` BLOCKING 2) — but the alternate is NOW VISIBLE among the shown candidates (RULING O1), carrying the SAME band-fit-driven shape this test always intended to demonstrate, just never at slot 1', () => {
     const { units, truthCtx, runTail } = scenario('HDG')
     const source = units.find((u) => u.text === 'Fall Crewneck')!
     const rewrite = 'Crewneck for Fall'
@@ -531,8 +540,17 @@ describe('RULING N2: enumerateWriterCandidates — alternates are mutually exclu
     expect(withoutAlt.candidates[0]?.line).toBe('Hustle Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit')
     const alt: AdmittedUnit = { id: `${source.id}~alt0`, text: rewrite, kind: source.kind, numberable: false, altOf: source.id, sourceText: source.text }
     const withAlt = enumerateWriterCandidates([...units, alt], { truthCtx, runTail })
-    expect(withAlt.candidates[0]?.line).toBe('Hustle Definition Sweatshirt, Crewneck for Fall, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit')
-    expect(withAlt.candidates[0]?.usesAlternateSpelling).toBe(1)
+    // O2: rank 1 is GUARANTEED zero-alt — byte-identical to the no-alt search, not merely to the
+    // pre-alt VALUE of `withoutAlt.candidates[0]` (which the OLD test conflated: the two happen to
+    // agree here because appending one alt-group never changes what the best zero-alt candidate is).
+    expect(withAlt.candidates[0]?.line).toBe(withoutAlt.candidates[0]?.line)
+    expect(withAlt.candidates[0]?.usesAlternateSpelling).toBe(0)
+    // O1: the alternate is still REACHABLE — shown among the OTHER slots, carrying the exact
+    // band-fit-driven rendering this test always meant to exercise.
+    const altShown = withAlt.candidates.find((c) =>
+      c.usesAlternateSpelling > 0 && c.line === 'Hustle Definition Sweatshirt, Crewneck for Fall, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+    )
+    expect(altShown).toBeTruthy()
     // The mutual-exclusion invariant: NO candidate in the alt-aware search ever carries BOTH the
     // source unit and its own alternate.
     expect(withAlt.candidates.some((c) =>
@@ -558,13 +576,16 @@ describe('RULING N2: enumerateWriterCandidates — alternates are mutually exclu
       c.parts.some((p) => 'unit' in p && p.unit === source.id) && c.parts.some((p) => 'unit' in p && p.unit === alt.id),
     )).toBe(false)
   })
-  // MUTATION PROOF (DISCIPLINE), recorded in `phase-n1-report.md`: disabling `maskHasConflict`'s call
-  // (the `if (maskHasConflict(mask)) continue` line) turns the test above RED — a candidate
-  // "Hustle Definition, Pullover Crewneck Sweatshirt, Crewneck Pullover Sweatshirt, with 50% Cotton
-  // / 50% Polyester" (110c) SHIPS, stating the same product fact twice in different word order, and
-  // passes every OTHER gate (all three words are garment-head class, repeat budget 2, never
-  // exceeded). Confirmed the FIRST mutual-exclusion test above (the plain "Fall Crewneck" pair) does
-  // NOT distinguish this mutation — that pair's shared word "fall" is budget-1 and is caught by the
+  // MUTATION PROOF (DISCIPLINE), recorded in `phase-n1-report.md`: disabling the pre-O1 mask-conflict
+  // check (round N's `maskHasConflict`) turned the test above RED — a candidate stating the same
+  // product fact twice in different word order SHIPPED, passing every OTHER gate (all three words
+  // are garment-head class, repeat budget 2, never exceeded). RULING O1 (round O) replaced that
+  // post-hoc mask filter with a STRUCTURAL one (grouping by `altOf ?? id` before the pool is
+  // capped, one member per group ever enters one candidate) — the mutual-exclusion property this
+  // test pins is now enforced by construction, never by a separate check that could be disabled on
+  // its own; `phase-o1-report.md` records this test passing unmodified against the O1 rewrite.
+  // Confirmed the FIRST mutual-exclusion test above (the plain "Fall Crewneck" pair) does NOT
+  // distinguish this mutation — that pair's shared word "fall" is budget-1 and is caught by the
   // pre-existing repeat check regardless, which is why this second, garment-word-only case exists.
 
   it('BB: an alternate that does NOT improve band fit (source\'s rank 1 is already exactly AT the 110c fill target) never displaces it — the EXPLICIT tiebreak prefers the source on a genuine tie, proven by placing the alternate BEFORE its source in the input (so a lower-bit / evaluation-order accident could not be what decides it)', () => {
