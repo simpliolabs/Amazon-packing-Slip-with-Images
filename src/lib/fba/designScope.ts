@@ -182,3 +182,20 @@ export function rejectForeignDescription(description: string, foreign: Set<strin
   if (!foreign.size || !description || !isForeignToDesign(description, foreign)) return description
   return stripForeignHtmlBlocks(description, (seg) => isForeignToDesign(seg, foreign))
 }
+
+/** S4 — the identity ratchet. TRUE when `name` carries EVERY token of one of `siblingNames` (a
+ *  full-name subset match, not a loose word overlap — two unrelated slogans sharing one common word
+ *  must not false-positive). Used to refuse a resolved/stored design identity that is actually
+ *  another design's name, at BOTH the fresh LLM/vision/heuristic chain (`extractDesignName`'s
+ *  `accept()`) and the seller-override verbatim short-circuit, and at the section-regen rebuild that
+ *  re-feeds a STORED `designName` with no resolver call at all. */
+export function nameMatchesSibling(name: string, siblingNames: readonly string[]): boolean {
+  const nameToks = new Set(designScopeTokens(name))
+  if (nameToks.size === 0) return false
+  for (const sib of siblingNames) {
+    const sibToks = designScopeTokens(sib)
+    if (sibToks.length === 0) continue
+    if (sibToks.every((t) => nameToks.has(t))) return true
+  }
+  return false
+}

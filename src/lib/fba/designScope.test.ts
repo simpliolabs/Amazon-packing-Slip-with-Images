@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildForeignDesignTokens, isForeignToDesign, fillNormTok,
-  rejectForeignBullets, rejectForeignDescription, stripForeignHtmlBlocks,
+  rejectForeignBullets, rejectForeignDescription, stripForeignHtmlBlocks, nameMatchesSibling,
 } from './designScope'
 
 const DESIGNS = [{ key: 'BM', name: 'Beast Mode' }, { key: 'DQ', name: "Don't Quit" }, { key: 'RK', name: 'Real King' }]
@@ -184,5 +184,29 @@ describe('stripForeignHtmlBlocks + rejectForeignDescription — S2, the per-chil
     const foreign = sForeignFor('HDG')
     const once = rejectForeignDescription(liveContaminatedDescription, foreign)
     expect(rejectForeignDescription(once, foreign)).toBe(once)
+  })
+})
+
+describe('nameMatchesSibling — S4, the identity ratchet', () => {
+  it('an exact sibling-name match is refused', () => {
+    expect(nameMatchesSibling('Business B*tch', ['Hustle Definiton', 'Mother Hustler', 'Business B*tch'])).toBe(true)
+  })
+
+  it('a design\'s OWN name is never flagged against a sibling list that excludes it', () => {
+    expect(nameMatchesSibling('Hustle Definiton', ['Mother Hustler', 'Business B*tch'])).toBe(false)
+  })
+
+  it('a candidate that EMBEDS the whole sibling name is still refused (containment, not just exact-equality)', () => {
+    expect(nameMatchesSibling('Business B*tch Vibes', ['Business B*tch'])).toBe(true)
+  })
+
+  it('does NOT false-positive on a single shared word between two otherwise-different names', () => {
+    expect(nameMatchesSibling('Hustle Hard', ['Business B*tch'])).toBe(false)
+    expect(nameMatchesSibling('Hustle Definiton', ['Hustle Hard'])).toBe(false)
+  })
+
+  it('an empty candidate or empty sibling list never matches', () => {
+    expect(nameMatchesSibling('', ['Business B*tch'])).toBe(false)
+    expect(nameMatchesSibling('Business B*tch', [])).toBe(false)
   })
 })

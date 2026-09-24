@@ -99,7 +99,7 @@ import {
 } from '@/lib/fba/contentTruth'
 import {
   buildForeignDesignTokens, designScopeTokens, fillNormTok, isForeignToDesign,
-  rejectForeignBullets, rejectForeignDescription,
+  nameMatchesSibling, rejectForeignBullets, rejectForeignDescription,
 } from '@/lib/fba/designScope'
 import { IH_HOLD_MESSAGES, type IhHoldReason, type PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 // Re-exported for every existing importer (buildItemHighlights callers, tests) — the type + message
@@ -6825,7 +6825,16 @@ export function leadingDesignPhrase(title: string, brandName: string): string {
  * Returns { name, source } where source is a debug tag (llm:canonical / heuristic:canonical /
  * empty:rep / none) surfaced into titleDebug so a live regen proves which path ran.
  */
-async function extractDesignName(input: PipelineInput): Promise<{ name: string; source: string }> {
+/**
+ * `siblingNames` (S4, Round S, 2026-09-24, live B0DSCDZC6K) — every OTHER design's already-known
+ * name in this family, best-effort (the multi-design loop resolves names concurrently, so this is
+ * the STORED prior names, not "every other group's name from this exact run" — the ratchet case
+ * this exists for is exactly the recurrence of a stored wrong identity, where the prior IS the
+ * available signal). Refuses a candidate/override that IS a sibling's name instead of returning it
+ * verbatim — the earlier version accepted ANY substring of the group's own (possibly contaminated)
+ * title with no sibling comparison at all, which is how "Business B*tch" became a resolved
+ * `designName` for HDG/MHG in the first place. */
+async function extractDesignName(input: PipelineInput, siblingNames: readonly string[] = []): Promise<{ name: string; source: string }> {
   const { openai, repTitle, category, canonicalTitle, brandName, visionDesign, productType, designNameOverride } = input
   // SELLER OVERRIDE — short-circuits the whole chain (LLM + vision + heuristic). The override is the
   // seller's deterministic answer to "what IS the design"; trust it verbatim (just normalize curly
@@ -6834,7 +6843,15 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
   // (fix/content-anchor-not-color): a garment color can never reach here as the override, so the
   // verbatim short-circuit is safe to trust — no color test is needed at this point.
   if (designNameOverride && designNameOverride.trim()) {
-    return { name: designNameOverride.trim().replace(/[’‘]/g, "'"), source: 'override' }
+    const normOverride = designNameOverride.trim().replace(/[’‘]/g, "'")
+    // S4 — the override is "deterministic", not "unconditional": a sibling's name is not this
+    // design's answer just because it was stored as one. Fall through to the LLM/vision/heuristic
+    // chain below instead of the ratchet's verbatim return.
+    if (siblingNames.length && nameMatchesSibling(normOverride, siblingNames)) {
+      console.warn(`[pipeline] design-name override "${normOverride}" names a SIBLING design — refused, falling through to resolution`)
+    } else {
+      return { name: normOverride, source: 'override' }
+    }
   }
   const usingCanonical = !!(canonicalTitle && canonicalTitle.trim())
   const source = usingCanonical ? canonicalTitle!.trim() : (repTitle || '')
@@ -6889,6 +6906,11 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
     if (words.every((w) => GENERIC_TAIL.test(w))) return ''
     if (!haystack.includes(normApos(n.toLowerCase()))) return ''
     if (brandName && n.toLowerCase() === brandName.toLowerCase()) return ''
+    // S4 — a candidate that IS a sibling design's name is rejected here too (not just the override
+    // short-circuit above): the LLM/vision/heuristic chain reads a haystack built from THIS group's
+    // OWN title/vision, and a contaminated title makes a sibling's slogan pass the substring test
+    // above just as legitimately as this design's real name (VERDICT.md §2's exact mechanism).
+    if (siblingNames.length && nameMatchesSibling(n, siblingNames)) return ''
     return n
   }
 
@@ -10677,6 +10699,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // All design keys in THIS family — fed to deriveDesignLabel so each key's common prefix is
     // stripped against its siblings ('SOCCER-CUP-TS-ARGENTINA' → 'Argentina'). Gathered once.
     const allGroupKeys = designGroupInfo.groups.map((g) => g.key)
+    // S4 — the best available "every OTHER group's name" signal for a FULL regen: the STORED prior
+    // per-child names (this run resolves every group's name CONCURRENTLY below, so no group knows
+    // any other group's freshly-resolved name yet; the prior run's names are what's synchronously
+    // known). Handed to `extractDesignName` so a candidate that IS a sibling's stored name is
+    // refused instead of accepted on this design's own (possibly still-contaminated) title/vision.
+    const priorNamesByKey = new Map<string, string>()
+    for (const p of input.priorPerChildTitles ?? []) {
+      const k = p.designKey || ''
+      if (k && p.designName?.trim()) priorNamesByKey.set(k, p.designName.trim())
+    }
+    const siblingNamesFor = (key: string): string[] =>
+      [...priorNamesByKey.entries()].filter(([k]) => k !== key).map(([, n]) => n)
     const fetchDesignNameAttr = async (sku: string): Promise<string> => {
       if (!spToken || !spSellerId || !sku) return ''
       try {
@@ -10760,7 +10794,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // council/writer stage judge THIS design against its own audience, not the family's.
         audienceLean: groupAudienceFor(group.key).lean,
       }
-      const extracted = await extractDesignName(groupInput)
+      const extracted = await extractDesignName(groupInput, siblingNamesFor(group.key))
       // extractDesignName's LLM refine (title + vision) is the proven resolver. Fall back to the
       // designKey-derived label ONLY if it returned empty OR (defensively) a garment color slipped
       // through — per-design content must anchor on the design, never the shirt color.
@@ -11068,7 +11102,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       tag: 'LLM_FANOUT', op: 'multi_design_editorial_audit', designs: designGroupContexts.length,
       calls: input.onlySection ? 0 : Math.min(MULTI_DESIGN_AUDIT_MAX_GROUPS, designGroupContexts.length),
     }))
-    if (input.onlySection) return
+    // S5 (Round S, 2026-09-24) — the cost guard's OWN comment says step 2 below runs "every group,
+    // regardless of budget/outcome"; `if (input.onlySection) return` here returned BEFORE step 2
+    // ever ran, so a section regen shipped the per-child bytes with NO deterministic truth+brand
+    // scrub, NO terminal brand-strip, NO description re-expand and NO bullets terminal expander —
+    // exactly the surfaces S2's ship-door rejector backstops, left ungated between generation and
+    // that backstop. Skip ONLY the LLM audit (step 1, the actual cost PR #635 was guarding against
+    // — up to MULTI_DESIGN_AUDIT_MAX_GROUPS sequential gpt-4.1 calls) on a section regen; every pure/
+    // bounded step after it runs on EVERY path, restoring what the comment already promised.
     let auditBudget = MULTI_DESIGN_AUDIT_MAX_GROUPS
     for (const ctx of designGroupContexts) {
       const repSku = ctx.skus[0]?.sku
@@ -11076,7 +11117,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       let gd = pcd?.find((c) => c.sku === repSku)?.description ?? ''
       // 1) LLM editorial audit on the GROUP REP — same accept condition as applyEditorialGates. Weaves
       //    THIS group's theme (ctx.designName + ctx.groupInput.canonicalTitle), budget-capped, fail-open.
-      if (auditBudget > 0 && (gb.length === 5 || gd.trim().length > 0)) {
+      if (!input.onlySection && auditBudget > 0 && (gb.length === 5 || gd.trim().length > 0)) {
         auditBudget--
         try {
           const ar = await runFinalEditorialAudit(input.openai, ctx.title, gb, gd, '', {
@@ -11330,6 +11371,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       byKey.set(key, g)
     }
     if (byKey.size >= 2) {
+      // S4 — the identity ratchet, closed. This rebuild path never calls `extractDesignName` at
+      // all: `g.designName` is the STORED value, handed straight to `ctx.designName` (used directly
+      // by the bullets/description fan-out, §1.2 forces it into a bullet) and to
+      // `groupInput.designNameOverride` (returned verbatim by `extractDesignName` if anything
+      // downstream re-resolves). A stored identity that names a SIBLING would otherwise be re-fed
+      // on every section regen FOREVER — no vision/LLM re-check ever runs on this cheap path to
+      // catch it. Validate every group's stored name against every OTHER group's stored name
+      // (available synchronously — this whole rebuild is a plain loop over stored rows) and, on a
+      // match, fall back to the SAME deterministic (no vision, no LLM) heuristic the full regen
+      // uses as its own last resort — re-validated once more before use, else cleared to ''. Never
+      // propagate a known-wrong identity just because re-deriving a right one costs a resolver call.
+      const allStoredNames = [...byKey.entries()].map(([key, g]) => [key, g.designName] as const)
+      for (const [key, g] of byKey) {
+        if (!g.designName) continue
+        const siblingNames = allStoredNames.filter(([k]) => k !== key).map(([, n]) => n)
+        if (nameMatchesSibling(g.designName, siblingNames)) {
+          const fallback = leadingDesignPhrase(g.title, input.brandName || '')
+          const safeFallback = fallback && !nameMatchesSibling(fallback, siblingNames) ? fallback : ''
+          console.warn(`[pipeline] stored design name "${g.designName}" for group "${key}" names a SIBLING design — refused${safeFallback ? `, fell back to "${safeFallback}"` : ' and cleared'}`)
+          g.designName = safeFallback
+        }
+      }
       designGroupContexts = [...byKey.entries()].map(([key, g]) => {
         const groupChildren = g.skus
           .map((s) => input.children.find((c) => c.sku === s.sku))
@@ -11703,6 +11766,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // dropTitleCovered=false — the PO-chosen backend HYBRID keeps title keyphrases in the core.
         const groupPool = scopeKwsToGroup(ctx, backendPool, (k) => k.keyword, false)
         const groupHay = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName} ${(input.productType ?? '').replace(/_/g, ' ')}`.toLowerCase()
+        // S6 (Round S, 2026-09-24, live B0DSCDZC6K) — the SIBLING-NAME ban below corroborates a hit
+        // against `groupHay`, which carries `ctx.groupInput.canonicalTitle`/`repTitle`: THIS
+        // group's own STORED/live title — the exact input the August title defect could (and did)
+        // contaminate with a sibling's name. On a contaminated group the corroboration self-fires
+        // ("business" IS in groupHay because the live title already names it) and the ban turns
+        // itself off for precisely the groups it exists to protect. Corroborate the SIBLING-NAME
+        // check from a title-FREE hay instead — THIS design's own resolved name + the product type
+        // only (GARMENT_TYPE_WORDS/STYLE_CUT_WORDS below are a different, ungated concern and keep
+        // reading the full `groupHay` unchanged).
+        const siblingBanHay = `${ctx.designName} ${(input.productType ?? '').replace(/_/g, ' ')}`.toLowerCase()
         // Own-brand ban unconditional here too (2026-07-08) — same rationale as banBackendTok.
         const groupBrandToks = ownBrandTokenSet(brandName)
         // Pool-backed exemption scoped to THIS group's demand pool (PO-approved 2026-07-09) —
@@ -11724,8 +11797,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           if (FOREIGN_FUNCTION_WORDS.has(w)) return true   // ES/PT function words carry no search value (2026-07-09)
           if (BACKEND_GENERIC_FILLER.has(w) && !groupPoolToks.has(w)) return true   // catalog-speak — unless the demand data says buyers type it
           if (groupBrandToks.has(w)) return true
-          // A sibling design's own name token — drop it unless THIS group's product truth also carries it.
-          if (siblingNameToks.has(fillNormTok(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(groupHay)) return true
+          // A sibling design's own name token — drop it unless THIS group's product truth also
+          // carries it. `siblingBanHay`, NOT `groupHay` (S6): the corroboration must never be
+          // sourced from a title that could itself be the thing contaminated.
+          if (siblingNameToks.has(fillNormTok(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(siblingBanHay)) return true
           if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
           // Garment identity words: only if THIS group's product truth corroborates it — never via pool
           // membership (the "polo" leak). Style/cut words keep the group-pool demand exemption.
