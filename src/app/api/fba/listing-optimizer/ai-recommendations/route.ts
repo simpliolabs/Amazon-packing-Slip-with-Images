@@ -1038,6 +1038,15 @@ export async function POST(req: NextRequest) {
             priorPerChildTitles: onlySection && Array.isArray(storedRec?.per_child_titles)
               ? (storedRec?.per_child_titles as { sku: string; asin: string; title: string; designName?: string; designKey?: string }[])
               : null,
+            // T8 (Round T): this field was declared on PipelineInput and read by
+            // rejectForeignBullets's prior-restore path (listingPipeline.ts) but no caller ever
+            // populated it — a dead wire, so a bullet the ship door refused was always DROPPED,
+            // never restored from a clean prior. Wired the same way priorPerChildTitles is, one
+            // line up: the stored per_child_bullets column is already selected into `storedRec`
+            // (`select('*')` above).
+            priorPerChildBullets: onlySection && Array.isArray(storedRec?.per_child_bullets)
+              ? (storedRec?.per_child_bullets as { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[])
+              : null,
             priorCoupleConcept: onlySection ? ((storedRec?.keyword_plan as { coupleConcept?: string } | null)?.coupleConcept ?? null) : null,
             onProgress: (message) => emit({ type: 'progress', message }),
           })

@@ -147,31 +147,28 @@ describe('Round S — a stored identity carrying a sibling\'s name is refused, e
     for (const row of mhgRows) expect(row.bullets.some((b) => b.trim().length > 0)).toBe(true)
   }, 30_000)
 
-  it('S5: the deterministic step-2 gate (terminal bullets expander) now runs on a SECTION regen too, not just a full one', async () => {
-    // Every CLEAN_BULLETS entry is well under BULLET_MIN_CHARS (150) — before S5, the whole
-    // gatePerChildMultiDesign loop returned before this ran on `input.onlySection`, so a
-    // "Regenerate bullets" click shipped these bytes UNPADDED. Measured directly (not guessed):
-    // at least one bullet grows once the deterministic pad runs.
-    // T1 (Round T, cross-design leak) note: CLEAN_BULLETS[0] uses the generic word "hustle", which
-    // is also sibling HDG's real name token ("Hustle Definiton") — T1 makes the ship door correctly
-    // ARMED on this section regen (it was inert before T1, so this coincidental word collision
-    // never surfaced), so MHG's set can now legitimately ship 4 bullets, not 5, and the surviving
-    // bullet at index 0 is no longer necessarily CLEAN_BULLETS[0]. Neither is what THIS test is
-    // about — check every surviving bullet against its OWN stubbed original (matched by hook) and
-    // require at least one to have grown.
+  it('T6 (Round T): this family\'s section regen still completes and ships real per-child bullets under S5+T6\'s combined gate', async () => {
+    // CORRECTED (Round T, T6): this test used to assert that a section regen's per-child bullets
+    // grew LONGER via the terminal expander (`expandShortBulletsTerminal`, called from
+    // `gatePerChildMultiDesign`) — encoding the exact cost regression T6 fixes (that call, and its
+    // description counterpart, are gpt-4.1-mini calls with no budget counter, now gated
+    // `!input.onlySection`). A tight, in-repo byte- or call-count assertion for T6 on THIS fixture
+    // turned out to be unreliable: this family also exercises several OTHER, unrelated, always-on
+    // mechanisms that touch bullet length/content on EITHER path regardless of T6 (the
+    // deterministic identity floor weaving the design name into a bullet; the pre-existing,
+    // unconditional broadcast-side `applyTerminalNets` pass; the metric-gated resynthesis loop) —
+    // so a assertion narrow enough to isolate T6's OWN two calls without tripping on those would
+    // have to duplicate `s5cost.probe.test.ts`'s own resolver-aliased before/after harness, which
+    // already measured this precisely (142 -> 82 total calls on a 6-design family, re-run
+    // unmodified as this round's decisive, quantitative evidence for T6). What THIS test still
+    // usefully pins, byte-identical to before T6 landed: the section regen on this ratcheted
+    // family completes and ships real per-child bullets — T6's gating must never silently degrade
+    // the regen itself, only its call volume.
     const openai = makeOpenAiStub()
     const input: PipelineInput = { ...makeBaseInput(openai), onlySection: 'bullets' }
     const result = await runListingPipeline(input)
     const mhgRows = result.per_child_bullets?.filter((c) => c.designKey === 'MHG') ?? []
     expect(mhgRows.length).toBeGreaterThan(0)
-    for (const row of mhgRows) {
-      expect(row.bullets.length).toBeGreaterThan(0)
-      const grew = row.bullets.some((b) => {
-        const hook = b.split(' - ')[0]
-        const orig = CLEAN_BULLETS.find((o) => o.startsWith(hook))
-        return !!orig && b.length > orig.length
-      })
-      expect(grew, `no per-child MHG bullet grew past its stubbed original: ${JSON.stringify(row.bullets)}`).toBe(true)
-    }
+    for (const row of mhgRows) expect(row.bullets.length).toBeGreaterThan(0)
   }, 30_000)
 })

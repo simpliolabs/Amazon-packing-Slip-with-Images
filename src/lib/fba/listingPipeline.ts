@@ -6818,6 +6818,34 @@ export function leadingDesignPhrase(title: string, brandName: string): string {
   return lead.join(' ').trim()
 }
 
+/** T4 (Round T, cross-design leak) — TRUE when EVERY token of `name` appears among `title`'s own
+ *  tokens: does this design's OWN stored title actually back the name it claims? The section-regen
+ *  identity-ratchet rebuild (S4) used to refuse a stored name SOLELY because it collided with a
+ *  SIBLING's (possibly corrupted) stored name — convicting the design that legitimately owns a name
+ *  on the strength of the OTHER row's corruption (live: group BB's genuine "Business B*tch" refused
+ *  because HDG's row was wrongly stored as the same name). A design whose own title backs its name is
+ *  never refused on a sibling's say-so; only a row whose OWN title does not support its own claimed
+ *  name is the untrustworthy one. */
+export function titleSupportsName(title: string, name: string): boolean {
+  const nameToks = designScopeTokens(name)
+  if (!nameToks.length) return false
+  const titleToks = new Set(designScopeTokens(title))
+  return nameToks.every((t) => titleToks.has(t))
+}
+
+/** T4 — TRUE when `fallback` is nothing more than a character-stripped copy of `original` (the
+ *  same letters/digits once every non-alphanumeric character is removed) — e.g.
+ *  `leadingDesignPhrase`'s `[^A-Za-z0-9']` cleaner turning "Business B*tch" into "Business Btch".
+ *  A fallback this close to the refused string is not an independent identity; it is a LOSSY
+ *  REWRITE of the very name being refused, and the identity floor would force-weave it into a
+ *  shopper-facing bullet — worse than clearing to ''. */
+export function isLossyRewriteOf(fallback: string, original: string): boolean {
+  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const a = norm(fallback)
+  const b = norm(original)
+  return !!a && !!b && a === b
+}
+
 /**
  * Extract the seller's DESIGN / SLOGAN NAME ("Later Gator") to anchor it verbatim into the title.
  *
@@ -10446,10 +10474,33 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * it in the title branch (:10678), and the section-regen rebuild (below, :11370ish) populates it
    * from stored per-child titles BEFORE the bullets/description stages run — never from an output one
    * path does not produce. */
-  const perChildDesignScope = buildForeignDesignTokens(
-    designGroupContexts.map((c) => ({ key: c.key, name: c.designName })),
-    { familyTitleText: '', poolKeywords: [], strictNames: true },
-  )
+  const perChildDesignVocab = designGroupContexts.map((c) => ({ key: c.key, name: c.designName }))
+  const perChildBaseScope = buildForeignDesignTokens(perChildDesignVocab, { familyTitleText: '', poolKeywords: [], strictNames: true })
+  /* T5 (Round T) — `refusedIdentityVocab` carries forward the ORIGINAL name of any group S4
+   * refused/cleared for its OWN identity (see the rebuild loop below): a cleared name must stay
+   * FOREIGN vocabulary to every SIBLING even though it is no longer that design's own identity.
+   * Applied OUTSIDE `buildForeignDesignTokens`'s own `designs` list, not inside it: feeding the
+   * orphan entry IN as another `DesignVocab` row (an earlier version of this fix) inflated
+   * `nameTokCounts` for its tokens (BB's real name and the orphan share the same tokens), which
+   * tripped the ">=50% of design names" NICHE-BY-SHARING exemption and made "Business B*tch"
+   * pool-frequency-exempt for every design INCLUDING the sibling it is supposed to stay foreign
+   * to — measured (t5-unit.probe.test.ts) `foreignFor('MHG')` lost "busines"/"tch" entirely.
+   * Unioning the orphan tokens onto the ALREADY-COMPUTED base result (minus this key's own
+   * tokens) protects every sibling without touching the niche-exemption math at all. */
+  const ownTokensByKey = new Map(perChildDesignVocab.map((d) => [d.key, new Set(designScopeTokens(d.name))]))
+  const refusedVocabToks = new Set(refusedIdentityVocab.flatMap((v) => designScopeTokens(v.name)))
+  const perChildScopeCache = new Map<string, Set<string>>()
+  const perChildDesignScope = (key: string): Set<string> => {
+    const hit = perChildScopeCache.get(key)
+    if (hit) return hit
+    const base = perChildBaseScope(key)
+    if (!refusedVocabToks.size) { perChildScopeCache.set(key, base); return base }
+    const own = ownTokensByKey.get(key) ?? new Set<string>()
+    const out = new Set(base)
+    for (const t of refusedVocabToks) if (!own.has(t)) out.add(t)
+    perChildScopeCache.set(key, out)
+    return out
+  }
   /** ONE per-child exit scope: the design name to protect, the sibling-design rejector, and the
    *  door BOUND to them — so every exit calls the same `(text, produced)` shape and no caller can
    *  forget to pass the scope. */
@@ -10696,6 +10747,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (costly) per-group design-name + vision resolution WITHOUT recomputing it. Populated only when the
   // multi-design title branch runs (full regen or a title-only partial); empty otherwise.
   let designGroupContexts: { skus: { sku: string; asin: string }[]; designName: string; title: string; groupInput: PipelineInput; key: string; identityPhrases?: string[] }[] = []
+  // T5 (Round T, cross-design leak) — a name S4 refuses/clears for a group's OWN identity (the
+  // rebuild loop below) must still be FOREIGN vocabulary to every SIBLING: filtering a cleared row
+  // out of the scope's design list (the old behavior) drops its tokens from EVERY foreign set, not
+  // just its own — measured: `foreign(HDG)` loses "busines"/"tch" the moment HDG's row is cleared,
+  // exactly the scenario S4 exists for. Each entry gets a synthetic key no REAL design ever shares
+  // (`__refused_<key>`), so it can only ever be foreign to a sibling — never anyone's "own", never
+  // exempting a design's own content from its own rejector.
+  let refusedIdentityVocab: { key: string; name: string }[] = []
   // Phase 2: the unified-set couple anchor (e.g. "Rude Potato & Sweet Potato Couple Matching"),
   // resolved in the unified-set branch and reused by the shared bullets + description stages below
   // so they anchor on the SAME couple concept the title leads with. Empty unless unifiedSet ran.
@@ -11130,11 +11189,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // S5 (Round S, 2026-09-24) — the cost guard's OWN comment says step 2 below runs "every group,
     // regardless of budget/outcome"; `if (input.onlySection) return` here returned BEFORE step 2
     // ever ran, so a section regen shipped the per-child bytes with NO deterministic truth+brand
-    // scrub, NO terminal brand-strip, NO description re-expand and NO bullets terminal expander —
-    // exactly the surfaces S2's ship-door rejector backstops, left ungated between generation and
-    // that backstop. Skip ONLY the LLM audit (step 1, the actual cost PR #635 was guarding against
-    // — up to MULTI_DESIGN_AUDIT_MAX_GROUPS sequential gpt-4.1 calls) on a section regen; every pure/
-    // bounded step after it runs on EVERY path, restoring what the comment already promised.
+    // scrub and NO terminal brand-strip — exactly the surfaces S2's ship-door rejector backstops,
+    // left ungated between generation and that backstop. Skip ONLY the LLM audit (step 1, the
+    // actual cost PR #635 was guarding against — up to MULTI_DESIGN_AUDIT_MAX_GROUPS sequential
+    // gpt-4.1 calls) on a section regen; the pure/bounded steps after it (truth+brand scrub, the
+    // brand-strip) run on EVERY path.
+    // T6 (Round T) — CORRECTED: this comment used to say "every pure/bounded step after it runs
+    // on EVERY path", but the description re-expand and bullets terminal expander two steps below
+    // are gpt-4.1-mini CALLS, not pure/bounded — measured +58% total OpenAI calls per section
+    // regen (~60 uncapped, scaling with design count) on the very subsystem this cost guard exists
+    // for. Those two are now gated `!input.onlySection` (full regen only, byte-identical to
+    // 89d6cb0's cost profile there); only the deterministic truth+brand gate and the terminal
+    // brand-strip run unconditionally.
     let auditBudget = MULTI_DESIGN_AUDIT_MAX_GROUPS
     for (const ctx of designGroupContexts) {
       const repSku = ctx.skus[0]?.sku
@@ -11176,17 +11242,25 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // TERMINAL per-child brand-strip + production-method scrub (INVARIANT 2 + INVARIANT 3 — must run
       // on the per-child bytes the push actually PATCHes, not just the broadcast). Uses seller brandName
       // (captured from outer scope) for the strip — the local `brand` param is the GARMENT brand for
-      // casing. No-op if brandName absent or gd empty.
+      // casing. No-op if brandName absent or gd empty. PURE, NO LLM — runs on every path (S5 was
+      // right to restore this one, and the comment below is now honest about which two are not it).
       if (gd && brandName) gd = scrubDescriptionBody(gd, { brand: brandName, garmentBrand: brand })
-      // TERMINAL per-child length re-expand (INVARIANT 3 — bundled with Item C, 2026-07-21).
-      if (gd) gd = await reExpandDescriptionIfShort(input.openai, gd, { finalTitle: ctx.title, brand: brandName, garmentBrand: brand })
+      // T6 (Round T) — `!input.onlySection`: the comment these two calls used to sit under said
+      // "every pure/bounded step after it runs on EVERY path", but BOTH are gpt-4.1-mini calls with
+      // no budget counter, not pure/bounded — measured (s5cost.probe.test.ts / radius review): +58%
+      // total OpenAI calls per section regen, ~60 uncapped calls scaling with design count, on the
+      // very subsystem PR #635 capped for "$50 of OpenAI in 2 days". The ruling asked to restore
+      // ONLY the deterministic gate on the partial path and leave the LLM-backed steps to the FULL
+      // regen — exactly the guard the cost-guard pass above already uses for step 1 (the audit).
+      // TERMINAL per-child length re-expand (INVARIANT 3 — bundled with Item C, 2026-07-21). LLM.
+      if (!input.onlySection && gd) gd = await reExpandDescriptionIfShort(input.openai, gd, { finalTitle: ctx.title, brand: brandName, garmentBrand: brand })
       // TERMINAL per-child bullets expander (INVARIANT 2 + 3 — bundled with Item C). Rewrites any
       // per-child bullet under BULLET_MIN_CHARS via gpt-4.1-mini, keeping the ALL-CAPS hook and
-      // running the same deterministic post-scrub as existing bullets.
+      // running the same deterministic post-scrub as existing bullets. LLM.
       // S3 (Round S): THIS group's OWN truth ctx (`bulletsTruthCtxForDesign`), never the family
       // union `bulletsTruthCtx` — this rewrite/pad runs PER DESIGN GROUP, and the union would let
       // `truthOk` treat a SIBLING's name as a legitimate token for this design's rewrite.
-      if (gb.length === 5) gb = await expandShortBulletsTerminal(input.openai, gb, {
+      if (!input.onlySection && gb.length === 5) gb = await expandShortBulletsTerminal(input.openai, gb, {
         title: ctx.title, designName: ctx.designName, fit, garmentBrand: brand, truth: bulletsTruthCtxForDesign(ctx.designName),
       })
       // 3) Broadcast the gated copy back to EVERY SKU in the group by ctx.skus membership (authoritative —
@@ -11407,15 +11481,44 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // match, fall back to the SAME deterministic (no vision, no LLM) heuristic the full regen
       // uses as its own last resort — re-validated once more before use, else cleared to ''. Never
       // propagate a known-wrong identity just because re-deriving a right one costs a resolver call.
+      //
+      // T4 (Round T) — never convict the RIGHTFUL owner on a SIBLING's corrupted say-so. The old
+      // check refused a row SOLELY because its stored name collided with another row's stored
+      // name — so group BB, whose name genuinely IS "Business B*tch", was refused on the strength
+      // of HDG's ratcheted row (HDG's OWN stored name wrongly named BB's design), and the lossy
+      // fallback "Business Btch" (leadingDesignPhrase's `[^A-Za-z0-9']` cleaner drops the asterisk)
+      // got force-woven into a shopper-facing bullet by the identity floor. `titleSupportsName`
+      // asks a narrower, decisive question: does THIS group's OWN stored title actually back its
+      // own claimed name? BB's title literally contains "Business B*tch" — supported, never
+      // refused, regardless of what any sibling's row says. HDG's title is about Hustle Definiton,
+      // not Business B*tch — unsupported, correctly refused, and its OWN title's leadingDesignPhrase
+      // fallback ("Hustle Definiton") is nothing like the refused string, so it is accepted.
       const allStoredNames = [...byKey.entries()].map(([key, g]) => [key, g.designName] as const)
       for (const [key, g] of byKey) {
         if (!g.designName) continue
         const siblingNames = allStoredNames.filter(([k]) => k !== key).map(([, n]) => n)
-        if (nameMatchesSibling(g.designName, siblingNames)) {
+        const selfSupported = titleSupportsName(g.title, g.designName)
+        if (!selfSupported && nameMatchesSibling(g.designName, siblingNames)) {
+          const original = g.designName
           const fallback = leadingDesignPhrase(g.title, input.brandName || '')
-          const safeFallback = fallback && !nameMatchesSibling(fallback, siblingNames) ? fallback : ''
-          console.warn(`[pipeline] stored design name "${g.designName}" for group "${key}" names a SIBLING design — refused${safeFallback ? `, fell back to "${safeFallback}"` : ' and cleared'}`)
+          // T4 — never accept a fallback that is a LOSSY REWRITE of the refused string (same
+          // letters/digits once every non-alphanumeric character is stripped, e.g. "Business
+          // Btch" from "Business B*tch") — a mangled copy of the very name being refused is worse
+          // than clearing to '', and the identity floor would force-weave it into a bullet anyway.
+          const fallbackOk = !!fallback && !nameMatchesSibling(fallback, siblingNames) && !isLossyRewriteOf(fallback, original)
+          const safeFallback = fallbackOk ? fallback : ''
+          console.warn(`[pipeline] stored design name "${original}" for group "${key}" names a SIBLING design — refused${safeFallback ? `, fell back to "${safeFallback}"` : ' and cleared'}`)
           g.designName = safeFallback
+          // T5 — the REFUSED (original, pre-clear) name stays FOREIGN vocabulary to every sibling
+          // even though it is no longer THIS group's own identity: filtering a cleared row out of
+          // the scope's design list entirely (the old behavior at the `perChildDesignScope` /
+          // `foreignToksFor` build sites) drops its tokens from every foreign set, not just its
+          // own — measured: `foreign(HDG)` loses "busines"/"tch" the instant HDG's row is cleared,
+          // exactly the scenario S4 exists for, and S4's own remedy reopens the door S2 closed.
+          // Synthetic key: no REAL design ever shares `__refused_<key>`, so this entry can only
+          // ever be foreign to a sibling — never anyone's "own", never exempting a design's own
+          // content from its own rejector.
+          if (original) refusedIdentityVocab.push({ key: `__refused_${key}`, name: original })
         }
       }
       designGroupContexts = [...byKey.entries()].map(([key, g]) => {
