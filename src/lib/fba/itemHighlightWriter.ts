@@ -40,7 +40,6 @@ import { PERFORMANCE_CLAIM_RE } from '@/lib/fba/blankSpecs'
 import {
   ihFoldWord, IH_GARMENT_HEAD_FOLDED, lineHasSignificantRepeat, classifyStoredIhLine,
   significantWordsWithSurface, ihRepeatBudget, IH_MAX_WORD_REPEATS, ihContentRuleViolations,
-  GENDER_FOLDS,
 } from '@/lib/fba/productDetailAttrs'
 import { titleCasePhrase } from '@/lib/fba/titleBand'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
@@ -1869,10 +1868,29 @@ const WRITER_CANDIDATE_MAX_POOL_UNITS = 8
 // zero observed acceptance and shrinks the search.
 const WRITER_CANDIDATE_MAX_REL_UNITS = 5
 /** At most this many full `judgeWriterArrangement` calls (each already running its own `runTail`)
- *  are spent evaluating candidates for ONE design, across every subset/relation-unit/relation-glue/
- *  wear-fact combination — the search stops the INSTANT this is reached, never merely warns after
- *  spending more. */
+ *  are spent evaluating PASS 1 (source-only) candidates for ONE design, across every subset/
+ *  relation-unit/relation-glue/wear-fact combination — that pass stops the INSTANT this is reached,
+ *  never merely warns after spending more. RULING Q1 (round Q, Blocking — phase-q1-rulings.md):
+ *  this is now PASS 1's OWN budget, never shared with pass 2 below — see `WRITER_CANDIDATE_ALT_
+ *  MAX_EVALUATED`'s doc comment for why the two were split. */
 const WRITER_CANDIDATE_MAX_EVALUATED = 300
+/** RULING Q1 (round Q, Blocking, phase-q1-rulings.md — "the alternate pass gets its OWN evaluation
+ *  budget"; supersedes RULING P1's shared-counter search). PASS 2 (the alt-carrying search) used to
+ *  spend `WRITER_CANDIDATE_MAX_EVALUATED - <whatever pass 1 already spent>` — on this repo's OWN
+ *  real family (`phase-p1-review-wire.md` BLOCKING 1 / `phase-p1-review-reading.md` BLOCKING 1,
+ *  re-measured by `q1/BASELINE-reach.out`/`q1/BASELINE-sweep.out` against THIS commit, unmodified:
+ *  `CANDIDATES CARRYING AN ALT = 0` on every one of BB/MHG at pool size 6, `bounded=8` cells of 30,
+ *  `CELLS=30 cells where an alt-carrying line reached the BALLOT=4`, all four at pool size 2-3 only)
+ *  pass 1 alone exhausts the WHOLE shared cap on any design with 2+ eligible pool groups, so pass 2
+ *  never runs a single evaluation there and no alternate can ever reach the ballot. A SEPARATE
+ *  counter, with this SEPARATE cap, makes pass 2 always get a real budget of its own regardless of
+ *  what pass 1 spent — the two properties this round holds (P1's "candidate 1 stays byte-identical
+ *  to flag-off, decided by pass 1 alone, BEFORE pass 2 ever runs" and Q1's "an alternate is always
+ *  explored on a real pool, never merely luckier than pass 1's leftover budget") are each a fact
+ *  about ONE counter that the OTHER pass's work cannot touch, so neither guard can be defeated by
+ *  the other pass any more. Same value as pass 1's own cap — this is "a separate allowance of its
+ *  own", never a scaled-up number chosen to paper over the shared-counter defect. */
+const WRITER_CANDIDATE_ALT_MAX_EVALUATED = 300
 /** G3 point 3: "the top K (K <= 8) RENDERED LINES". */
 export const WRITER_CANDIDATE_TOP_K = 8
 /** RULING H3(b) (fix round H1): three length buckets spanning the writer's own accepted band —
@@ -1983,7 +2001,6 @@ export function enumerateWriterCandidates(
   const target = CONTENT_CONTRACT.itemHighlights.fillTarget
 
   const seen = new Set<string>() // de-dupe an identical rendered PARTS shape reached two ways
-  let evaluated = 0
   let bounded = allOrdinaryGroups.length > ordinaryGroups.length || allRelationCandidates.length > relationCandidates.length
   // `distinctPoolUnits`'s membership check (below) is against the SAME capped set the search
   // itself draws from — the union of every member (source AND alternate) of every group the search
@@ -1994,14 +2011,21 @@ export function enumerateWriterCandidates(
   const ordinaryPoolCapped = ordinaryGroups.flat()
 
   // RULING P1 (round P, Blocking, phase-p1-rulings.md — "the humanizer becomes STRICTLY ADDITIVE").
-  // Extracted so the SAME search can run TWICE against shared `seen`/`evaluated`/`bounded` state —
-  // once over groups that carry ONLY each group's source member (never an alternate), once over the
-  // full alt-carrying groups. `groupsForThisPass.length` (`n`, `rn`) may differ from the outer
-  // scope's `ordinaryGroups`/`relationCandidates` only in which MEMBER of a group is offered — the
-  // group COUNT (and therefore the mask space) and the relation-candidate list are identical in both
+  // Extracted so the SAME search can run TWICE against a shared `seen` de-dupe set — once over
+  // groups that carry ONLY each group's source member (never an alternate), once over the full
+  // alt-carrying groups. `groupsForThisPass.length` (`n`, `rn`) may differ from the outer scope's
+  // `ordinaryGroups`/`relationCandidates` only in which MEMBER of a group is offered — the group
+  // COUNT (and therefore the mask space) and the relation-candidate list are identical in both
   // calls, so the two passes are two views of the exact same combinatorial space, not two different
   // searches.
-  function searchPass(groupsForThisPass: readonly AdmittedUnit[][]): WriterCandidate[] {
+  // RULING Q1 (round Q, Blocking): `budget` is now an ARGUMENT, not a shared closure counter — each
+  // call gets its OWN `{ count, max }`, so a cap hit in one pass can never be caused by, or starve,
+  // the other pass's spending. `seen` stays a SHARED closure (unchanged from P1): a zero-alt
+  // combination pass 1 already judged renders the identical `finalParts` the second time pass 2
+  // reaches it via an all-source mask, so it is skipped here for free — never spending pass 2's own
+  // budget re-judging what pass 1 already decided. Only a combination that selects at least one
+  // ALTERNATE for some group is new to pass 2, and only those can ever advance pass 2's `budget`.
+  function searchPass(groupsForThisPass: readonly AdmittedUnit[][], budget: { count: number; max: number }): WriterCandidate[] {
     const found: WriterCandidate[] = []
     const n = groupsForThisPass.length
     outer:
@@ -2064,8 +2088,8 @@ export function enumerateWriterCandidates(
             // reach `evaluated++` in the second pass.
             if (seen.has(key)) continue
             seen.add(key)
-            if (evaluated >= WRITER_CANDIDATE_MAX_EVALUATED) { bounded = true; break outer }
-            evaluated++
+            if (budget.count >= budget.max) { bounded = true; break outer }
+            budget.count++
             const verdict = judgeWriterArrangement({ parts: finalParts }, units, ctx)
             if (!verdict.ok) continue
             const shapes = clauseShapesFromParts(finalParts, units)
@@ -2124,8 +2148,9 @@ export function enumerateWriterCandidates(
   // source, so `members[0]` is the source in every REAL call, but a test (or any future caller) that
   // hands this function an alt-before-its-source array must get the identical zero-alt guarantee --
   // the property is "the group's source", never "whichever member happened to sort first".
+  const pass1Budget = { count: 0, max: WRITER_CANDIDATE_MAX_EVALUATED }
   const sourceOnlyGroups = ordinaryGroups.map((members) => [members.find((m) => !m.altOf) ?? members[0]])
-  const candidatesSourceOnly = searchPass(sourceOnlyGroups)
+  const candidatesSourceOnly = searchPass(sourceOnlyGroups, pass1Budget)
   // P1 bullet 2: "`rank1Index === -1` becomes unreachable. If the source-only pass finds nothing,
   // return `accepted:false` ... the humanizer must never turn a HOLD into an accept." Measured by
   // `r8-noZeroAlt.ts` (22 of 500 swept configurations): the OLD code searched the alt-carrying space
@@ -2136,7 +2161,7 @@ export function enumerateWriterCandidates(
   // (a source-only line is always a special case of the full search) — if the easier question has no
   // answer, the harder one's answer is never consulted.
   if (candidatesSourceOnly.length === 0) {
-    return { candidates: [], evaluated, bounded }
+    return { candidates: [], evaluated: pass1Budget.count, bounded }
   }
   const rankedSourceOnly = [...candidatesSourceOnly].sort(compareWriterCandidates)
   // Every entry here has `usesAlternateSpelling === 0` by construction (no alternate was ever a mask
@@ -2145,13 +2170,19 @@ export function enumerateWriterCandidates(
   // `findIndex` is gone: there is nothing left for it to find that this line did not already decide).
   const rank1 = rankedSourceOnly[0]
 
-  // PASS 2 spends only the REMAINING budget (P1: "Only the REMAINING budget expands alt-carrying
-  // branches, and they may only ADD ballot slots 2..K") — `searchPass` shares `evaluated`/`bounded`/
-  // `seen` with pass 1 via closure, so a pass 1 that already saturated the 300-evaluation cap simply
-  // never calls into pass 2's judge at all (the `evaluated >= WRITER_CANDIDATE_MAX_EVALUATED` guard
-  // fires on pass 2's very first NEW combination), and the `if` below skips the call outright once
-  // pass 1 alone has already spent it.
-  const candidatesWithAlternates = evaluated < WRITER_CANDIDATE_MAX_EVALUATED ? searchPass(ordinaryGroups) : []
+  // RULING Q1 (round Q, Blocking — supersedes P1's "PASS 2 spends only the REMAINING budget", which
+  // `phase-p1-review-wire.md`/`phase-p1-review-reading.md` both measured false on this repo's OWN
+  // real family: pass 1 alone exhausts the WHOLE shared cap whenever a design has 2+ eligible pool
+  // groups, so pass 2 never ran a single evaluation there — `CANDIDATES CARRYING AN ALT = 0` on
+  // every design at the family's real pool size, `ALT ON BALLOT=0` at pool sizes 4-6 in the sweep
+  // that reaches only 2-3). PASS 2 now ALWAYS runs, spending its OWN separate
+  // `WRITER_CANDIDATE_ALT_MAX_EVALUATED` budget regardless of what pass 1 spent — `searchPass`
+  // still shares only the de-dupe `seen` set with pass 1 (never the counter), so a zero-alt
+  // combination pass 1 already judged costs pass 2 nothing, and every evaluation pass 2's own
+  // budget DOES spend is on a combination that selects at least one alternate — the harder question
+  // this round's own name calls out.
+  const pass2Budget = { count: 0, max: WRITER_CANDIDATE_ALT_MAX_EVALUATED }
+  const candidatesWithAlternates = searchPass(ordinaryGroups, pass2Budget)
   // RULING O1 (preserved): slot 1's guarantee must NOT remove alternates from competing for slots
   // 2..K on their own band-fit/readability merits. `remaining` is therefore the UNION of every
   // source-only candidate OTHER than the one used for slot 1, plus every NEW (necessarily
@@ -2186,7 +2217,7 @@ export function enumerateWriterCandidates(
     }
     bucketTurn++
   }
-  return { candidates: top, evaluated, bounded }
+  return { candidates: top, evaluated: pass1Budget.count + pass2Budget.count, bounded }
 }
 
 /** W1: the prompt — the admitted units grouped by kind WITH THEIR IDS, the design name EXACTLY as
@@ -2232,30 +2263,52 @@ export function enumerateWriterCandidates(
  *  `pick` the model itself just called false. Zero-alt candidates (the flag-off case, and P1's own
  *  slot-1 guarantee) never trigger this section — the prompt is BYTE-IDENTICAL to the pre-P2 one
  *  whenever no alternate is on the ballot, so this is additive, never a behaviour change to the path
- *  every existing pin (`itemHighlightWriterFixRoundG3.test.ts`) already covers. */
+ *  every existing pin (`itemHighlightWriterFixRoundG3.test.ts`) already covers.
+ *  RULING Q3 (round Q, Blocking — phase-q1-rulings.md, "the referee is told twice that the work is
+ *  already done, and its silence is read as approval"). Three fixes, all gated on the SAME
+ *  `altOnBallot` flag P2 introduced, so the zero-alt path stays the byte-identical one above:
+ *  (a) both "already verified" sentences — the system message's opening clause AND the user
+ *  message's list header (`phase-p1-review-net.md` BLOCKING 2a / `phase-p1-review-wire.md`
+ *  IMPORTANT 5: the header is "the last thing before the candidates" and was still the UNQUALIFIED
+ *  one) — are now qualified to grammar/length/repeats ONLY whenever an `[ALT]` is on the ballot,
+ *  never left to a back-reference ("every one of them") a model could read past.
+ *  (b) `falseAlt` is required in the SAME branch; the required-ness lives in `runWriterForDesign`'s
+ *  own parsing (below), which is the actual enforcement point — this prompt sentence only teaches
+ *  the model the rule it is now held to.
+ *  (c) the whole `[ALT]` branch — the sentence, the marker, the PRODUCT FACTS block, the `falseAlt`
+ *  key — is suppressed when `truthFacts` is empty (`writerTruthFactsFor` returned nothing: no
+ *  design name and no spec/lean facts), closing `phase-p1-review-net.md` BLOCKING 2c ("SYSTEM asks
+ *  for PRODUCT FACTS? true / USER prints PRODUCT FACTS? false") — a referee cannot be usefully asked
+ *  to judge truth against a fact list it was never shown, and the deterministic net
+ *  (`humanizerRewriteVerdict`'s own `phraseTruthVerdict` call, J4.4) already gated this candidate's
+ *  truth once before it ever reached the search; suppressing an ungroundable SECOND question here
+ *  does not remove the first. */
 export function buildWriterPrompt(
   candidates: readonly WriterCandidate[], designName: string | null, truthFacts: readonly string[] = [],
 ): { system: string; user: string } {
-  const altIndices = candidates
-    .map((c, i) => (c.usesAlternateSpelling > 0 ? i + 1 : null))
-    .filter((i): i is number => i !== null)
+  const altIndices = truthFacts.length
+    ? candidates.map((c, i) => (c.usesAlternateSpelling > 0 ? i + 1 : null)).filter((i): i is number => i !== null)
+    : []
+  const altOnBallot = altIndices.length > 0
   const system = [
-    'You choose ONE Amazon Item Highlight line for a t-shirt/apparel listing from a NUMBERED list of candidate lines — you do not write or edit any text, and no grammar, length or repeat rule is yours to apply: every candidate below has ALREADY been verified to satisfy every one of them.',
+    `You choose ONE Amazon Item Highlight line for a t-shirt/apparel listing from a NUMBERED list of candidate lines — you do not write or edit any text, and no grammar, length or repeat rule is yours to apply: every candidate below has ALREADY been verified to satisfy every one of them${altOnBallot ? ', for GRAMMAR, LENGTH AND REPEATS ONLY — not for whether an [ALT] candidate\'s WORDING is still true of this product, which is the one thing below that is genuinely your job' : ''}.`,
     'Return JSON: {"pick": <integer>} — the number of the ONE candidate you choose, and nothing else. Do not invent a number outside the list, and do not return any other key.',
     'Pick the candidate that reads best to a shopper — the one that sounds most like a real sentence about this product, not a list of keywords. If you are unsure, picking 1 is always a safe answer.',
-    altIndices.length
-      ? 'The candidates marked [ALT] use a REWORDED phrase, and their wording has NOT been truth-checked — that check is YOURS, and it is the one thing about these candidates that is genuinely your job. Using the PRODUCT FACTS given, decide for each [ALT] candidate whether its wording is still a TRUE statement about this exact product (a claim can move from describing the garment to describing the audience, or the reverse, and stop being true). Return JSON: {"pick": <integer>, "falseAlt": [<integers among the [ALT] candidates you judge NOT true of this product, else omit or use []>]}. Never pick a candidate you are listing in "falseAlt". If you are unsure whether an [ALT] candidate is true, treat it as NOT true.'
+    altOnBallot
+      ? 'The candidates marked [ALT] use a REWORDED phrase, and their wording has NOT been truth-checked — that check is YOURS, and it is the one thing about these candidates that is genuinely your job. Using the PRODUCT FACTS given, decide for each [ALT] candidate whether its wording is still a TRUE statement about this exact product (a claim can move from describing the garment to describing the audience, or the reverse, and stop being true). "falseAlt" is REQUIRED whenever any candidate is marked [ALT], even when you judge none of them false — use an empty array to say so explicitly. Return JSON: {"pick": <integer>, "falseAlt": [<integers among the [ALT] candidates you judge NOT true of this product, else []>]}. A MISSING or malformed "falseAlt" is read as "every [ALT] candidate is false" and none of them will be shipped — silence is never approval. Never pick a candidate you are listing in "falseAlt". If you are unsure whether an [ALT] candidate is true, treat it as NOT true.'
       : '',
   ].filter(Boolean).join(' ')
   const list = candidates.map((c, i) => `${i + 1}. ${c.line}${altIndices.includes(i + 1) ? ' [ALT]' : ''}`).join('\n')
   const user = [
     designName ? `DESIGN: ${JSON.stringify(designName)}` : '',
-    altIndices.length && truthFacts.length ? `PRODUCT FACTS (use these to judge [ALT] candidates):\n${truthFacts.map((f) => `- ${f}`).join('\n')}` : '',
-    `CANDIDATES (already verified — pick one by number):\n${list}`,
+    altOnBallot ? `PRODUCT FACTS (use these to judge [ALT] candidates):\n${truthFacts.map((f) => `- ${f}`).join('\n')}` : '',
+    altOnBallot
+      ? `CANDIDATES (already verified for grammar, length and repeats — pick one by number):\n${list}`
+      : `CANDIDATES (already verified — pick one by number):\n${list}`,
     // Literal word "json" (bullet/backend council convention, `bullet-pad-pool-exhaustion` memory)
     // so `response_format: json_object` never 400s.
-    altIndices.length
-      ? `Reply with JSON only: {"pick": <integer 1-${candidates.length}>, "falseAlt": [<integers among ${JSON.stringify(altIndices)} you judge NOT true, else []>]}.`
+    altOnBallot
+      ? `Reply with JSON only: {"pick": <integer 1-${candidates.length}>, "falseAlt": [<integers among ${JSON.stringify(altIndices)} you judge NOT true, else []>]}. "falseAlt" is REQUIRED — omitting it refuses every [ALT] candidate.`
       : `Reply with JSON only: {"pick": <integer 1-${candidates.length}>}.`,
   ].filter(Boolean).join('\n')
   return { system, user }
@@ -2320,9 +2373,12 @@ function writerTruthFactsFor(truthCtx: PhraseTruthCtx, designName: string | null
 
 async function askWriter(
   openai: OpenAI, model: string, candidates: readonly WriterCandidate[], designName: string | null,
-  truthCtx: PhraseTruthCtx, deadlineAt?: number,
+  truthFacts: readonly string[], deadlineAt?: number,
 ): Promise<unknown> {
-  const { system, user } = buildWriterPrompt(candidates, designName, writerTruthFactsFor(truthCtx, designName))
+  // RULING Q3: `truthFacts` is now computed ONCE by the caller (`runWriterForDesign`), not
+  // recomputed here per retry — the SAME list must decide both what `buildWriterPrompt` marks
+  // `[ALT]` and whether the caller's own `falseAlt` gate applies to this call's response.
+  const { system, user } = buildWriterPrompt(candidates, designName, truthFacts)
   const remainingMs = deadlineAt !== undefined ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY
   if (remainingMs <= 0) {
     console.warn(`[ih-writer] ${model} call skipped — writer deadline already exceeded`)
@@ -2732,35 +2788,50 @@ function humanizerBoundaryInsertedFunctionWord(sourceWordsRaw: readonly string[]
  *  THING it describes". "Embroidered" is a fact about the GARMENT in the source (adjacent to
  *  "Sweatshirts"); the rewrite relocates it to be immediately adjacent to "Women" instead, which
  *  reads as a fact about the AUDIENCE — the garment truth becomes a claim about the buyer.
- *  AUDIENCE_NOUNS is deliberately the SAME closed set `GENDER_FOLDS` (imported from
- *  `productDetailAttrs.ts`) already keys — the repo's one existing list of gendered/audience nouns
- *  this codebase folds together elsewhere (`coverage-token-folding-shirt-hub-trap` names the class
- *  of bug a SECOND, drifting list would create) — never a new vocabulary invented for this rule.
- *  DETECTOR ONLY (the ruling's own words): this refuses a crossing: it never tries to repair one by
- *  moving the word back, because a remover would have to GUESS which of the two nouns the modifier
- *  was "supposed" to describe, and a wrong guess ships a DIFFERENT unreviewed claim — refusing keeps
- *  `source.text`, the one string this module already knows is true. */
-const AUDIENCE_NOUNS: ReadonlySet<string> = new Set(Object.keys(GENDER_FOLDS))
-/** The word immediately before `noun`'s FIRST occurrence in `wordsRaw` (case-folded compare, raw
- *  return) — `null` when `noun` never occurs, or occurs only at index 0 (nothing precedes it). */
-function wordImmediatelyBefore(wordsRaw: readonly string[], noun: string): string | null {
-  const idx = wordsRaw.findIndex((w) => w.toLowerCase() === noun)
-  return idx > 0 ? wordsRaw[idx - 1] : null
-}
+ *  RULING Q2 (round Q, Blocking — phase-q1-rulings.md, supersedes this comment's own original
+ *  design). `AUDIENCE_NOUNS` used to be `new Set(Object.keys(GENDER_FOLDS))` — `GENDER_FOLDS` is a
+ *  PLURAL->SINGULAR FOLD TABLE for exactly four words (`women/men/ladies/gals`,
+ *  `productDetailAttrs.ts:597`), built for `ihRepeatBudget`'s repeat-counting, not an audience
+ *  lexicon; `phase-p1-review-net.md` BLOCKING 1 and `phase-p1-review-wire.md` BLOCKING 1 both
+ *  measured it 18-of-22 short of this repo's own ALREADY-EXISTING canonical adult-audience core —
+ *  `LEAN_FEM_CORE`/`LEAN_MASC_CORE` (`contentTruth.ts:287-288`), which this module already imports
+ *  (line 35) and already re-exports as `WRITER_TRUTH_REGEXES.audienceAdult` (`ADULT_AUDIENCE_RE`,
+ *  below) — and shipped the identical claim flip on `Woman`, `Womens`, `lady`, `gal`, `guys`,
+ *  `dudes`, `bros`, `gents`, `adults` and nine more. `AUDIENCE_NOUN_RE` is now derived from that
+ *  SAME core (plus the two bare `adults?`/`adult` words `ADULT_AUDIENCE_RE` adds on top of it) —
+ *  never a second, hand-picked vocabulary that can silently stop tracking the core when it grows
+ *  (`coverage-token-folding-shirt-hub-trap`'s own class of bug). Fenced by a source-scan
+ *  enumeration test (`itemHighlightWriterFixRoundQ1.test.ts`, "RULING Q2 enumeration") that FAILS
+ *  the instant a literal word the core's own alternation admits is missing from this regex.
+ *  DETECTOR ONLY (the ruling's own words, preserved): this refuses a crossing; it never tries to
+ *  repair one by moving the word back, because a remover would have to GUESS which of the two nouns
+ *  the modifier was "supposed" to describe, and a wrong guess ships a DIFFERENT unreviewed claim —
+ *  refusing keeps `source.text`, the one string this module already knows is true. */
+const AUDIENCE_NOUN_RE = new RegExp(`^(?:${LEAN_FEM_CORE}|${LEAN_MASC_CORE}|adults?)$`, 'i')
+function isAudienceNoun(word: string): boolean { return AUDIENCE_NOUN_RE.test(word) }
+// RULING Q2 (round Q, Blocking, second half — closes `phase-p1-review-wire.md` IMPORTANT 4 in the
+// SAME pass, since it is the SAME function being rewritten here): checks EVERY occurrence of an
+// audience noun in the rewrite (and every occurrence in the source, when testing legality), never
+// only the FIRST — the old `wordImmediatelyBefore` (`Array.prototype.findIndex`) hid a crossing
+// behind a noun's own first, unrelated occurrence ("Ladies Embroidered Sweatshirts for Ladies" ->
+// "Ladies Sweatshirts for the Embroidered Ladies" measured ACCEPT, `w8-crossing.ts`).
 function humanizerAudienceCrossingViolation(sourceWordsRaw: readonly string[], rewriteWordsRaw: readonly string[]): boolean {
-  for (const noun of AUDIENCE_NOUNS) {
-    const modifierInRewrite = wordImmediatelyBefore(rewriteWordsRaw, noun)
-    if (!modifierInRewrite) continue
-    const modifierLower = modifierInRewrite.toLowerCase()
+  for (let i = 1; i < rewriteWordsRaw.length; i++) {
+    const noun = rewriteWordsRaw[i].toLowerCase()
+    if (!isAudienceNoun(noun)) continue
+    const modifierLower = rewriteWordsRaw[i - 1].toLowerCase()
     // A function word (one of the six insertable words) directly before the audience noun is
     // ordinary grammar ("for Women"), never a relocated FACT — only a genuine content word can
     // carry a fact across. An audience noun itself sitting there (e.g. two adjacent gendered words)
     // is not "a modifier" either, by the same reasoning.
-    if (HUMANIZER_INSERTABLE_WORDS.has(modifierLower) || AUDIENCE_NOUNS.has(modifierLower)) continue
-    // Legal the instant the SOURCE already carried this exact adjacency somewhere — reordering an
+    if (HUMANIZER_INSERTABLE_WORDS.has(modifierLower) || isAudienceNoun(modifierLower)) continue
+    // Legal the instant the SOURCE already carried this exact adjacency SOMEWHERE — reordering an
     // adjacency the source itself already asserted is not a NEW claim, it is the same claim moved.
-    const modifierInSource = wordImmediatelyBefore(sourceWordsRaw, noun)
-    if (modifierInSource && modifierInSource.toLowerCase() === modifierLower) continue
+    let legalInSource = false
+    for (let j = 1; j < sourceWordsRaw.length; j++) {
+      if (sourceWordsRaw[j].toLowerCase() === noun && sourceWordsRaw[j - 1].toLowerCase() === modifierLower) { legalInSource = true; break }
+    }
+    if (legalInSource) continue
     return true
   }
   return false
@@ -3136,6 +3207,12 @@ export async function runWriterForDesign(args: {
 
   const openai = args.deps?.openai ?? (await getLlmClientForRequest().catch(() => null))
   const model = args.model ?? ihWriterModel()
+  // RULING Q3: computed ONCE, shared by every retry's prompt (`askWriter`/`buildWriterPrompt`) and
+  // by this loop's own `falseAlt` gate below (`altOnBallot`) — the SAME list decides both what the
+  // model was shown and what its response is held to, so the two can never disagree about whether
+  // an `[ALT]` was genuinely on THIS ballot.
+  const truthFacts = writerTruthFactsFor(args.truthCtx, args.designName)
+  const altOnBallot = truthFacts.length > 0 && candidates.some((c) => c.usesAlternateSpelling > 0)
   let picked = 1 // 1-based — "candidate 1" (index 0) is the ranked-best fallback every failure mode below collapses onto (G3 point 4).
   let source: 'byModel' | 'byFallback' = 'byFallback'
   const reasonsAll: string[] = []
@@ -3149,7 +3226,7 @@ export async function runWriterForDesign(args: {
           reasonsAll.push('fallback: writer deadline exceeded before a usable response')
           break
         }
-        const draft = await askWriter(openai, model, candidates, args.designName, args.truthCtx, args.deadlineAt)
+        const draft = await askWriter(openai, model, candidates, args.designName, truthFacts, args.deadlineAt)
         if (draft === WRITER_DEADLINE_SKIPPED) {
           // RULING W5: askWriter's OWN deadline check fired — never a network round trip, so it is
           // NOT a billable call (callsMade unchanged). G3 point 4: a timeout still SHIPS candidate 1
@@ -3178,15 +3255,26 @@ export async function runWriterForDesign(args: {
         // index are ALL the same safe answer — candidate 1 — and NONE of them is worth a retry (a
         // retry cannot fix a model that already answered with a well-formed but wrong shape).
         if (typeof pickRaw === 'number' && Number.isInteger(pickRaw) && pickRaw >= 1 && pickRaw <= candidates.length) {
-          // RULING P2: the referee's "no" is binding — a `falseAlt` entry naming THIS SAME pick
-          // vetoes it, regardless of what "pick" itself said. Never trusts the model's own promise
-          // ("never pick a candidate you list in falseAlt") to hold; enforces it here instead. An
-          // unparseable/missing `falseAlt` is simply an empty veto list (nothing to enforce), never
-          // treated as a malformed response — `falseAlt` is advisory-shaped, `pick` is the only
-          // required key, exactly as the prompt states.
+          const pickedCandidate = candidates[pickRaw - 1]
+          // RULING Q3(b) (round Q, Blocking — supersedes P2's "an unparseable/missing falseAlt is
+          // simply an empty veto list", which `phase-p1-review-net.md` BLOCKING 2(b) measured as
+          // the exact hole a chooser answering only the reading question ships through: a
+          // well-formed `{"pick": <ALT>}` with no `falseAlt` at all shipped the ALT, `hold=null`,
+          // on every one of Blocking 1's real child push rows). `falseAlt` must now be a genuine
+          // array of integers to count as an answer at all — missing, non-array, or containing a
+          // non-integer is NOT "nothing to enforce", it is READ as a refusal of every [ALT] on this
+          // ballot (checked below), so silence is the SAFE answer, never the permissive one.
           const falseAltRaw = (draft as { falseAlt?: unknown } | null)?.falseAlt
-          const falseAlt = Array.isArray(falseAltRaw) ? falseAltRaw.filter((n): n is number => typeof n === 'number' && Number.isInteger(n)) : []
-          if (falseAlt.includes(pickRaw)) {
+          const falseAltIsWellFormed = Array.isArray(falseAltRaw) && falseAltRaw.every((n) => typeof n === 'number' && Number.isInteger(n))
+          const falseAlt: number[] = falseAltIsWellFormed ? (falseAltRaw as number[]) : []
+          if (altOnBallot && pickedCandidate.usesAlternateSpelling > 0 && !falseAltIsWellFormed) {
+            // The picked candidate IS an [ALT] the model was asked to judge, and it did not answer
+            // in the required shape — refuse this [ALT] (every [ALT] on the ballot, this one
+            // included) and fall back to slot 1, exactly as an explicit veto would.
+            reasonsAll.push(`fallback: [ALT] candidate (${pickRaw}) picked with a missing/malformed "falseAlt" on a ballot that requires it — read as a refusal of every [ALT], not shipped`)
+          } else if (falseAlt.includes(pickRaw)) {
+            // RULING P2 (preserved): the referee's own "no" is binding — a `falseAlt` entry naming
+            // THIS SAME pick vetoes it, regardless of what "pick" itself said.
             reasonsAll.push(`fallback: referee named its own pick (${pickRaw}) in falseAlt — vetoed, not shipped`)
           } else {
             picked = pickRaw

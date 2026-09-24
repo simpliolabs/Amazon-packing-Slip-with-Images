@@ -356,7 +356,10 @@ describe('ROUND M6/J1-J7 + RULING N2: J5 — provenance, end to end (an accepted
                 const user = req.messages.find((m) => m.role === 'user')?.content ?? ''
                 const opts = [...user.matchAll(/^(\d+)\.\s(.+)$/gm)].map(([, i, text]) => ({ i: Number(i), text }))
                 const hit = opts.find((o) => o.text.includes('Graphic Crewneck Sweatshirts for Women'))
-                return { choices: [{ message: { content: JSON.stringify({ pick: hit ? hit.i : 1 }) }, finish_reason: 'stop' }] }
+                // RULING Q3 (round Q): an [ALT] is on this ballot, so `falseAlt` is now REQUIRED —
+                // the stub explicitly judges the picked [ALT] true (`falseAlt: []`) rather than
+                // omitting the key, which Q3 now reads as a refusal of every [ALT] on the ballot.
+                return { choices: [{ message: { content: JSON.stringify({ pick: hit ? hit.i : 1, falseAlt: [] }) }, finish_reason: 'stop' }] }
               },
             },
           },
