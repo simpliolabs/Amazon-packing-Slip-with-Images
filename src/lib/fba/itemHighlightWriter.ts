@@ -2344,9 +2344,17 @@ function multisetAdditions(before: readonly string[], after: readonly string[]):
 }
 
 /** J4.1: content-word multiset equality under the repo's ONE coverage predicate (`coverageTokens`,
- *  `@/lib/fba/keyword-engine/coverage-core` — imported below). `coverageTokens` already folds
- *  plurals and strips punctuation/stopwords, so "Crewnecks" <-> "Crewneck" is legal (same folded
- *  token) and a genuinely NEW content word is not, sorted-array equality over both sides. */
+ *  `@/lib/fba/keyword-engine/coverage-core` — imported below). `coverageTokens` folds plurals and
+ *  strips punctuation/stopwords, so THIS check ALONE treats "Crewnecks" <-> "Crewneck" as equal
+ *  (same folded token) and a genuinely NEW content word as not, sorted-array equality over both
+ *  sides.
+ *  RULING N6 (round N, Important — closing review `phase-m1-review-net.md` IMPORTANT 1): this
+ *  folding is NOT the net's overall behaviour — J4.2 (below, `additions.some(...)`) diffs
+ *  `humanizerRawWords`, which is never plural-folded, so "Fall Crewneck" <-> "Fall Crewnecks" is
+ *  refused overall (`inserted-word`/an unexplained removal) even though this ONE check alone would
+ *  pass it. The prior doc comment here and on `HUMANIZER_INSERTABLE_WORDS`'s neighbour claimed the
+ *  affordance existed net-wide; measured, it does not — the direction is safe (over-refusal), so this
+ *  is left FILED (a future round could fold `foldPlural` into J4.2 too), never silently claimed. */
 function contentMultisetEqual(a: string, b: string): boolean {
   const ta = [...coverageTokens(a)].sort()
   const tb = [...coverageTokens(b)].sort()
@@ -2546,14 +2554,30 @@ async function askHumanizer(
 export interface HumanizeResult {
   /** N2 (round N, Blocking): the ORIGINAL `units` array (never mutated, never replaced-in-place) with
    *  one ALTERNATE-spelling unit APPENDED for every eligible unit whose proposed rewrite was
-   *  ACCEPTED — same array reference as the input when nothing was accepted (0 calls, or a rejected
-   *  batch), so the flag-off/dead-model byte-identity guarantee costs nothing extra to prove. Every
-   *  alt unit carries `altOf` (its source unit's id); the enumerator (below) treats the two as
-   *  mutually exclusive and the rank prefers the source when tied. */
+   *  ACCEPTED — same array reference as the input when nothing was accepted (0 calls, a rejected
+   *  batch, or the N5 short-atom skip), so the flag-off/dead-model byte-identity guarantee costs
+   *  nothing extra to prove. Every alt unit carries `altOf` (its source unit's id); the enumerator
+   *  (below) treats the two as mutually exclusive and the rank prefers the source when tied. */
   units: AdmittedUnit[]
   calls: number
   accepted: number
   rejected: number
+}
+
+/** RULING N5 (round N, Important): a unit two words or shorter has no room to reorder into anything
+ *  else, and no room to insert a function word into without immediately tripping J4.3's +6 length
+ *  cap on some sources — measured this round, every accepted rewrite of a <=2-word atom in this
+ *  family's own fixture was the identity rewrite itself. "Do not spend a humanize call on a design
+ *  that ends up holding, where that is knowable before the call" — this is the same shape as J1's
+ *  existing free (0-call) skips, just keyed on the ELIGIBLE units' own word count instead of the
+ *  floor. Exported so `listingPipeline.ts`'s per-design call RESERVATION (computed from the SAME
+ *  admitted units, before any call) can size itself to what THIS design will actually attempt,
+ *  never a uniform worst case across every design in the family. */
+export function humanizerWouldSkip(units: readonly AdmittedUnit[]): boolean {
+  if (ihHumanizerMode() !== 'on') return true
+  const eligible = units.filter(isHumanizerEligible)
+  if (eligible.length === 0) return true
+  return eligible.every((u) => humanizerRawWords(u.text).length <= 2)
 }
 
 /** J1: the ONE new stage. Called from `runWriterForDesign`, between `buildAdmittedUnits` and
@@ -2561,9 +2585,9 @@ export interface HumanizeResult {
  *  eligibility/floor skips (fewer-than-2-units, cannot-reach-floor), so a design already about to
  *  skip the writer entirely never spends this call either, and the skip decisions themselves stay
  *  computed on the ORIGINAL units (unaffected by this stage, by construction of the ordering).
- *  IH_HUMANIZER=off, or zero eligible units, is a pure no-op — same array reference returned, 0
- *  calls (J7's flag-off byte-identity guarantee costs nothing to prove: this function's first two
- *  branches never touch the network or allocate a new array). */
+ *  IH_HUMANIZER=off, zero eligible units, or `humanizerWouldSkip` (N5) is a pure no-op — same array
+ *  reference returned, 0 calls (J7's flag-off byte-identity guarantee costs nothing to prove: this
+ *  function's first branches never touch the network or allocate a new array). */
 export async function humanizeAdmittedUnits(
   units: readonly AdmittedUnit[],
   args: { truthCtx: PhraseTruthCtx; designName: string | null; deps?: WriterDeps; model?: string; deadlineAt?: number },
@@ -2571,6 +2595,10 @@ export async function humanizeAdmittedUnits(
   if (ihHumanizerMode() !== 'on') return { units: units as AdmittedUnit[], calls: 0, accepted: 0, rejected: 0 }
   const eligible = units.filter(isHumanizerEligible)
   if (eligible.length === 0) return { units: units as AdmittedUnit[], calls: 0, accepted: 0, rejected: 0 }
+  // N5: knowable before the call — every eligible atom is too short to humanize into anything else.
+  if (eligible.every((u) => humanizerRawWords(u.text).length <= 2)) {
+    return { units: units as AdmittedUnit[], calls: 0, accepted: 0, rejected: 0 }
+  }
 
   const openai = args.deps?.openai ?? (await getLlmClientForRequest().catch(() => null))
   if (!openai) return { units: units as AdmittedUnit[], calls: 0, accepted: 0, rejected: 0 }

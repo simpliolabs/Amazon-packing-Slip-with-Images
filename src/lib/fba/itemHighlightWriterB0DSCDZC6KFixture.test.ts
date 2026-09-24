@@ -2,7 +2,9 @@
  * itemHighlightWriterB0DSCDZC6KFixture.test.ts — RULING I6 (round I) landed this fixture; RULING K4
  * (round K1, phase-k1-rulings.md, Important) REBUILT its contents; RULING L2 (round L1,
  * phase-l1-rulings.md, Blocking) corrected its BLANK; RULING M1/M2/M5 (round M, phase-m1-rulings.md,
- * Blocking) correct a SECOND invented field this fixture carried beside the first.
+ * Blocking) correct a SECOND invented field this fixture carried beside the first; RULING N3/N4
+ * (round N, phase-n1-rulings.md, Blocking — closing `phase-m1-review-wire.md` BLOCKING 1) correct a
+ * THIRD, still-incomplete field beside those two.
  *
  * WHY THIS EXISTS. Three rounds (F1, G1, H1) measured writer acceptance on "the live-shaped
  * B0DSCDZC6K family" from a scratch directory that lived in a PRIOR session, never committed, so
@@ -13,33 +15,39 @@
  * `unisex`/`audienceLean` fields still invented, contradicted by this repo's own recorded live
  * artefacts in FOUR places. RULING L2 corrected the blank to the record — but review
  * `phase-l1-review-value.md` (BLOCKING 1) found that correction left a SECOND field, `specFacts`,
- * hardcoded beside it: `["Classic Fit","50% Cotton / 50% Polyester"]`, one fact SHORT of what
- * `ihSpecFactFillers` (`productDetailAttrs.ts:516-533`, the ONE pad bank the live composer reads at
- * `itemHighlightComposer.ts:436`) actually derives from that same blank — `["50% Cotton / 50%
- * Polyester","Classic Fit","Unisex Fit"]`. That missing `Unisex Fit` (11 characters) was the WHOLE
- * difference between a wrongly-reported 2-of-6 and the honest 5-of-6 (four designs' best case with
- * the 2-fact pad measured exactly `96c < 97c` against the accept floor).
+ * hardcoded beside it, one fact SHORT of what `ihSpecFactFillers` (`productDetailAttrs.ts:516-523`,
+ * the ONE pad bank the live composer reads at `itemHighlightComposer.ts:436`) actually derives from
+ * that same blank. RULING M1 fixed THAT by deriving `specFacts` from the blank at run time — but
+ * review `phase-m1-review-wire.md` (BLOCKING 1) found the BLANK ITSELF still incomplete: the pad bank
+ * reads SIX descriptors (`material`, `fit`, `unisex`, `neck`, `sleeve`, `dye`) and the blank carried
+ * only three, silently omitting `neck`/`sleeve` even though BOTH are recorded elsewhere in this SAME
+ * fixture (the note's own K4 citation, and the `titleTemplate` field M5 added the same round). This
+ * is the THIRD consecutive round in which an undeclared/incomplete fixture field moved the headline —
+ * RULING N3 (see the fixture's own `note`) adds the two recorded fields; `dye` stays genuinely absent
+ * (never recorded for this blank anywhere in this repo).
  *
  * RULING M1's remedy, applied here: `specFacts` is no longer a field this fixture carries at all.
  * This test derives it by calling `ihSpecFactFillers` directly, exactly as the live composer does,
- * so it structurally cannot drift from the blank a third time. RULING M5 adds `titleTemplate`
+ * so it structurally cannot drift from the blank. RULING M5 adds `titleTemplate`
  * (the recorded live title shape — the title decides the number, and no title was recorded before)
  * and records the `mixedFamilies` decision: kept as documentation of the record, but NOT threaded
  * into this test's `truthCtx`, because the live Item Highlights path has no such field yet (a real
  * gap, filed, not fixed this round — see the fixture's own `note`).
  *
- * THE CORRECTED RESULT (RULING M2 — the mechanism, restated correctly). Five of the pool's six
- * phrases are gendered ("for Women") and are correctly refused by `phraseTruthVerdict`'s
- * forced-gender rule for the four designs that inherit the family's unisex default — every real
- * composer run logs `truthDrops: {"audience-lean-lie":5}`, never 6. The sixth, `Fall Crewneck`,
- * names no gender, is admitted, and carries the rank-1 line of FIVE of the six designs. **5 of 6
- * designs accept** — BB, BCSG, EDG, HDG, MHG — above RULING I2's own 4-of-6 STOP floor. The one
- * hold, DQG ("Don't Quit"), is NOT a gender refusal: it is the family's shortest design name, and
- * its entire admitted unit multiset sums to 94 characters against the 97-character accept floor, so
- * the bounded search never evaluates a single arrangement. This remains a POOL finding (memory
- * `unisex-lean-vs-a-women-pool-starves-the-field` — a unisex lean against a mostly-gendered pool),
- * never a writer defect — see the fixture's own `note` for the full citation trail and the
- * BEFORE/AFTER numbers.
+ * THE CORRECTED RESULT (RULING N4 — the mechanism, restated correctly for the THIRD time). Five of
+ * the pool's six phrases are gendered ("for Women") and are correctly refused by
+ * `phraseTruthVerdict`'s forced-gender rule for the four designs that inherit the family's unisex
+ * default — every real composer run logs `truthDrops: {"audience-lean-lie":5}`, never 6. The sixth,
+ * `Fall Crewneck`, names no gender, is admitted, and carries the rank-1 line of every design. With
+ * the blank's `neck`/`sleeve` now supplied (RULING N3), `specFacts` derives a FOURTH and FIFTH fact
+ * ("Crew Neck", "Long Sleeve") beside `50% Cotton / 50% Polyester`/`Classic Fit`/`Unisex Fit` — and
+ * **6 of 6 designs accept**, including DQG ("Don't Quit"), the family's shortest design name, whose
+ * naive best-case join (measured: 7 admitted units before N3, 100c, already clearing the 97c floor —
+ * `evaluated=0` was an outcome of `enumerateWriterCandidates`'s own grammar-constrained search never
+ * finding an in-band arrangement, NOT of the floor pre-check, as RULING M2's "94c vs 97c" wording
+ * wrongly implied — see `phase-m1-review-reading.md` §3) now clears the search too, at 107c. The
+ * mechanism M2 filed (a floor-vs-name-length problem) is RETIRED, not merely restated: the fixture's
+ * OWN incompleteness was the finding, not a genuine band/name-length limit.
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { buildAdmittedUnits, enumerateWriterCandidates, runWriterForDesign, humanizeAdmittedUnits, isHumanizerEligible, type AdmittedUnit } from '@/lib/fba/itemHighlightWriter'
@@ -62,12 +70,17 @@ function leanForDesign(designKey: string): ReturnType<typeof normalizeAudienceLe
   return normalizeAudienceLean((override ?? fixture.blank.audienceLean) as never)
 }
 
-// RULING M1: DERIVED from the fixture's own blank by the ONE pad bank the live composer reads
-// (`ihSpecFactFillers`, `productDetailAttrs.ts:516-533`) — never a second, hand-typed array that can
+// RULING M1/N3: DERIVED from the fixture's own blank by the ONE pad bank the live composer reads
+// (`ihSpecFactFillers`, `productDetailAttrs.ts:516-523`) — never a second, hand-typed array that can
 // drift from the blank the way the fixture's own hardcoded `specFacts` field drifted twice (K4's
 // `unisex: false` masked it as a set-equal coincidence; L2's `unisex: true` correction exposed it).
+// RULING N3: the blank object passed here is now the WHOLE recorded row (`material`, `fit`,
+// `unisex`, `neck`, `sleeve` — `dye` genuinely absent), not a hand-picked subset of the six fields
+// `IH_PAD_FILLER_DESCRIPTORS` reads — the THIRD round's own fixture-completeness defect this ruling
+// closes.
 const SPEC_FACTS: readonly string[] = ihSpecFactFillers({
   material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex,
+  neck: fixture.blank.neck, sleeve: fixture.blank.sleeve,
 } as never).map(titleCasePhrase)
 
 // RULING M5: the family's own RECORDED live title shape
@@ -76,13 +89,13 @@ const SPEC_FACTS: readonly string[] = ihSpecFactFillers({
 // "Crewneck" title-dedupes the pool's only ungendered phrase and drops the family to 2 of 6).
 const titleFor = (designName: string): string => fixture.titleTemplate.replace('{design}', designName)
 
-// RULING M1/M2: with `specFacts` correctly DERIVED (never hardcoded), 5 of 6 designs accept on the
-// recorded lean — BB and MHG on their per-design female override, BCSG/EDG/HDG because the derived
-// pad's third fact (`Unisex Fit`) is what clears the 97-character floor on the unisex default. DQG
-// alone holds, on a floor-vs-name-length problem, not a gender refusal (see the module doc comment).
-const ACCEPTS_ON_RECORDED_LEAN = new Set(['BB', 'BCSG', 'EDG', 'HDG', 'MHG'])
+// RULING N3/N4: with `specFacts` derived from the WHOLE recorded blank (never a hand-picked
+// subset), all 6 of 6 designs accept — including DQG, once the naive best-case join includes its
+// two extra recorded facts ("Crew Neck", "Long Sleeve") and the grammar-constrained search has room
+// to find an in-band arrangement. See the module doc comment for the corrected mechanism.
+const ACCEPTS_ON_RECORDED_LEAN = new Set(['BB', 'BCSG', 'DQG', 'EDG', 'HDG', 'MHG'])
 
-describe('RULING M1/M2 fixture: the committed B0DSCDZC6K family, specFacts DERIVED (never hardcoded), mechanism corrected (5 of 6 accept, unisex family, BB+MHG female)', () => {
+describe('RULING M1/N3/N4 fixture: the committed B0DSCDZC6K family, specFacts DERIVED from the WHOLE recorded blank (never hardcoded, never a hand-picked subset), mechanism corrected (6 of 6 accept, unisex family, BB+MHG female)', () => {
   it('the fixture has 6 distinct design keys including BB (restored — its own recorded name accepts; K4\'s omission measured an invented name), each with a non-empty pool', () => {
     expect(fixture.designs.length).toBe(6)
     const keys = new Set(fixture.designs.map((d) => d.designKey))
@@ -98,13 +111,17 @@ describe('RULING M1/M2 fixture: the committed B0DSCDZC6K family, specFacts DERIV
     expect(fixture.audienceLeanByDesign).toEqual({ BB: 'female', MHG: 'female' })
   })
 
-  it('RULING M1: specFacts DERIVED from the blank by the live composer\'s own pad bank is NOT the fixture\'s old hardcoded array — the missing fact is exactly what the wrong 2-of-6 number rested on', () => {
-    // The array this fixture used to hardcode, preserved here only as the NEGATIVE assertion that
-    // proves the derivation changed the input, not merely re-stated it.
+  it('RULING M1/N3: specFacts DERIVED from the WHOLE recorded blank by the live composer\'s own pad bank is NOT the fixture\'s old hardcoded array, and NOT the round-M hand-picked three-field subset either — the missing facts are exactly what the wrong 2-of-6 and 5-of-6 numbers rested on', () => {
+    // The arrays this fixture used to hardcode/derive-from-a-subset, preserved here only as the
+    // NEGATIVE assertions that prove each derivation changed the input, not merely re-stated it.
     const OLD_HARDCODED_SPEC_FACTS = ['Classic Fit', '50% Cotton / 50% Polyester']
+    const ROUND_M_THREE_FIELD_SPEC_FACTS = ['50% Cotton / 50% Polyester', 'Classic Fit', 'Unisex Fit']
     expect(SPEC_FACTS.length).toBeGreaterThan(0)
     expect(SPEC_FACTS).not.toEqual(OLD_HARDCODED_SPEC_FACTS)
+    expect(SPEC_FACTS).not.toEqual(ROUND_M_THREE_FIELD_SPEC_FACTS)
     expect(SPEC_FACTS).toContain('Unisex Fit')
+    expect(SPEC_FACTS).toContain('Crew Neck')
+    expect(SPEC_FACTS).toContain('Long Sleeve')
   })
 
   // RULING M5: NOT `mixedFamilies` — the live Item Highlights path (`PerDesignItemHighlightsInput`,
@@ -113,7 +130,7 @@ describe('RULING M1/M2 fixture: the committed B0DSCDZC6K family, specFacts DERIV
   // phase-l1-review-value.md IMPORTANT 1).
   const truthCtxBase: PhraseTruthCtx = {
     garmentFamily: fixture.blank.garmentFamily as 'sweatshirt',
-    spec: { material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex } as never,
+    spec: { material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex, neck: fixture.blank.neck, sleeve: fixture.blank.sleeve } as never,
     allowedBrand: fixture.blank.brandInCopy ? fixture.blank.brand : null,
     audience: 'adult',
     field: 'highlights',
@@ -121,7 +138,7 @@ describe('RULING M1/M2 fixture: the committed B0DSCDZC6K family, specFacts DERIV
 
   for (const d of fixture.designs) {
     const expectAccept = ACCEPTS_ON_RECORDED_LEAN.has(d.designKey)
-    it(`design ${d.designKey} ("${d.designName}"): through the REAL enumerateWriterCandidates + runWriterForDesign + runIhTail, ${expectAccept ? 'ACCEPTS' : 'HOLDS (band-vs-name-length, not a gender refusal — see module doc comment)'}`, async () => {
+    it(`design ${d.designKey} ("${d.designName}"): through the REAL enumerateWriterCandidates + runWriterForDesign + runIhTail, ${expectAccept ? 'ACCEPTS' : 'HOLDS'}`, async () => {
       const truthCtx: PhraseTruthCtx = { ...truthCtxBase, audienceLean: leanForDesign(d.designKey), designTokens: [d.designName] } as PhraseTruthCtx
       const composed = { candidates: d.pool, specFacts: SPEC_FACTS, brandPick: null as string | null, wearFact: null as string | null } as never
       const units: AdmittedUnit[] = buildAdmittedUnits(composed, { designName: d.designName, truthCtx })
@@ -149,7 +166,7 @@ describe('RULING M1/M2 fixture: the committed B0DSCDZC6K family, specFacts DERIV
     })
   }
 
-  it('5 of 6 designs accept on the RECORDED lean with DERIVED specFacts — above RULING I2\'s 4-of-6 STOP floor; the one hold (DQG) is a floor-vs-name-length problem, not a pool-gender one', async () => {
+  it('6 of 6 designs accept on the RECORDED lean with specFacts DERIVED FROM THE WHOLE BLANK — above RULING I2\'s 4-of-6 STOP floor; RULING N3/N4 retires the DQG hold entirely (it was the fixture\'s own incompleteness, not a genuine band/name-length limit)', async () => {
     const acceptedKeys: string[] = []
     for (const d of fixture.designs) {
       const truthCtx: PhraseTruthCtx = { ...truthCtxBase, audienceLean: leanForDesign(d.designKey), designTokens: [d.designName] } as PhraseTruthCtx
@@ -162,12 +179,11 @@ describe('RULING M1/M2 fixture: the committed B0DSCDZC6K family, specFacts DERIV
       })
       if (r.accepted) acceptedKeys.push(d.designKey)
     }
-    // The honest number on the PO's real listing (phase-m1-report.md), once specFacts is derived
-    // rather than invented. Above RULING I2's 4-of-6 floor — no STOP is warranted. NOT to be
-    // "improved" further by loosening the audience-lean truth rule (OUT OF BOUNDS —
-    // phraseTruthVerdict) or by lowering the accept floor (FILED, not fixed: DQG's 94c-vs-97c gap is
-    // a 10-character design name problem).
-    expect(acceptedKeys.sort(), `accepted designs: ${JSON.stringify(acceptedKeys)}`).toEqual(['BB', 'BCSG', 'EDG', 'HDG', 'MHG'])
+    // The honest number on the PO's real listing, once specFacts is derived from the WHOLE blank
+    // rather than a hand-picked subset. Above RULING I2's 4-of-6 floor — no STOP is warranted. NOT to
+    // be "improved" further by loosening the audience-lean truth rule (OUT OF BOUNDS —
+    // phraseTruthVerdict) or by lowering the accept floor (moot now — every design clears it).
+    expect(acceptedKeys.sort(), `accepted designs: ${JSON.stringify(acceptedKeys)}`).toEqual(['BB', 'BCSG', 'DQG', 'EDG', 'HDG', 'MHG'])
   })
 })
 
@@ -182,7 +198,7 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
   // re-declared locally because `describe` blocks do not share each other's `const`s.
   const truthCtxBase: PhraseTruthCtx = {
     garmentFamily: fixture.blank.garmentFamily as 'sweatshirt',
-    spec: { material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex } as never,
+    spec: { material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex, neck: fixture.blank.neck, sleeve: fixture.blank.sleeve } as never,
     allowedBrand: fixture.blank.brandInCopy ? fixture.blank.brand : null,
     audience: 'adult',
     field: 'highlights',
@@ -220,42 +236,68 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
     } as never
   }
 
-  // MEASURED (2026-09-24, this fixture, this stub table) — pinned so a future change to admission,
-  // the net or the search that moves ANY of these numbers fails this test instead of passing
-  // silently. BB/MHG (women lean) admit all 6 pool phrases and the humanizer touches 2 of them
-  // (reorder + insert "for"); BCSG/EDG/HDG (unisex default) admit only "Fall Crewneck", already
-  // natural, untouched; DQG never reaches this stage (it holds on the 94c-vs-97c floor problem —
-  // RULING M2 — before `runWriterForDesign` ever calls the humanizer).
-  const EXPECTED: Record<string, { eligibleBefore: string[]; eligibleAfter: string[]; rank1Before: string; rank1After: string }> = {
+  // MEASURED (2026-09-24, this fixture, this stub table, POST RULING N1/N2/N3/N4/N5 — round N):
+  // BB/MHG (women lean) admit all 6 pool phrases; the humanizer accepts a rewrite for every one of
+  // them, but RULING N2 (round N) now APPENDS each as an ALTERNATE unit alongside its (unchanged)
+  // source, never replacing it — `eligibleAfter` is therefore `eligibleBefore` immediately followed
+  // by the six alternate spellings, 12 entries, not 6. Rank 1 stays BYTE-IDENTICAL before/after for
+  // both designs: their source-spelling rank 1 already sits exactly AT the 110c fill target
+  // (`lengthFromTarget: 0`), so no alternate can rank ABOVE it, and RULING N2's own tiebreak prefers
+  // the source on the resulting tie (see `itemHighlightWriterHumanizer.test.ts`'s dedicated rank
+  // test for the isolated mechanism). BCSG/EDG/HDG/DQG's sole eligible atom, "Fall Crewneck", is
+  // TWO words — RULING N5 (round N) skips the humanize call entirely for them (0 calls, not 1),
+  // knowable before the call: a 2-word atom has no room to reorder into anything else.
+  // RULING N3 (the whole recorded blank, `neck`/`sleeve` now supplied): every design's rank 1 now
+  // has access to two MORE spec-fact candidates ("Crew Neck", "Long Sleeve") — DQG's naive best-case
+  // join clears the search (RULING N4: it ACCEPTS now, 6 of 6, retiring the M2 "floor-vs-name-length"
+  // filed finding entirely — see the module doc comment). BCSG/EDG/HDG's rank 1 also CHANGES shape:
+  // the search now finds a candidate CLOSER to the 110c fill target using the extra facts, so their
+  // new rank 1 no longer carries the garment-head abutment ("Sweatshirt") in every case — a genuine
+  // ranking outcome, not a regression (every candidate still passes the full acceptance oracle).
+  const EXPECTED: Record<string, { eligibleBefore: string[]; eligibleAfter: string[]; rank1Before: string; rank1After: string; humanizeCalls: number }> = {
     BB: {
       eligibleBefore: ['Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
-      eligibleAfter: ['Embroidered Sweatshirts for Women', 'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
+      eligibleAfter: [
+        'Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck',
+        'Embroidered Sweatshirts for Women', 'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck',
+      ],
       rank1Before: 'Business B*tch, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
       rank1After: 'Business B*tch, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
+      humanizeCalls: 1,
     },
     BCSG: {
       eligibleBefore: ['Fall Crewneck'], eligibleAfter: ['Fall Crewneck'],
-      rank1Before: 'Billionaire Coming Soon Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
-      rank1After: 'Billionaire Coming Soon Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+      rank1Before: 'Billionaire Coming Soon, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit, Long Sleeve',
+      rank1After: 'Billionaire Coming Soon, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit, Long Sleeve',
+      humanizeCalls: 0,
     },
-    // DQG holds (RULING M2's 94c-vs-97c floor problem) — never reached by the rank1 columns, which
-    // are unused for this key; see the `if (d.designKey === 'DQG')` branch below.
-    DQG: { eligibleBefore: ['Fall Crewneck'], eligibleAfter: ['Fall Crewneck'], rank1Before: '', rank1After: '' },
+    DQG: {
+      eligibleBefore: ['Fall Crewneck'], eligibleAfter: ['Fall Crewneck'],
+      rank1Before: "Don't Quit, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit, Crew Neck, Long Sleeve",
+      rank1After: "Don't Quit, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit, Crew Neck, Long Sleeve",
+      humanizeCalls: 0,
+    },
     EDG: {
       eligibleBefore: ['Fall Crewneck'], eligibleAfter: ['Fall Crewneck'],
-      rank1Before: 'Entrepreneur Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
-      rank1After: 'Entrepreneur Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+      rank1Before: 'Entrepreneur Definition, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit, Long Sleeve',
+      rank1After: 'Entrepreneur Definition, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit, Long Sleeve',
+      humanizeCalls: 0,
     },
     HDG: {
       eligibleBefore: ['Fall Crewneck'], eligibleAfter: ['Fall Crewneck'],
-      rank1Before: 'Hustle Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
-      rank1After: 'Hustle Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+      rank1Before: 'Hustle Definition Sweatshirt, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit, Crew Neck, Long Sleeve',
+      rank1After: 'Hustle Definition Sweatshirt, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit, Crew Neck, Long Sleeve',
+      humanizeCalls: 0,
     },
     MHG: {
       eligibleBefore: ['Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
-      eligibleAfter: ['Embroidered Sweatshirts for Women', 'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
+      eligibleAfter: [
+        'Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck',
+        'Embroidered Sweatshirts for Women', 'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck',
+      ],
       rank1Before: 'Mother Hustler, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
       rank1After: 'Mother Hustler, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
+      humanizeCalls: 1,
     },
   }
 
@@ -288,22 +330,18 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
       const expected = EXPECTED[d.designKey]
       expect(eligibleBefore).toEqual(expected.eligibleBefore)
       expect(eligibleAfter).toEqual(expected.eligibleAfter)
-      expect(rBefore.value || `HOLD: ${rBefore.reasons.join('; ')}`).toBe(d.designKey === 'DQG' ? `HOLD: ${rBefore.reasons.join('; ')}` : expected.rank1Before)
-      expect(rAfter.value || `HOLD: ${rAfter.reasons.join('; ')}`).toBe(d.designKey === 'DQG' ? `HOLD: ${rAfter.reasons.join('; ')}` : expected.rank1After)
-      if (d.designKey === 'DQG') {
-        // RULING M2: DQG holds on the floor-vs-name-length problem — but its naive best-case join
-        // (identity + specFacts + "Fall Crewneck" + heads, plain-comma-joined) DOES clear
-        // `runWriterForDesign`'s own cheap pre-check, so — unlike a design with fewer than 2 admitted
-        // units — it DOES reach and spend the humanizer's one call; `enumerateWriterCandidates`'s
-        // REAL grammar-constrained search (relation clause required, garment-head abutment, etc.)
-        // is what finds zero in-band candidates. Its ONE eligible atom ("Fall Crewneck") is already
-        // natural (unchanged by the humanizer either way), so the hold reason is IDENTICAL before
-        // and after regardless.
-        expect(rBefore.accepted).toBe(false)
-        expect(rAfter.accepted).toBe(false)
-        expect(humanized.calls).toBe(1)
-        expect(rAfter.calls).toBe(1) // the humanizer's own call, spent, then zero candidates — never a picker call (no taste to exercise among zero).
-        expect(rAfter.reasons).toEqual(rBefore.reasons)
+      // RULING N4: DQG ACCEPTS now (6 of 6) — the pre-N "HOLD" branch for it is retired; every
+      // design in this fixture ships a rank-1 line, before and after.
+      expect(rBefore.value).toBe(expected.rank1Before)
+      expect(rAfter.value).toBe(expected.rank1After)
+      expect(rBefore.accepted).toBe(true)
+      expect(rAfter.accepted).toBe(true)
+      expect(humanized.calls).toBe(expected.humanizeCalls)
+      if (expected.humanizeCalls === 0) {
+        // RULING N5: every eligible atom is <=2 words — the call is skipped, so nothing was offered
+        // to accept or reject.
+        expect(humanized.accepted).toBe(0)
+        expect(humanized.rejected).toBe(0)
       } else {
         expect(humanized.accepted + humanized.rejected).toBe(expected.eligibleBefore.length)
       }

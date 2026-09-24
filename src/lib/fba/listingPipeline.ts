@@ -77,7 +77,7 @@ import { loadBlankSpecRows, loadBlankAssignments, resolveFamilyBlank, familyBlan
 import { composeItemHighlightDetailed, ihAudienceOf, type ComposerResult } from '@/lib/fba/itemHighlightComposer'
 // WRITER SPEC PART 2 (2026-09-10, B4) — the writer is a LEAF (see its own header for why); this file
 // is a CONSUMER, never the other way, so the dependency graph stays acyclic.
-import { ihWriterMode, ihWriterMaxCallsBudget, ihWriterDeadlineMs, runWriterForDesign, IH_WRITER_RETRY_CAP, IH_HUMANIZER_CALL_BUDGET, ihHumanizerMode, WriterPartialCallsError, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
+import { ihWriterMode, ihWriterMaxCallsBudget, ihWriterDeadlineMs, runWriterForDesign, IH_WRITER_RETRY_CAP, IH_HUMANIZER_CALL_BUDGET, ihHumanizerMode, humanizerWouldSkip, buildAdmittedUnits, WriterPartialCallsError, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
 /* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
  * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
  * highlights. Blank-grounded (resolveFamilyBlank), never title-derived: a title cannot vouch for
@@ -2805,7 +2805,24 @@ export async function produceItemHighlightsPerDesign(
   // Gating on the SAME effective-mode function `humanizeAdmittedUnits` itself reads keeps this
   // exactly byte-identical with `IH_HUMANIZER=off` (J7's own guarantee), and widens ONLY when the
   // flag is actually on.
-  const perDesignReservation = IH_WRITER_RETRY_CAP + (ihHumanizerMode() === 'on' ? IH_HUMANIZER_CALL_BUDGET : 0)
+  // RULING N5 (round N, Important — closing review `phase-m1-review-wire.md` IMPORTANT 1): the widen
+  // used to be a single value, `IH_WRITER_RETRY_CAP + IH_HUMANIZER_CALL_BUDGET`, applied UNIFORMLY
+  // to every design whenever the flag was on — but a design whose every eligible atom is too short
+  // to humanize (`humanizerWouldSkip`, itemHighlightWriter.ts) never spends that extra call at all.
+  // Measured (`probe-n5-budget.ts`, this repo's own B0DSCDZC6K family: 4 of 6 designs have only a
+  // 2-word eligible atom, 2 have a 6-phrase pool): with the OLD uniform reservation
+  // (`IH_WRITER_RETRY_CAP + IH_HUMANIZER_CALL_BUDGET` for EVERY design, `4 x 6 = 24` worst case
+  // against the default budget of 18), a throwing client served only 4 of 6. `perDesignReservation`
+  // is now computed PER DESIGN, from the SAME admitted units `runWriterForDesign` will build (a
+  // cheap, pure, local call — never billable): the 4 short-atom designs reserve only 3 each (12
+  // total), the 2 long-atom designs reserve 4 each (8 total) — worst case 20, still 2 over the
+  // default 18, so the SAME probe now serves 5 of 6, not the full 6. This is a genuine, measured
+  // improvement (4 -> 5 of 6), not a complete fix — the residual is stated here, per RULING N5's own
+  // "pin the measured N-of-6 so the flip is made with eyes open", rather than silently claimed as
+  // fully closed. Raising `IH_WRITER_MAX_CALLS`'s default is the OTHER half the ruling names and is
+  // deliberately NOT taken here — it is a well-pinned historical constant
+  // (`itemHighlightWriterRunAcceptance.test.ts`'s G8 exact-18 pin) this round has no measured reason
+  // to move, and the PO can raise it via the env var with eyes open once this residual matters live.
   let callsReserved = 0
   const writerLogByIndex: (IhWriterLogRow | null)[] = new Array(built.perDesign.length).fill(null)
   // RULING K10 (fix round B4, wire Important I2): a REGEN-LEVEL wall-time deadline, checked before
@@ -2822,6 +2839,14 @@ export async function produceItemHighlightsPerDesign(
       writerLogByIndex[i] = row
       return d
     }
+    // RULING N5: sized to what THIS design's own admitted units will actually attempt — never a
+    // uniform worst case. `humanizerWouldSkip` (and therefore `buildAdmittedUnits`) is only ever
+    // called when the flag is on (`&&` short-circuits), so this is a pure no-op, zero extra calls
+    // and zero extra CPU, with the flag off.
+    const perDesignReservation = IH_WRITER_RETRY_CAP + (
+      ihHumanizerMode() === 'on' && !humanizerWouldSkip(buildAdmittedUnits(d.composed, { designName: d.designName, truthCtx: d.truthCtx }))
+        ? IH_HUMANIZER_CALL_BUDGET : 0
+    )
     if (callsReserved + perDesignReservation > budget) {
       console.warn(JSON.stringify({ tag: 'IH_WRITER_BUDGET_EXHAUSTED', design: d.designKey, budget }))
       const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [`skip: per-regen call budget (${budget}) exhausted`], calls: 0 }

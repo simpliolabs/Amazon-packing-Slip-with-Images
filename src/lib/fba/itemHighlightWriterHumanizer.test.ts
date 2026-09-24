@@ -11,11 +11,13 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  humanizerRewriteVerdict, isHumanizerEligible, humanizeAdmittedUnits, ihHumanizerMode,
+  humanizerRewriteVerdict, isHumanizerEligible, humanizeAdmittedUnits, humanizerWouldSkip, ihHumanizerMode,
   IH_HUMANIZER_CALL_BUDGET, buildHumanizerPrompt, buildAdmittedUnits, enumerateWriterCandidates, runWriterForDesign,
   type AdmittedUnit, type HumanizerRejectReason,
 } from '@/lib/fba/itemHighlightWriter'
-import { runIhTail } from '@/lib/fba/listingPipeline'
+import { runIhTail, produceItemHighlightsPerDesign } from '@/lib/fba/listingPipeline'
+import type { BlankSpecRow } from '@/lib/fba/blankSpecs'
+import type { AnalyzedKeyword } from '@/lib/keyword-engine'
 import { coverageTokens, isCovered } from '@/lib/keyword-engine/coverage-core'
 import { normalizeAudienceLean, type PhraseTruthCtx } from '@/lib/fba/contentTruth'
 import { ihSpecFactFillers } from '@/lib/fba/productDetailAttrs'
@@ -580,5 +582,101 @@ describe('RULING N2: enumerateWriterCandidates — alternates are mutually exclu
     const withAlt = enumerateWriterCandidates([alt, ...units], { truthCtx, runTail })
     expect(withAlt.candidates[0]?.line).toBe(rank1.line) // unchanged — source spelling wins the tie
     expect(withAlt.candidates[0]?.usesAlternateSpelling).toBe(0)
+  })
+})
+
+// ─── RULING N5 (round N, Important) — skip the humanize call when every eligible atom is too short
+// to reorder into anything else ─────────────────────────────────────────────────────────────────
+describe('RULING N5: humanizerWouldSkip / humanizeAdmittedUnits — no call when every eligible atom is <=2 words', () => {
+  it('humanizerWouldSkip: true when the flag is off, or zero eligible units, or every eligible unit is <=2 words', () => {
+    expect(humanizerWouldSkip([unit('Fall Crewneck')])).toBe(true) // flag off
+    process.env.IH_HUMANIZER = 'on'
+    try {
+      expect(humanizerWouldSkip([unit('Fall Crewneck')])).toBe(true) // one 2-word eligible unit
+      expect(humanizerWouldSkip([unit('Classic Fit', 'spec-fact')])).toBe(true) // zero eligible units
+      expect(humanizerWouldSkip([unit('Fall Crewneck'), unit('Fun Sweatshirts for Women')])).toBe(false) // one is 4 words
+      expect(humanizerWouldSkip([unit('Fall')])).toBe(true) // 1-word atom
+    } finally { delete process.env.IH_HUMANIZER }
+  })
+
+  it('humanizeAdmittedUnits spends 0 calls (never touches the network) when every eligible unit is <=2 words, even with a client that would throw if called', async () => {
+    process.env.IH_HUMANIZER = 'on'
+    try {
+      const units: AdmittedUnit[] = [unit('Fall Crewneck')]
+      const throwingDeps = { openai: { chat: { completions: { create: () => { throw new Error('must never be called — N5 should skip before this') } } } } } as never
+      const result = await humanizeAdmittedUnits(units, { truthCtx: CTX, designName: 'X', deps: throwingDeps })
+      expect(result).toEqual({ units, calls: 0, accepted: 0, rejected: 0 })
+      expect(result.units).toBe(units) // same reference — no allocation either
+    } finally { delete process.env.IH_HUMANIZER }
+  })
+
+  it('humanizeAdmittedUnits DOES spend the call when at least one eligible unit is 3+ words, even alongside a <=2-word one', async () => {
+    process.env.IH_HUMANIZER = 'on'
+    try {
+      const units: AdmittedUnit[] = [unit('Fall Crewneck'), unit('Fun Sweatshirts for Women')]
+      const deps = {
+        openai: { chat: { completions: { create: async () => ({ choices: [{ message: { content: JSON.stringify({ rewrites: [{ i: 1, text: 'Fall Crewneck' }, { i: 2, text: 'Fun Sweatshirts for Women' }] }) }, finish_reason: 'stop' }] }) } } },
+      } as never
+      const result = await humanizeAdmittedUnits(units, { truthCtx: CTX, designName: 'X', deps })
+      expect(result.calls).toBe(1)
+    } finally { delete process.env.IH_HUMANIZER }
+  })
+})
+
+// ─── RULING N5 (round N, Important) — the per-regen call budget RESERVATION is sized PER DESIGN,
+// not a uniform worst case, through the REAL produceItemHighlightsPerDesign ─────────────────────
+describe('RULING N5: the shared per-regen call budget reservation, measured through the REAL pipeline on the B0DSCDZC6K-shaped family (4 of 6 designs have only a 2-word eligible atom)', () => {
+  const NEVER: RegExp = /(?!)/
+  const BLANK: BlankSpecRow = {
+    match: NEVER,
+    spec: { brand: fixture.blank.brand, brandInCopy: fixture.blank.brandInCopy, fit: fixture.blank.fit, material: fixture.blank.material, unisex: fixture.blank.unisex, neck: fixture.blank.neck, sleeve: fixture.blank.sleeve } as never,
+    styleCode: fixture.blank.styleCode, garmentFamily: fixture.blank.garmentFamily,
+  } as unknown as BlankSpecRow
+  const DESIGNS = fixture.designs.map((d) => ({ key: d.designKey, name: d.designName }))
+  const KEYS = DESIGNS.map((d) => d.key)
+  const titleFor = (n: string) => fixture.titleTemplate.replace('{design}', n)
+  const kwFor = (keyword: string, searchVolume: number): AnalyzedKeyword =>
+    ({ keyword, searchVolume, themeFit: 3, themeFitByDesign: Object.fromEntries(KEYS.map((k) => [k, { fit: 3 }])) } as unknown as AnalyzedKeyword)
+  const INPUT = {
+    groups: DESIGNS.map((d) => ({ key: d.key, designName: d.name, skus: [{ sku: d.key + '-1', asin: 'B0DSCDZC6' + d.key }], titles: [titleFor(d.name)] })),
+    pool: fixture.pool.map((p, i) => kwFor(p.toLowerCase(), 5000 - i * 10)),
+    apparelProduct: true, blankBrand: BLANK,
+    familyTitleText: DESIGNS.map((d) => titleFor(d.name)).join(' '),
+    audienceLean: 'unisex' as never,
+    audienceLeanByDesign: { BB: 'female', MHG: 'female' },
+  }
+  function throwingClient() {
+    return { chat: { completions: { create: async () => { throw new Error('simulated transport failure') } } } } as never
+  }
+
+  it('under total transport failure, the shared budget (default 18) now serves 5 of 6 designs, not the pre-N5 4 of 6 — the 4 short-atom designs reserve 3 each (never 4), never budget-exhausted', async () => {
+    process.env.IH_WRITER = 'on'
+    process.env.IH_HUMANIZER = 'on'
+    try {
+      const out = await produceItemHighlightsPerDesign(INPUT as never, { openai: throwingClient() })
+      const rows = out.writerLog ?? []
+      const served = rows.filter((r) => !r.reasons.some((x) => x.includes('budget')))
+      const budgetExhausted = rows.filter((r) => r.reasons.some((x) => x.includes('budget')))
+      expect(rows.length).toBe(6)
+      expect(served.length).toBe(5)
+      expect(budgetExhausted.length).toBe(1)
+      // Every SHORT-atom design (BCSG/DQG/EDG/HDG) that was served reserved (and spent) exactly 3
+      // calls — the picker's own retry cap, never the pre-N5 uniform 4.
+      for (const key of ['BCSG', 'DQG', 'EDG', 'HDG']) {
+        const row = rows.find((r) => r.design === key)!
+        if (!row.reasons.some((x) => x.includes('budget'))) expect(row.calls).toBe(3)
+      }
+    } finally {
+      delete process.env.IH_WRITER
+      delete process.env.IH_HUMANIZER
+    }
+  })
+
+  it('humanizerWouldSkip is exactly the predicate the reservation now keys on — true for a design whose eligible units are ALL <=2 words, false otherwise', () => {
+    process.env.IH_HUMANIZER = 'on'
+    try {
+      expect(humanizerWouldSkip([unit('Fall Crewneck')])).toBe(true)
+      expect(humanizerWouldSkip([unit('Embroidered Sweatshirts for Women')])).toBe(false)
+    } finally { delete process.env.IH_HUMANIZER }
   })
 })
