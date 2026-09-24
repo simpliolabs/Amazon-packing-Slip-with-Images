@@ -11624,6 +11624,30 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Raw per-design name tokens — the backend fan-out's SIBLING-DESIGN BLEED ban reads this directly
   // (stricter than the partition: no niche exemption there; its own groupHay corroboration is the exemption).
   const groupNameToks = new Map(designGroupContexts.map((c) => [c.key, new Set(designScopeTokens(c.designName))]))
+  /* U6 (Round U, cross-design leak) — THE REAL CURE, upstream of the ship door. The bullets/
+   * description brief tells the writer "The title is FINAL (do not change it)... its design is
+   * ONLY what the title above says" (`runBulletsAgent`/`runDescriptionAgent`), handing it
+   * `ctx.title` VERBATIM. On a bullets/description-ONLY regen that title is the STORED (live)
+   * one, rebuilt straight from `input.priorPerChildTitles` with no vision/LLM re-check — S4 can
+   * correct a wrong STORED `designName`, but it never touches the STORED TITLE TEXT itself, so a
+   * title that once literally carried a sibling's slogan (the live defect this whole round exists
+   * to fix) keeps instructing the writer that the sibling's slogan IS this design, and the writer
+   * dutifully complies — it is doing exactly what an accurate-to-the-brief writer should do with a
+   * false premise. Strip every OTHER group's resolved name phrase out of the reference title
+   * before it reaches the writer (bullets AND description, below), so the ship door becomes a
+   * tripwire that should never fire on a healthy family, not the mechanism correctness depends
+   * on. A no-op on the FULL-regen path's freshly-resolved, already-clean per-group titles. */
+  const sanitizeReferenceTitle = (title: string, ownKey: string): string => {
+    let out = title || ''
+    for (const c of designGroupContexts) {
+      if (c.key === ownKey) continue
+      const sibName = (c.designName ?? '').trim()
+      if (!sibName) continue
+      const esc = sibName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      out = out.replace(new RegExp(esc, 'gi'), ' ')
+    }
+    return out.replace(/\s{2,}/g, ' ').replace(/\s*\|\s*\|\s*/g, ' | ').replace(/^\s*\|\s*/, '').replace(/\s*\|\s*$/, '').trim()
+  }
   // NON-EMPTY-FAMILY-TITLE-TEXT-OK (S1, Round S): a CANDIDATE-FILTER on the INPUT keyword pool, not
   // the ship door — the family's niche vocabulary must stay available to every design (same
   // reasoning as the title candidate filter above). Circularity does not apply: the produced bullet/
@@ -11694,7 +11718,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
             // Group-scoped pools (#2): foreign-design keywords out, own-title-covered keywords out.
             const groupRemaining = scopeKwsToGroup(ctx, remainingForBullets, (k) => k.keyword)
             const groupTopOpp = scopeKwsToGroup(ctx, topOpportunityKwsForBullets, (k) => k)
-            const raw = await runBulletsAgent(ctx.groupInput, ctx.title, groupRemaining, bulletAttrs, groupTopOpp, capacityFamilyTokens, compatibilityBrands, ctx.designName)
+            const raw = await runBulletsAgent(ctx.groupInput, sanitizeReferenceTitle(ctx.title, ctx.key), groupRemaining, bulletAttrs, groupTopOpp, capacityFamilyTokens, compatibilityBrands, ctx.designName)
             // Mirror the broadcast strip chain EXACTLY, but ground motif-stripping on THIS group's own
             // design (parity with per-design titles, which recompute a group-scoped motifTrust in
             // buildTitleFor) — so a motif legit for THIS design isn't judged against the parent/other-
@@ -12063,7 +12087,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // useCouncil:false — runs once PER design group inside a Promise.all; N parallel GPT-5
         // councils would be cost/latency-prohibitive. Only the broadcast description gets the council.
         // descAttrs (real facts, no search phrases) + [] opportunity kws — same clean-prose rule as broadcast.
-        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, descAttrs, compatibilityBrands, [], false, descTruthCtx)
+        const raw = await runDescriptionAgent(ctx.groupInput, sanitizeReferenceTitle(ctx.title, ctx.key), groupBullets, descAttrs, compatibilityBrands, [], false, descTruthCtx)
         const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
         // 3rd arg = sellerGarmentText (parity-audit #8: it was missing, so the heavy-garment-
         // stuffing guard never fired for per-design descriptions).
