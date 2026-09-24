@@ -280,27 +280,23 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
     } as never
   }
 
-  // MEASURED (2026-09-24, this fixture, this stub table, POST RULING O1/O2/O3/O5 — round O,
-  // re-measured from this test's own run after RULING N2 was superseded): BB/MHG (women lean) admit
+  // MEASURED (2026-09-24, this fixture, this stub table, POST RULING P1 — round P, re-measured
+  // from this test's own run after RULING O2 was superseded in turn): BB/MHG (women lean) admit
   // all 6 pool phrases, but this stub table's REWRITES map is the identity rewrite for four of the
   // six ('Embroidered Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun
   // Sweatshirts for Women', 'Fall Crewneck' each map to themselves) — RULING O5 (round O, Important)
   // now refuses an identity rewrite before any other check runs (it would be a byte-identical
   // duplicate unit, never a genuine alternate), so only the REMAINING two (genuinely-reworded)
   // rewrites survive as ALTERNATE units: `eligibleAfter` is `eligibleBefore` followed by those TWO
-  // alternates, 8 entries, not 12. Rank 1 is GUARANTEED zero-alt (RULING O2), but is NOT
-  // byte-identical before/after any more:
-  // RULING O1 groups a source and its alternates into ONE pool slot instead of excluding the
-  // alternates from the search's fixed evaluation budget entirely, so the search now spends part of
-  // that same budget exploring alt-carrying branches — the exact zero-alt candidate the bounded
-  // search reaches first can shift as a result, even though it must still be, and is, zero-alt. Both
-  // designs' AFTER rank 1 measured by this test's own run (never hand-typed; see `EXPECTED` below,
-  // pasted from this test's own log, and the `M6_HUMANIZER_ACCEPTANCE` tag it prints on every run)
-  // drops the garment-head abutment for a candidate that folds in the "Long Sleeve" spec fact
-  // instead — still zero-alt, still passing the full acceptance oracle, marginally further from the
-  // fill target than the BEFORE rank 1, which the fixed evaluation budget no longer reaches once
-  // part of it is spent exploring alt-carrying branches. See `itemHighlightWriterHumanizer.test.ts`'s
-  // dedicated rank test for the isolated O1/O2 mechanism. BCSG/EDG/HDG/DQG's sole eligible atom, "Fall Crewneck", is
+  // alternates, 8 entries, not 12. RULING P1 (round P, Blocking — "the humanizer becomes STRICTLY
+  // ADDITIVE") replaced O2's "search a combined ranking for the first zero-alt entry" (which review
+  // O1 measured FALSE: the alt-carrying branches could consume enough of the fixed 300-evaluation
+  // budget that the zero-alt line the combined search reached first was no longer the same one
+  // flag-off finds) with a search that decides slot 1 from a SOURCES-ONLY pass BEFORE any
+  // alt-carrying branch is ever explored — rank 1 AFTER is now BYTE-IDENTICAL to rank 1 BEFORE, by
+  // construction, exactly as it is with `IH_HUMANIZER=off` (`EXPECTED` below, `rank1After ===
+  // rank1Before` for every design). See `itemHighlightWriterHumanizer.test.ts`'s dedicated rank
+  // test for the isolated P1 mechanism. BCSG/EDG/HDG/DQG's sole eligible atom, "Fall Crewneck", is
   // TWO words — RULING N5 (round N) skips the humanize call entirely for them (0 calls, not 1),
   // knowable before the call: a 2-word atom has no room to reorder into anything else.
   // RULING N3 (the whole recorded blank, `neck`/`sleeve` now supplied): every design's rank 1 now
@@ -318,7 +314,7 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
         'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women',
       ],
       rank1Before: 'Business B*tch, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
-      rank1After: 'Business B*tch, Graphic Crewneck Sweatshirts Women, with 50% Cotton / 50% Polyester, Classic Fit, Long Sleeve',
+      rank1After: 'Business B*tch, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
       humanizeCalls: 1,
     },
     BCSG: {
@@ -352,7 +348,7 @@ describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture
         'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women',
       ],
       rank1Before: 'Mother Hustler, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
-      rank1After: 'Mother Hustler, Graphic Crewneck Sweatshirts Women, with 50% Cotton / 50% Polyester, Classic Fit, Long Sleeve',
+      rank1After: 'Mother Hustler, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
       humanizeCalls: 1,
     },
   }

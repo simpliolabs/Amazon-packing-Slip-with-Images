@@ -40,6 +40,7 @@ import { PERFORMANCE_CLAIM_RE } from '@/lib/fba/blankSpecs'
 import {
   ihFoldWord, IH_GARMENT_HEAD_FOLDED, lineHasSignificantRepeat, classifyStoredIhLine,
   significantWordsWithSurface, ihRepeatBudget, IH_MAX_WORD_REPEATS, ihContentRuleViolations,
+  GENDER_FOLDS,
 } from '@/lib/fba/productDetailAttrs'
 import { titleCasePhrase } from '@/lib/fba/titleBand'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
@@ -1973,88 +1974,108 @@ export function enumerateWriterCandidates(
   const target = CONTENT_CONTRACT.itemHighlights.fillTarget
 
   const seen = new Set<string>() // de-dupe an identical rendered PARTS shape reached two ways
-  const candidates: WriterCandidate[] = []
   let evaluated = 0
   let bounded = allOrdinaryGroups.length > ordinaryGroups.length || allRelationCandidates.length > relationCandidates.length
   // `distinctPoolUnits`'s membership check (below) is against the SAME capped set the search
   // itself draws from — the union of every member (source AND alternate) of every group the search
   // considered — never merely the sources, so an accepted alternate still counts as a pool unit.
+  // Computed ONCE from the full (alt-carrying) groups, so it means the same thing in both passes
+  // below — never recomputed per-pass, which would make a zero-alt candidate's own `distinctPoolUnits`
+  // depend on which pass produced it.
   const ordinaryPoolCapped = ordinaryGroups.flat()
 
-  const n = ordinaryGroups.length
-  outer:
-  for (const prefix of prefixVariants) {
-  for (let mask = 0; mask < (1 << n); mask++) {
-    // RULING O1: build THIS subset's pool clause as the CARTESIAN PRODUCT of "which member (source,
-    // or one of its alternates) represents each SELECTED group" — a source and its own alternate(s)
-    // are mutually exclusive by construction (only one member per group ever enters one candidate),
-    // never a post-hoc mask-conflict filter. Pruned the INSTANT a partial line is already over the
-    // ceiling — G3 point 1's own "prune on the band early": rendered length is monotonically
-    // non-decreasing as units are appended, so no later addition (relation, wear fact, or a further
-    // group) could ever bring an over-length partial back in band.
-    let poolPartsVariants: ArrangementPart[][] = [prefix]
-    for (let i = 0; i < n; i++) {
-      if (!(mask & (1 << i))) continue
-      const members = ordinaryGroups[i]
-      const next: ArrangementPart[][] = []
-      for (const parts of poolPartsVariants) {
-        for (const member of members) {
-          const appended = appendUnit(parts, [{ glue: ',' }], member)
-          if (renderArrangement(appended, units).length > max) continue
-          next.push(appended)
+  // RULING P1 (round P, Blocking, phase-p1-rulings.md — "the humanizer becomes STRICTLY ADDITIVE").
+  // Extracted so the SAME search can run TWICE against shared `seen`/`evaluated`/`bounded` state —
+  // once over groups that carry ONLY each group's source member (never an alternate), once over the
+  // full alt-carrying groups. `groupsForThisPass.length` (`n`, `rn`) may differ from the outer
+  // scope's `ordinaryGroups`/`relationCandidates` only in which MEMBER of a group is offered — the
+  // group COUNT (and therefore the mask space) and the relation-candidate list are identical in both
+  // calls, so the two passes are two views of the exact same combinatorial space, not two different
+  // searches.
+  function searchPass(groupsForThisPass: readonly AdmittedUnit[][]): WriterCandidate[] {
+    const found: WriterCandidate[] = []
+    const n = groupsForThisPass.length
+    outer:
+    for (const prefix of prefixVariants) {
+    for (let mask = 0; mask < (1 << n); mask++) {
+      // RULING O1: build THIS subset's pool clause as the CARTESIAN PRODUCT of "which member (source,
+      // or one of its alternates) represents each SELECTED group" — a source and its own alternate(s)
+      // are mutually exclusive by construction (only one member per group ever enters one candidate),
+      // never a post-hoc mask-conflict filter. Pruned the INSTANT a partial line is already over the
+      // ceiling — G3 point 1's own "prune on the band early": rendered length is monotonically
+      // non-decreasing as units are appended, so no later addition (relation, wear fact, or a further
+      // group) could ever bring an over-length partial back in band.
+      let poolPartsVariants: ArrangementPart[][] = [prefix]
+      for (let i = 0; i < n; i++) {
+        if (!(mask & (1 << i))) continue
+        const members = groupsForThisPass[i]
+        const next: ArrangementPart[][] = []
+        for (const parts of poolPartsVariants) {
+          for (const member of members) {
+            const appended = appendUnit(parts, [{ glue: ',' }], member)
+            if (renderArrangement(appended, units).length > max) continue
+            next.push(appended)
+          }
         }
+        poolPartsVariants = next
+        if (poolPartsVariants.length === 0) break
       }
-      poolPartsVariants = next
-      if (poolPartsVariants.length === 0) break
-    }
-    if (poolPartsVariants.length === 0) continue
+      if (poolPartsVariants.length === 0) continue
 
-    // Readability's OWN "at least one relation clause" rule means a candidate with none would only
-    // ever be refused — never searched. Both relation words are tried: they are structurally
-    // interchangeable to the grammar/validator, but NOT to `phraseTruthVerdict` (G1's own review
-    // measured "with"/"in" reaching different truth verdicts on the same words), so trying only one
-    // would silently narrow the search below what the oracle actually accepts. Every NON-EMPTY
-    // SUBSET of relation candidates is tried, in order, as ONE open clause (WRITER_CANDIDATE_MAX_
-    // REL_UNITS's own doc comment) — never only a single relation-target unit.
-    const rn = relationCandidates.length
-    for (const poolParts of poolPartsVariants) {
-    for (let relMask = 1; relMask < (1 << rn); relMask++) {
-      const relSelected: AdmittedUnit[] = []
-      for (let i = 0; i < rn; i++) if (relMask & (1 << i)) relSelected.push(relationCandidates[i])
-      for (const relGlue of ['with', 'in'] as const) {
-        let relParts = appendUnit(poolParts, [{ glue: ',' }, { glue: relGlue }], relSelected[0])
-        let relOverMax = renderArrangement(relParts, units).length > max
-        for (let i = 1; i < relSelected.length && !relOverMax; i++) {
-          relParts = appendUnit(relParts, [{ glue: ',' }], relSelected[i])
-          if (renderArrangement(relParts, units).length > max) relOverMax = true
+      // Readability's OWN "at least one relation clause" rule means a candidate with none would only
+      // ever be refused — never searched. Both relation words are tried: they are structurally
+      // interchangeable to the grammar/validator, but NOT to `phraseTruthVerdict` (G1's own review
+      // measured "with"/"in" reaching different truth verdicts on the same words), so trying only one
+      // would silently narrow the search below what the oracle actually accepts. Every NON-EMPTY
+      // SUBSET of relation candidates is tried, in order, as ONE open clause (WRITER_CANDIDATE_MAX_
+      // REL_UNITS's own doc comment) — never only a single relation-target unit.
+      const rn = relationCandidates.length
+      for (const poolParts of poolPartsVariants) {
+      for (let relMask = 1; relMask < (1 << rn); relMask++) {
+        const relSelected: AdmittedUnit[] = []
+        for (let i = 0; i < rn; i++) if (relMask & (1 << i)) relSelected.push(relationCandidates[i])
+        for (const relGlue of ['with', 'in'] as const) {
+          let relParts = appendUnit(poolParts, [{ glue: ',' }, { glue: relGlue }], relSelected[0])
+          let relOverMax = renderArrangement(relParts, units).length > max
+          for (let i = 1; i < relSelected.length && !relOverMax; i++) {
+            relParts = appendUnit(relParts, [{ glue: ',' }], relSelected[i])
+            if (renderArrangement(relParts, units).length > max) relOverMax = true
+          }
+          if (relOverMax) continue
+          for (const useWearFact of wearFact ? [false, true] : [false]) {
+            const finalParts = useWearFact ? appendUnit(relParts, [{ glue: ',' }], wearFact!) : relParts
+            const line = renderArrangement(finalParts, units)
+            if (line.length < min || line.length > max) continue
+            const key = JSON.stringify(finalParts)
+            // Shared `seen` across BOTH passes: a zero-alt combination the source-only pass already
+            // judged renders the SAME `finalParts` (same unit ids — a group's source keeps its own id
+            // in either pass) the second time the full-groups pass reaches it via an all-source mask,
+            // so it is skipped here WITHOUT spending any of the remaining budget — only a combination
+            // that selects at least one ALTERNATE for some group is new, and only those can ever
+            // reach `evaluated++` in the second pass.
+            if (seen.has(key)) continue
+            seen.add(key)
+            if (evaluated >= WRITER_CANDIDATE_MAX_EVALUATED) { bounded = true; break outer }
+            evaluated++
+            const verdict = judgeWriterArrangement({ parts: finalParts }, units, ctx)
+            if (!verdict.ok) continue
+            const shapes = clauseShapesFromParts(finalParts, units)
+            found.push({
+              parts: finalParts,
+              line: verdict.value,
+              keywordShapedClauses: shapes.filter(Boolean).length,
+              distinctPoolUnits: finalParts.filter((p) => 'unit' in p && ordinaryPoolCapped.some((u) => u.id === p.unit)).length,
+              lengthFromTarget: Math.abs(verdict.value.length - target),
+              // N2/O1: count of this candidate's OWN parts that are a humanizer alternate spelling.
+              usesAlternateSpelling: finalParts.filter((p) => 'unit' in p && !!byId.get(p.unit)?.altOf).length,
+            })
+          }
         }
-        if (relOverMax) continue
-        for (const useWearFact of wearFact ? [false, true] : [false]) {
-          const finalParts = useWearFact ? appendUnit(relParts, [{ glue: ',' }], wearFact!) : relParts
-          const line = renderArrangement(finalParts, units)
-          if (line.length < min || line.length > max) continue
-          const key = JSON.stringify(finalParts)
-          if (seen.has(key)) continue
-          seen.add(key)
-          if (evaluated >= WRITER_CANDIDATE_MAX_EVALUATED) { bounded = true; break outer }
-          evaluated++
-          const verdict = judgeWriterArrangement({ parts: finalParts }, units, ctx)
-          if (!verdict.ok) continue
-          const shapes = clauseShapesFromParts(finalParts, units)
-          candidates.push({
-            parts: finalParts,
-            line: verdict.value,
-            keywordShapedClauses: shapes.filter(Boolean).length,
-            distinctPoolUnits: finalParts.filter((p) => 'unit' in p && ordinaryPoolCapped.some((u) => u.id === p.unit)).length,
-            lengthFromTarget: Math.abs(verdict.value.length - target),
-            // N2/O1: count of this candidate's OWN parts that are a humanizer alternate spelling.
-            usesAlternateSpelling: finalParts.filter((p) => 'unit' in p && !!byId.get(p.unit)?.altOf).length,
-          })
-        }
+      }
       }
     }
     }
-  }
+    return found
   }
 
   // RULING H3(a) (fix round H1, phase-h1-rulings.md, Important — supersedes RULING G3 point 2's
@@ -2068,49 +2089,73 @@ export function enumerateWriterCandidates(
   // `CONTENT_CONTRACT.itemHighlights.fillTarget`); `keywordShapedClauses` is demoted to a
   // tiebreak. Deterministic, never `Math.random` — `Array.prototype.sort` is a stable sort (ES2019),
   // so the final tiebreak is the candidates' own stable (evaluation) order.
-  // RULING N2 (round N, Blocking) named this a FOURTH, LAST tiebreak — prefer fewer humanizer-
-  // alternate units when every earlier discriminator ties — and its own doc comment (and round N's
-  // report) claimed that made rank 1 byte-identical to flag-off "BY CONSTRUCTION" whenever an
-  // alternate exists at all. RULING O2 (round O, Blocking — phase-o1-rulings.md) measured that
-  // claim FALSE: `lengthFromTarget` is the PRIMARY key, and an accepted alternate can be closer to
-  // the fill target than every zero-alt candidate (it is usually a few characters LONGER or
-  // SHORTER than its own source, which is exactly what changes band fit), so an alt-carrying
-  // candidate can legitimately win `ranked[0]` outright — the tiebreak below never even runs.
-  // Measured end to end (`q9-deadclient.ts`): a dead/malformed HUMANIZER keeps rank 1 byte-
-  // identical to flag-off, but once the humanizer succeeds, "humanizer OK + chooser throws/
-  // malformed/no-pick-key/out-of-range/deadline" all ship an alternate — the exact failure modes
-  // `runWriterForDesign`'s `picked = 1` fallback (G3 point 4) collapses onto.
-  const ranked = [...candidates].sort((a, b) =>
-    a.lengthFromTarget - b.lengthFromTarget ||
-    a.keywordShapedClauses - b.keywordShapedClauses ||
-    b.distinctPoolUnits - a.distinctPoolUnits ||
-    a.usesAlternateSpelling - b.usesAlternateSpelling ||
-    0,
-  )
-  // RULING O2: source precedence for SLOT 1 is now a PROPERTY, not merely the last tiebreak's
-  // preference — rank 1 (the fallback every failure mode above collapses onto) is the BEST
-  // candidate that carries NO humanizer alternate, found by SEARCHING: `ranked` already sorts
-  // with alternate-count as the LAST tiebreak, so among candidates tied on every earlier key a
-  // zero-alt one always precedes an alt-carrying one — the FIRST zero-alt entry in `ranked` is
-  // therefore identical to what a zero-alt-only sort would put first. This is a search, not a
-  // re-sort, so it costs nothing new and changes nothing about how the OTHER candidates rank.
-  // `rank1Index === -1` only when NOT ONE evaluated candidate is alternate-free (every accepted
-  // arrangement had to use an alternate to reach the band at all) — an edge case the search cannot
-  // rule out by construction, so it falls back to `ranked[0]` rather than throwing.
-  const rank1Index = ranked.findIndex((c) => c.usesAlternateSpelling === 0)
-  const rank1 = rank1Index === -1 ? ranked[0] : ranked[rank1Index]
-  // RULING O1: slot 1's guarantee must NOT remove alternates from competing for slots 2..K on their
-  // own band-fit/readability merits — `remaining` is `ranked` with only the ONE entry used for slot
-  // 1 spliced out, never the whole alt-carrying tail. This is what lets an alternate the referee
-  // never saw before (BLOCKING 4) actually reach the shown ballot now.
-  const remaining = rank1Index === -1 ? ranked.slice(1) : [...ranked.slice(0, rank1Index), ...ranked.slice(rank1Index + 1)]
+  function compareWriterCandidates(a: WriterCandidate, b: WriterCandidate): number {
+    return a.lengthFromTarget - b.lengthFromTarget ||
+      a.keywordShapedClauses - b.keywordShapedClauses ||
+      b.distinctPoolUnits - a.distinctPoolUnits ||
+      a.usesAlternateSpelling - b.usesAlternateSpelling ||
+      0
+  }
+
+  // RULING P1 (round P, Blocking — supersedes RULING N2's "byte-identical BY CONSTRUCTION" claim,
+  // which RULING O2 already measured false, and supersedes O2's own "search for the first zero-alt
+  // entry in a combined ranking" approach, which review O1 measured false in turn: once alternates
+  // compete inside the SAME 300-evaluation search, they can consume the budget the zero-alt line
+  // needed just to be FOUND at all — BLOCKING 1 of `phase-o1-review-net.md`, the "Graphic Crewneck
+  // Sweatshirts Women" regression). PASS 1 runs the search over groups that carry ONLY each group's
+  // source member — an alternate is never offered a mask bit here, so this pass's candidate set,
+  // ranking and rank-1 choice are computed by CODE THAT CANNOT DISTINGUISH this call from one made on
+  // a `units` array that never carried an alternate at all, i.e. `IH_HUMANIZER=off`. That is the
+  // "byte-identical by construction" property N2 claimed and O2 could not deliver: it now holds
+  // because slot 1 is decided BEFORE an alternate is ever considered, not because of a tiebreak or a
+  // post-hoc search over a ranking alternates already competed in.
+  // Each group's SOURCE member is the one with NO `altOf` (every alternate names its own source by
+  // that field; exactly one member per group lacks it) — found explicitly, never assumed to be
+  // `members[0]`: production's own `humanizeAdmittedUnits` always appends alternates AFTER their
+  // source, so `members[0]` is the source in every REAL call, but a test (or any future caller) that
+  // hands this function an alt-before-its-source array must get the identical zero-alt guarantee —
+  // the property is "the group's source", never "whichever member happened to sort first".
+  const sourceOnlyGroups = ordinaryGroups.map((members) => [members.find((m) => !m.altOf) ?? members[0]])
+  const candidatesSourceOnly = searchPass(sourceOnlyGroups)
+  // P1 bullet 2: "`rank1Index === -1` becomes unreachable. If the source-only pass finds nothing,
+  // return `accepted:false` ... the humanizer must never turn a HOLD into an accept." Measured by
+  // `r8-noZeroAlt.ts` (22 of 500 swept configurations): the OLD code searched the alt-carrying space
+  // regardless and, finding every accepted candidate alt-carrying, still shipped `ranked[0]` — an
+  // unrefereed rewrite — even though the flag-off search (this exact pass) found zero. Returning
+  // empty HERE, before the second pass ever runs, makes the two searches agree: neither can accept
+  // when the other would not, because the alt-carrying pass is answering a strictly HARDER question
+  // (a source-only line is always a special case of the full search) — if the easier question has no
+  // answer, the harder one's answer is never consulted.
+  if (candidatesSourceOnly.length === 0) {
+    return { candidates: [], evaluated, bounded }
+  }
+  const rankedSourceOnly = [...candidatesSourceOnly].sort(compareWriterCandidates)
+  // Every entry here has `usesAlternateSpelling === 0` by construction (no alternate was ever a mask
+  // option) — `rankedSourceOnly[0]` IS the zero-alt search's own rank 1, not merely a value that
+  // happens to satisfy that property, so nothing downstream needs to search for it again (O2's own
+  // `findIndex` is gone: there is nothing left for it to find that this line did not already decide).
+  const rank1 = rankedSourceOnly[0]
+
+  // PASS 2 spends only the REMAINING budget (P1: "Only the REMAINING budget expands alt-carrying
+  // branches, and they may only ADD ballot slots 2..K") — `searchPass` shares `evaluated`/`bounded`/
+  // `seen` with pass 1 via closure, so a pass 1 that already saturated the 300-evaluation cap simply
+  // never calls into pass 2's judge at all (the `evaluated >= WRITER_CANDIDATE_MAX_EVALUATED` guard
+  // fires on pass 2's very first NEW combination), and the `if` below skips the call outright once
+  // pass 1 alone has already spent it.
+  const candidatesWithAlternates = evaluated < WRITER_CANDIDATE_MAX_EVALUATED ? searchPass(ordinaryGroups) : []
+  // RULING O1 (preserved): slot 1's guarantee must NOT remove alternates from competing for slots
+  // 2..K on their own band-fit/readability merits. `remaining` is therefore the UNION of every
+  // source-only candidate OTHER than the one used for slot 1, plus every NEW (necessarily
+  // alt-carrying, by the shared-`seen` dedupe above) candidate pass 2 found — never a re-ranking that
+  // could displace `rank1`.
+  const remaining = [...rankedSourceOnly.slice(1), ...candidatesWithAlternates].sort(compareWriterCandidates)
   // RULING H3(b): the top-K SHOWN must span the OCCUPIED band, not one end of it — taste between
   // legal lines is the model's entire job; it cannot exercise it on a list that holds one shape.
   // Rank 1 (above) stays the deterministic fallback every failure mode collapses onto (G3 point 4,
-  // now also O2) — untouched. The REMAINING slots fill ROUND-ROBIN across three length buckets, in
+  // now also O2/P1) — untouched. The REMAINING slots fill ROUND-ROBIN across three length buckets, in
   // `remaining`'s own order within each bucket, so the model is always offered both a lean line and
-  // a full one, never only whichever end of the band `ranked` itself clusters at.
-  const top = ranked.length ? [rank1] : []
+  // a full one, never only whichever end of the band `remaining` itself clusters at.
+  const top = [rank1]
   // RULING O5 (round O, Important — phase-o1-rulings.md): the 8-slot ballot could show the SAME
   // rendered line twice — two different `parts` (e.g. a source-only arrangement and one that
   // happens to render identically, or two candidates that differ only in a unit the model never
@@ -2163,19 +2208,46 @@ export function enumerateWriterCandidates(
  *  exported, UNUSED by this function, so it still documents what the validator/judge enforce and so
  *  a test can assert none of its sentences leak into this prompt any more
  *  (`itemHighlightWriterFixRoundG3.test.ts`, "no rule sentence it no longer needs to teach"). */
-export function buildWriterPrompt(candidates: readonly WriterCandidate[], designName: string | null): { system: string; user: string } {
+/** RULING P2 (round P, Blocking — phase-p1-rulings.md, half 2 of 2; half 1 is
+ *  `humanizerAudienceCrossingViolation`, above). Deleted the sentence that told the model, verbatim,
+ *  "every candidate below has ALREADY been verified to satisfy every one of [grammar/length/repeat]"
+ *  — true, but its OWN wording never named truth as one of the things it excluded, and
+ *  `claimflip.ts` measured the model reading that as license to treat EVERY property of a candidate,
+ *  truth included, as pre-cleared. Grammar/length/repeat really are pre-verified (deterministically,
+ *  by `judgeWriterArrangement`) and that sentence stays; a NEW one is added, and ONLY when at least
+ *  one candidate carries a humanizer alternate (`usesAlternateSpelling > 0` — the search's own
+ *  signal for "this line's wording was not the pool's own text"): those lines are marked `[ALT]`,
+ *  the design/garment facts are printed, and the model is asked EXPLICITLY whether each `[ALT]`
+ *  line's own wording is still a true statement about THIS product — its "no" (an index named in
+ *  `falseAlt`) is binding on the caller (`runWriterForDesign`, below), which must never ship a
+ *  `pick` the model itself just called false. Zero-alt candidates (the flag-off case, and P1's own
+ *  slot-1 guarantee) never trigger this section — the prompt is BYTE-IDENTICAL to the pre-P2 one
+ *  whenever no alternate is on the ballot, so this is additive, never a behaviour change to the path
+ *  every existing pin (`itemHighlightWriterFixRoundG3.test.ts`) already covers. */
+export function buildWriterPrompt(
+  candidates: readonly WriterCandidate[], designName: string | null, truthFacts: readonly string[] = [],
+): { system: string; user: string } {
+  const altIndices = candidates
+    .map((c, i) => (c.usesAlternateSpelling > 0 ? i + 1 : null))
+    .filter((i): i is number => i !== null)
   const system = [
     'You choose ONE Amazon Item Highlight line for a t-shirt/apparel listing from a NUMBERED list of candidate lines — you do not write or edit any text, and no grammar, length or repeat rule is yours to apply: every candidate below has ALREADY been verified to satisfy every one of them.',
     'Return JSON: {"pick": <integer>} — the number of the ONE candidate you choose, and nothing else. Do not invent a number outside the list, and do not return any other key.',
     'Pick the candidate that reads best to a shopper — the one that sounds most like a real sentence about this product, not a list of keywords. If you are unsure, picking 1 is always a safe answer.',
-  ].join(' ')
-  const list = candidates.map((c, i) => `${i + 1}. ${c.line}`).join('\n')
+    altIndices.length
+      ? 'The candidates marked [ALT] use a REWORDED phrase, and their wording has NOT been truth-checked — that check is YOURS, and it is the one thing about these candidates that is genuinely your job. Using the PRODUCT FACTS given, decide for each [ALT] candidate whether its wording is still a TRUE statement about this exact product (a claim can move from describing the garment to describing the audience, or the reverse, and stop being true). Return JSON: {"pick": <integer>, "falseAlt": [<integers among the [ALT] candidates you judge NOT true of this product, else omit or use []>]}. Never pick a candidate you are listing in "falseAlt". If you are unsure whether an [ALT] candidate is true, treat it as NOT true.'
+      : '',
+  ].filter(Boolean).join(' ')
+  const list = candidates.map((c, i) => `${i + 1}. ${c.line}${altIndices.includes(i + 1) ? ' [ALT]' : ''}`).join('\n')
   const user = [
     designName ? `DESIGN: ${JSON.stringify(designName)}` : '',
+    altIndices.length && truthFacts.length ? `PRODUCT FACTS (use these to judge [ALT] candidates):\n${truthFacts.map((f) => `- ${f}`).join('\n')}` : '',
     `CANDIDATES (already verified — pick one by number):\n${list}`,
     // Literal word "json" (bullet/backend council convention, `bullet-pad-pool-exhaustion` memory)
     // so `response_format: json_object` never 400s.
-    `Reply with JSON only: {"pick": <integer 1-${candidates.length}>}.`,
+    altIndices.length
+      ? `Reply with JSON only: {"pick": <integer 1-${candidates.length}>, "falseAlt": [<integers among ${JSON.stringify(altIndices)} you judge NOT true, else []>]}.`
+      : `Reply with JSON only: {"pick": <integer 1-${candidates.length}>}.`,
   ].filter(Boolean).join('\n')
   return { system, user }
 }
@@ -2217,10 +2289,31 @@ const WRITER_CALL_FAILED: unique symbol = Symbol('writer-call-failed')
  *  after every `askWriter` return, so the loop-level deadline check (just above THIS call, in the
  *  retry loop) racing against `askWriter`'s OWN `remainingMs <= 0` check — deadline passes in the
  *  gap between them — over-counted a call that spent nothing. */
+/** RULING P2 (round P): the "PRODUCT FACTS" `buildWriterPrompt` prints for the model to judge an
+ *  `[ALT]` candidate against — read from the SAME `PhraseTruthCtx` `phraseTruthVerdict` itself
+ *  already judges every candidate's rendered line against (never a second, hand-typed fact source
+ *  that could drift from what the oracle actually enforces). Omits a field entirely rather than
+ *  print "unknown"/"null" — a fact the model was never given cannot be misread. */
+function writerTruthFactsFor(truthCtx: PhraseTruthCtx, designName: string | null): string[] {
+  const facts: string[] = []
+  if (designName) facts.push(`Design name/theme: ${JSON.stringify(designName)}`)
+  if (truthCtx.garmentFamily && truthCtx.garmentFamily !== 'none') facts.push(`Garment: ${truthCtx.garmentFamily}`)
+  const spec = truthCtx.spec as { material?: string; fit?: string; unisex?: boolean } | undefined
+  if (spec?.material) facts.push(`Material: ${spec.material}`)
+  if (spec?.fit) facts.push(`Fit: ${spec.fit}`)
+  if (truthCtx.audienceLean === 'women' || truthCtx.audienceLean === 'men') {
+    facts.push(`Audience: this listing is styled/marketed for ${truthCtx.audienceLean} — any AUDIENCE-describing word must be true of ${truthCtx.audienceLean}, never of the garment`)
+  } else if (spec?.unisex) {
+    facts.push('Audience: unisex — no gender-specific claim about the wearer is true')
+  }
+  return facts
+}
+
 async function askWriter(
-  openai: OpenAI, model: string, candidates: readonly WriterCandidate[], designName: string | null, deadlineAt?: number,
+  openai: OpenAI, model: string, candidates: readonly WriterCandidate[], designName: string | null,
+  truthCtx: PhraseTruthCtx, deadlineAt?: number,
 ): Promise<unknown> {
-  const { system, user } = buildWriterPrompt(candidates, designName)
+  const { system, user } = buildWriterPrompt(candidates, designName, writerTruthFactsFor(truthCtx, designName))
   const remainingMs = deadlineAt !== undefined ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY
   if (remainingMs <= 0) {
     console.warn(`[ih-writer] ${model} call skipped — writer deadline already exceeded`)
@@ -2433,6 +2526,7 @@ function isBrandCarrierText(text: string, allowedBrand: string | null | undefine
 export type HumanizerRejectReason =
   | 'empty' | 'character-set' | 'content-word-multiset' | 'inserted-word' | 'relation-glue-in-unit'
   | 'duplicate-function-word' | 'boundary-function-word' | 'case' | 'identity'
+  | 'audience-noun-crossing'
   | 'length' | `truth:${PhraseTruthReason}` | 'trademark' | 'celebrity' | 'brand-parity'
 
 /** RULING N1 (round N, phase-n1-rulings.md, Blocking): the WORD_RE tokenizer J4.1/J4.2 both read
@@ -2563,6 +2657,50 @@ function humanizerBoundaryInsertedFunctionWord(sourceWordsRaw: readonly string[]
   return firstBad || lastBad
 }
 
+/** RULING P2 (round P, Blocking, phase-p1-rulings.md — "the referee was never asked about truth,
+ *  and that is my design error"). Half 1 of 2 (the deterministic half; half 2 is the referee
+ *  question `buildWriterPrompt` now asks, below). The reachable defect, measured end to end by
+ *  `claimflip.ts`: `"Embroidered Sweatshirts for Women"` -> `"Sweatshirts for the Embroidered
+ *  Women"` passed every existing check (content multiset, insertion set, character set, case,
+ *  hygiene) because every one of them is BLIND to WHICH noun a modifier sits next to — they only
+ *  ever asked "is this word allowed to be here at all", never "did this word just change which
+ *  THING it describes". "Embroidered" is a fact about the GARMENT in the source (adjacent to
+ *  "Sweatshirts"); the rewrite relocates it to be immediately adjacent to "Women" instead, which
+ *  reads as a fact about the AUDIENCE — the garment truth becomes a claim about the buyer.
+ *  AUDIENCE_NOUNS is deliberately the SAME closed set `GENDER_FOLDS` (imported from
+ *  `productDetailAttrs.ts`) already keys — the repo's one existing list of gendered/audience nouns
+ *  this codebase folds together elsewhere (`coverage-token-folding-shirt-hub-trap` names the class
+ *  of bug a SECOND, drifting list would create) — never a new vocabulary invented for this rule.
+ *  DETECTOR ONLY (the ruling's own words): this refuses a crossing: it never tries to repair one by
+ *  moving the word back, because a remover would have to GUESS which of the two nouns the modifier
+ *  was "supposed" to describe, and a wrong guess ships a DIFFERENT unreviewed claim — refusing keeps
+ *  `source.text`, the one string this module already knows is true. */
+const AUDIENCE_NOUNS: ReadonlySet<string> = new Set(Object.keys(GENDER_FOLDS))
+/** The word immediately before `noun`'s FIRST occurrence in `wordsRaw` (case-folded compare, raw
+ *  return) — `null` when `noun` never occurs, or occurs only at index 0 (nothing precedes it). */
+function wordImmediatelyBefore(wordsRaw: readonly string[], noun: string): string | null {
+  const idx = wordsRaw.findIndex((w) => w.toLowerCase() === noun)
+  return idx > 0 ? wordsRaw[idx - 1] : null
+}
+function humanizerAudienceCrossingViolation(sourceWordsRaw: readonly string[], rewriteWordsRaw: readonly string[]): boolean {
+  for (const noun of AUDIENCE_NOUNS) {
+    const modifierInRewrite = wordImmediatelyBefore(rewriteWordsRaw, noun)
+    if (!modifierInRewrite) continue
+    const modifierLower = modifierInRewrite.toLowerCase()
+    // A function word (one of the six insertable words) directly before the audience noun is
+    // ordinary grammar ("for Women"), never a relocated FACT — only a genuine content word can
+    // carry a fact across. An audience noun itself sitting there (e.g. two adjacent gendered words)
+    // is not "a modifier" either, by the same reasoning.
+    if (HUMANIZER_INSERTABLE_WORDS.has(modifierLower) || AUDIENCE_NOUNS.has(modifierLower)) continue
+    // Legal the instant the SOURCE already carried this exact adjacency somewhere — reordering an
+    // adjacency the source itself already asserted is not a NEW claim, it is the same claim moved.
+    const modifierInSource = wordImmediatelyBefore(sourceWordsRaw, noun)
+    if (modifierInSource && modifierInSource.toLowerCase() === modifierLower) continue
+    return true
+  }
+  return false
+}
+
 /** J4 — THE NET, deterministic, per unit, failing CLOSED to the original: EVERY check below must
  *  hold, or the rewrite is refused and the caller keeps `source.text`. THE PROMPT IS NOT THE
  *  CONTROL — THIS FUNCTION IS (J3's own words): pool phrases are third-party Amazon search data and
@@ -2612,6 +2750,10 @@ export function humanizerRewriteVerdict(
   // function word stranded at either edge of the line.
   if (humanizerAdjacentDuplicateFunctionWord(rewriteWordsRaw)) return { ok: false, reason: 'duplicate-function-word' }
   if (humanizerBoundaryInsertedFunctionWord(sourceWordsRaw, rewriteWordsRaw)) return { ok: false, reason: 'boundary-function-word' }
+  // RULING P2 (round P, Blocking): deterministic half of the claim-flip close — never relies on the
+  // referee (which never even saw a truth question before this round) to catch a modifier relocated
+  // onto the audience noun.
+  if (humanizerAudienceCrossingViolation(sourceWordsRaw, rewriteWordsRaw)) return { ok: false, reason: 'audience-noun-crossing' }
   // J4.3: length.
   if (rewrite.length > source.text.length + 6) return { ok: false, reason: 'length' }
   // J4.4: truth, re-run on the REWRITE — never trusted from multiset equality alone. A pure
@@ -2942,7 +3084,7 @@ export async function runWriterForDesign(args: {
           reasonsAll.push('fallback: writer deadline exceeded before a usable response')
           break
         }
-        const draft = await askWriter(openai, model, candidates, args.designName, args.deadlineAt)
+        const draft = await askWriter(openai, model, candidates, args.designName, args.truthCtx, args.deadlineAt)
         if (draft === WRITER_DEADLINE_SKIPPED) {
           // RULING W5: askWriter's OWN deadline check fired — never a network round trip, so it is
           // NOT a billable call (callsMade unchanged). G3 point 4: a timeout still SHIPS candidate 1
@@ -2971,8 +3113,20 @@ export async function runWriterForDesign(args: {
         // index are ALL the same safe answer — candidate 1 — and NONE of them is worth a retry (a
         // retry cannot fix a model that already answered with a well-formed but wrong shape).
         if (typeof pickRaw === 'number' && Number.isInteger(pickRaw) && pickRaw >= 1 && pickRaw <= candidates.length) {
-          picked = pickRaw
-          source = 'byModel'
+          // RULING P2: the referee's "no" is binding — a `falseAlt` entry naming THIS SAME pick
+          // vetoes it, regardless of what "pick" itself said. Never trusts the model's own promise
+          // ("never pick a candidate you list in falseAlt") to hold; enforces it here instead. An
+          // unparseable/missing `falseAlt` is simply an empty veto list (nothing to enforce), never
+          // treated as a malformed response — `falseAlt` is advisory-shaped, `pick` is the only
+          // required key, exactly as the prompt states.
+          const falseAltRaw = (draft as { falseAlt?: unknown } | null)?.falseAlt
+          const falseAlt = Array.isArray(falseAltRaw) ? falseAltRaw.filter((n): n is number => typeof n === 'number' && Number.isInteger(n)) : []
+          if (falseAlt.includes(pickRaw)) {
+            reasonsAll.push(`fallback: referee named its own pick (${pickRaw}) in falseAlt — vetoed, not shipped`)
+          } else {
+            picked = pickRaw
+            source = 'byModel'
+          }
         } else {
           reasonsAll.push(`fallback: malformed pick (${JSON.stringify(pickRaw)})`)
         }

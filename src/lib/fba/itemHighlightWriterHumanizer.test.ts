@@ -602,8 +602,12 @@ describe('RULING N2: enumerateWriterCandidates — alternates are mutually exclu
     const rank1 = withoutAlt.candidates[0]!
     expect(rank1.lengthFromTarget).toBe(0) // already perfectly on target — nothing can rank ABOVE it
     const source = units.find((u) => u.text === 'Embroidered Sweatshirts for Women')!
-    // A same-length reorder (net-legal, changes nothing the rank scores) — a genuine tie.
-    const alt: AdmittedUnit = { id: `${source.id}~alt0`, text: 'Sweatshirts for Embroidered Women', kind: source.kind, numberable: false, altOf: source.id, sourceText: source.text }
+    // A same-length reorder (net-legal, changes nothing the rank scores) — a genuine tie. RULING P2
+    // (round P): "Sweatshirts for Embroidered Women" (Embroidered relocated to directly precede the
+    // audience noun) is now refused as `audience-noun-crossing` — this test's own tiebreak scenario
+    // needs a LEGAL reorder that ties on length without crossing "Women", so it uses the OTHER
+    // already-pinned legal permutation instead (Embroidered trailing, never adjacent to "Women").
+    const alt: AdmittedUnit = { id: `${source.id}~alt0`, text: 'Sweatshirts for Women Embroidered', kind: source.kind, numberable: false, altOf: source.id, sourceText: source.text }
     expect(humanizerRewriteVerdict(source, alt.text, truthCtx)).toEqual({ ok: true })
     // The alt is placed FIRST (production always appends alts LAST — this deliberately inverts that
     // so the alt would occupy a LOWER bit / be evaluated BEFORE its source), isolating the EXPLICIT
