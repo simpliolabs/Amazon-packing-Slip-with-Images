@@ -1082,15 +1082,32 @@ export function segmentClauses(
       const nextUnit = next && 'unit' in next ? byId.get(next.unit) : undefined
       if (prevUnit?.kind === 'wear-fact' || nextUnit?.kind === 'wear-fact') { close(); return }
     }
+    // RULING L1 (fix round L1, phase-l1-rulings.md, Blocking — the last layout dependence). This
+    // hand-off used to close a clause at a ',' reached while a relation was open whenever the next
+    // unit was not itself relation-eligible — UNCONDITIONALLY, regardless of `closers`. That made
+    // the CLAUSE PARTITION a function of WHERE a pool unit sat relative to the relation clause, not
+    // of the unit multiset: the same pool unit, same glue multiset, same rendered length, refused
+    // when it preceded the relation (stayed in the one accumulating clause, paired against the
+    // relation's facts) and shipped when it followed it (closed into its own one-unit clause,
+    // exempted by `judgeWriterArrangement`'s `claimUnits.length < 2` skip — never paired with
+    // anything, in either order). The isolation this hand-off was protecting — the wear fact must
+    // never be merged into a neighbour's claim span — is already delivered by RULING K7's
+    // `wear-fact` KIND exemption in `judgeWriterArrangement` (a property of the UNIT, not of clause
+    // position), so this branch has no remaining TRUTH job. Its close() alternative is therefore
+    // gated on the SAME `closers` policy the caller already chose, instead of bypassing it: a
+    // caller whose `closers` includes ',' (readability, `GLUE_PUNCTUATION`) gets byte-identical
+    // behavior to before (the `closers.has(',')` check below would have closed it anyway); a
+    // caller whose `closers` is EMPTY (the truth walk, `TRUTH_CLAUSE_CLOSERS`) now never closes on
+    // a comma at all, so the truth walk's claim set becomes a function of the arrangement's WHOLE
+    // non-exempt unit multiset — never per clause, exactly as RULING P4/I1 already intended when
+    // they emptied `TRUTH_CLAUSE_CLOSERS`. The STACKING decision (does this comma chain a further
+    // relation-target fact into the still-open clause) is unchanged and still recorded for
+    // `chainedCommaIdx` regardless of `closers`, since chaining never closes anything either way.
     if (part.glue === ',' && relationOpen) {
-      // H1: does this comma CHAIN a further relation-target fact into the clause that is already
-      // open, or does it hand off to a DIFFERENT clause (a pool unit, the brand, or the wear fact —
-      // RULING S2's "stands alone" clause)? Only the former stays open; a comma is a real close the
-      // instant the next unit is not itself relation-eligible.
       const next = parts[idx + 1]
       const nextUnit = next && 'unit' in next ? byId.get(next.unit) : undefined
       if (nextUnit && SPEC_KINDS.has(nextUnit.kind) && !nextUnit.isBrand) { chainedCommaIdx.add(idx); return }
-      close()
+      if (closers.has(part.glue)) { close(); return }
       return
     }
     if (closers.has(part.glue)) { close(); return }
