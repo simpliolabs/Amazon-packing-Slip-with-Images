@@ -1,6 +1,6 @@
 {
   "asin": "B0DSCDZC6K",
-  "note": "RULING L2 (fix round L1, phase-l1-rulings.md, Blocking — closing review K1-value's BLOCKING 1, which found the K4 fixture's BLANK contradicted by this repo's own recorded live artefacts, in the ONE field that decides the accepted-count number). K4 sourced the design names and the pool from recorded artefacts for the first time, but invented the blank's `unisex`/`audienceLean` fields (`unisex: false`, `audienceLean: \"women\"`) rather than reading them off the record. The record says the opposite, in four places: `src/lib/fba/contentTruth.ts:3` (\"a Gildan 18000 sweatshirt + 18500 hoodie family stored audience_lean='unisex'\"), `:43` (\"live: 'Why is Women repeating Twice?' on UNISEX family B0DSCDZC6K\"), `:74` (\"B0DSCDZC6K ships Gildan 18000 sweatshirts AND 18500 hoodies under one parent\"), `docs/superpowers/specs/2026-09-05-title-judge-sees-shipped-bytes.md:28` (\"B0DSCDZC6K, unisex, 34 SKUs\"), and `src/lib/fba/audienceAssignment.test.ts:67-76` — the test named \"the live B0DSCDZC6K scenario\", where only MOTHERHUSTLER and BUSINESSBTCH are female-coded and the other four designs inherit the family's (unisex) default.\n\nThis round corrects the blank to the record: `unisex: true`, family `audienceLean: \"unisex\"`, with a NEW `audienceLeanByDesign` override (`{ \"BB\": \"female\", \"MHG\": \"female\" }`, mirroring `audienceAssignment.test.ts:67-76`'s own two female-coded designs) and a NEW `mixedFamilies: [\"sweatshirt\", \"hoodie\"]` (contentTruth.ts:74's mixed parent). BB (`Business B*tch`) is RESTORED as the family's sixth design: the K4 fixture omitted it citing phase-i1-review-value.md §1's admission measurement, but that measurement was taken against the INVENTED name \"Bonus Bonus\", never BB's own recorded name — with the real name, `buildAdmittedUnits` admits 10 units and the design accepts.\n\nMeasured end to end through the REAL `produceItemHighlightsPerDesign`, same pool, same names, blank identical in every other respect (`kv1-fixture-e2e.ts`, phase-l1-report.md): the INVENTED lean this file used to carry gave 6 of 6 designs accepted; the RECORDED lean below gives 2 of 6 (BB, MHG) — because all six live pool phrases are \"for Women\" phrases, and `phraseTruthVerdict`'s forced-gender rule (contentTruth.ts:841, field='highlights', ctx.audienceLean==='unisex') correctly refuses every one of them for the four designs that inherit the family's unisex default; BB and MHG escape only because their PER-DESIGN lean is 'female', not because their pool differs. This is the mechanism memory `unisex-lean-vs-a-women-pool-starves-the-field` already records for this exact family — the fixture was silently designing it away. The honest number is a POOL finding, not a writer defect: report the 2 of 6, do not average it with the invented 6 of 6.\n\nEverything else K4 sourced (design names/typo-corrections, the pool, the material/fit/brand/styleCode) is unchanged and remains RECORDED per its own citations below.\n\n(a) RECORDED: designKeys/designNames — the PO, RULING K4: BB='Business B*tch', BCSG='Billionaire Coming Soon', DQG='Don't Quit', EDG='Entrepreneur Definition', HDG='Hustle Definition', MHG='Mother Hustler'. The LIVE store currently holds two typos the PO is correcting: 'Billionare Coming Soon' (BCSG) and 'Hustle Definiton' (HDG) — this fixture carries the CORRECTED spellings; production listing_content on B0DSCDZC6K may still read the typo'd form until the PO's own correction ships.\n\n(a) RECORDED: pool — verbatim from the PO's own live shadow run (IH_WRITER=shadow, B0DSCDZC6K, 2026-09-23, sha f4317ce), phase-f1-report.md §0: 'Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'. This is the family's ONE shared pool (the shadow run named it once, not per design) — every design below is given the SAME six phrases, never a per-design invention.\n\n(a) RECORDED: blank fabric/construction — Gildan 18000, 50/50 (cotton/polyester) crewneck, Classic fit (RULING K4). `material` is written '50% Cotton / 50% Polyester' to match this repo's own spelling convention for a 50/50 blend.\n\n(a) RECORDED: `unisex`/`audienceLean`/`audienceLeanByDesign`/`mixedFamilies` — see this note's opening paragraphs (RULING L2).\n\n(b) STRUCTURAL DEFAULT, not independently recorded for this ASIN: `brandInCopy: false` — every Gildan-blank fixture in this codebase (blankSpecs.ts's own Gildan rows; every writer probe built on a Gildan blank) carries this value, because Gildan does not print its own name on the garment; called out here rather than silently assumed.\n\n`specFacts` is DERIVED, not recorded: the composer's own admitted-spec-fact convention for a Classic-fit, 50/50-material family is `['<fit> Fit', '<material>']` — the 'Unisex Fit' filler is a family-lean question the writer resolves per design at admission time (`buildAdmittedUnits`'s own genderedLean rule keys on the RESOLVED per-design lean, itemHighlightWriter.ts), never a fact this fixture invents by omitting or including it here.",
+  "note": "RULING M1/M2 (fix round M, phase-m1-rulings.md, Blocking — closing review phase-l1-review-value.md's BLOCKING 1 and BLOCKING 2, and phase-l1-review-truth.md). L2 corrected the blank's `unisex`/`audienceLean`/`audienceLeanByDesign`/`mixedFamilies` fields to the record, but left `specFacts` hardcoded (`[\"Classic Fit\",\"50% Cotton / 50% Polyester\"]`) beside the newly-corrected `unisex: true` blank. That hardcoded array is INCONSISTENT with the ONE pad bank the live composer reads, `ihSpecFactFillers` (`src/lib/fba/productDetailAttrs.ts:516-533`, read at `itemHighlightComposer.ts:436`): given this fixture's own blank it derives `[\"50% Cotton / 50% Polyester\",\"Classic Fit\",\"Unisex Fit\"]` — a different order, and one fact (`Unisex Fit`, 11 characters) SHORT. That missing 11 characters was the entire difference between the WRONGLY reported 2 of 6 and the honest 5 of 6, on four designs whose best case with the 2-fact pad was exactly `96c < 97c` against the accept floor. `specFacts` is therefore no longer a field this fixture carries at all: the test derives it at run time by calling `ihSpecFactFillers` on the blank below, exactly as the live composer does, so it structurally cannot drift from the blank again (RULING M1's own preferred remedy — 'delete the field and have the test call the producer, which is better, because a derived value cannot drift from the blank the way an invented one just did twice').\n\nTHE CORRECTED MECHANISM (RULING M2 — do not describe this as a gender refusal of all six phrases). Five of the pool's six phrases ('Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women') name a gender and are correctly refused by `phraseTruthVerdict`'s forced-gender rule (contentTruth.ts, field='highlights', ctx.audienceLean==='unisex') for the four designs that inherit the family's unisex default — every real composer run logs `truthDrops: {\"audience-lean-lie\":5}`, never 6. The SIXTH phrase, 'Fall Crewneck', names no gender, is admitted on every design, and is the pool unit in the rank-1 line of FIVE of the six designs (it is not a spare). Measured end to end through the REAL `produceItemHighlightsPerDesign` on this fixture's own (now-derived) specFacts, the recorded lean, and the recorded live title shape: 5 of 6 designs accept — BB, BCSG, EDG, HDG, MHG — above RULING I2's own 4-of-6 STOP floor. The one design that holds, DQG ('Don't Quit'), does NOT hold on gender: it is the family's shortest design name, and its entire admitted unit multiset sums to 94 characters against the 97-character accept floor, so the bounded search never evaluates a single arrangement (`evaluated=0`). That is a band-vs-design-name-length finding, filed, not a pool-gender one and not a writer defect (memory `unisex-lean-vs-a-women-pool-starves-the-field` still names the correct MECHANISM — a unisex lean against a mostly-gendered pool — but the correct COUNT is 5 of 6, not 2 of 6, once the pad is derived rather than invented).\n\n`titleTemplate` (NEW, RULING M5): the fixture recorded no title text at all, although the title decides the number (a parent title containing both 'Fall' and 'Crewneck' title-dedupes the pool's only ungendered phrase and drops the family back to 2 of 6). The value below is the family's own RECORDED live shape (`docs/superpowers/specs/2026-09-05-title-judge-sees-shipped-bytes.md:28-31`, 'siblings correctly read `Sweatshirt | Long Sleeve Pullover Crewneck`'), used by both the per-design test and any future e2e probe — never a hand-invented title constant.\n\n`mixedFamilies` (RULING M5 — decision recorded, not silently dropped): this field matches the record (contentTruth.ts:74, B0DSCDZC6K ships Gildan 18000 sweatshirts AND 18500 hoodies under one parent) and is KEPT here as documentation of that fact. It is NOT fed into the fixture test's own hand-built `truthCtx`, because the live Item Highlights path (`PerDesignItemHighlightsInput` / `buildItemHighlights`, listingPipeline.ts) has NO `mixedFamilies` field at all — review phase-l1-review-value.md IMPORTANT 1 measured that feeding it into the test's ctx alone makes this fixture's oracle judge a garment-noun claim ('pullover hoodie for women') `ok` when the live path would refuse it as `wrong-garment-noun`, i.e. strictly MORE permissive than any line the live path can actually judge. Threading `mixedFamilies` through the real pipeline is a real gap, filed for a future round, not fixed in this one — this fixture states the record without pretending the live path already consumes it.\n\nEverything else K4/L2 sourced is UNCHANGED and remains RECORDED per its own citations: (a) RECORDED: designKeys/designNames — the PO, RULING K4: BB='Business B*tch', BCSG='Billionaire Coming Soon', DQG=\"Don't Quit\", EDG='Entrepreneur Definition', HDG='Hustle Definition', MHG='Mother Hustler'. The LIVE store currently holds two typos the PO is correcting: 'Billionare Coming Soon' (BCSG) and 'Hustle Definiton' (HDG) — this fixture carries the CORRECTED spellings; production listing_content on B0DSCDZC6K may still read the typo'd form until the PO's own correction ships.\n\n(a) RECORDED: pool — verbatim from the PO's own live shadow run (IH_WRITER=shadow, B0DSCDZC6K, 2026-09-23, sha f4317ce), phase-f1-report.md §0: 'Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'. This is the family's ONE shared pool (the shadow run named it once, not per design) — every design below is given the SAME six phrases, never a per-design invention.\n\n(a) RECORDED: blank fabric/construction — Gildan 18000, 50/50 (cotton/polyester) crewneck, Classic fit (RULING K4). `material` is written '50% Cotton / 50% Polyester' to match this repo's own spelling convention for a 50/50 blend.\n\n(a) RECORDED: `unisex`/`audienceLean`/`audienceLeanByDesign`/`mixedFamilies` — RULING L2, citations there.\n\n(b) STRUCTURAL DEFAULT, not independently recorded for this ASIN: `brandInCopy: false` — every Gildan-blank fixture in this codebase (blankSpecs.ts's own Gildan rows; every writer probe built on a Gildan blank) carries this value, because Gildan does not print its own name on the garment; called out here rather than silently assumed.",
   "blank": {
     "brand": "Gildan",
     "brandInCopy": false,
@@ -11,9 +11,15 @@
     "styleCode": "18000",
     "audienceLean": "unisex"
   },
-  "audienceLeanByDesign": { "BB": "female", "MHG": "female" },
-  "mixedFamilies": ["sweatshirt", "hoodie"],
-  "specFacts": ["Classic Fit", "50% Cotton / 50% Polyester"],
+  "audienceLeanByDesign": {
+    "BB": "female",
+    "MHG": "female"
+  },
+  "mixedFamilies": [
+    "sweatshirt",
+    "hoodie"
+  ],
+  "titleTemplate": "THE CEO {design} Sweatshirt | Long Sleeve Pullover Crewneck",
   "pool": [
     "Embroidered Sweatshirts for Women",
     "Sweatshirts for Women Trendy",
@@ -26,34 +32,76 @@
     {
       "designKey": "BB",
       "designName": "Business B*tch",
-      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
+      "pool": [
+        "Embroidered Sweatshirts for Women",
+        "Sweatshirts for Women Trendy",
+        "Graphic Crewneck Sweatshirts Women",
+        "Fall Graphic Sweatshirts for Women",
+        "Fun Sweatshirts for Women",
+        "Fall Crewneck"
+      ]
     },
     {
       "designKey": "BCSG",
       "designName": "Billionaire Coming Soon",
       "liveTypo": "Billionare Coming Soon",
-      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
+      "pool": [
+        "Embroidered Sweatshirts for Women",
+        "Sweatshirts for Women Trendy",
+        "Graphic Crewneck Sweatshirts Women",
+        "Fall Graphic Sweatshirts for Women",
+        "Fun Sweatshirts for Women",
+        "Fall Crewneck"
+      ]
     },
     {
       "designKey": "DQG",
       "designName": "Don't Quit",
-      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
+      "pool": [
+        "Embroidered Sweatshirts for Women",
+        "Sweatshirts for Women Trendy",
+        "Graphic Crewneck Sweatshirts Women",
+        "Fall Graphic Sweatshirts for Women",
+        "Fun Sweatshirts for Women",
+        "Fall Crewneck"
+      ]
     },
     {
       "designKey": "EDG",
       "designName": "Entrepreneur Definition",
-      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
+      "pool": [
+        "Embroidered Sweatshirts for Women",
+        "Sweatshirts for Women Trendy",
+        "Graphic Crewneck Sweatshirts Women",
+        "Fall Graphic Sweatshirts for Women",
+        "Fun Sweatshirts for Women",
+        "Fall Crewneck"
+      ]
     },
     {
       "designKey": "HDG",
       "designName": "Hustle Definition",
       "liveTypo": "Hustle Definiton",
-      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
+      "pool": [
+        "Embroidered Sweatshirts for Women",
+        "Sweatshirts for Women Trendy",
+        "Graphic Crewneck Sweatshirts Women",
+        "Fall Graphic Sweatshirts for Women",
+        "Fun Sweatshirts for Women",
+        "Fall Crewneck"
+      ]
     },
     {
       "designKey": "MHG",
       "designName": "Mother Hustler",
-      "pool": ["Embroidered Sweatshirts for Women", "Sweatshirts for Women Trendy", "Graphic Crewneck Sweatshirts Women", "Fall Graphic Sweatshirts for Women", "Fun Sweatshirts for Women", "Fall Crewneck"]
+      "pool": [
+        "Embroidered Sweatshirts for Women",
+        "Sweatshirts for Women Trendy",
+        "Graphic Crewneck Sweatshirts Women",
+        "Fall Graphic Sweatshirts for Women",
+        "Fun Sweatshirts for Women",
+        "Fall Crewneck"
+      ]
     }
   ]
 }
