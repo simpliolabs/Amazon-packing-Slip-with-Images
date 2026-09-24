@@ -2252,6 +2252,26 @@ export function enumerateWriterCandidates(
     }
     bucketTurn++
   }
+  // RULING R5 (round R, Important, phase-r1-rulings.md — "the referee is never shown the
+  // alternate that matters"). Measured: the alternate of the UNIT rank 1 itself uses is shown on
+  // 0 of 8 ballot slots on BB and MHG, at pool size 6 AND at pool size 5 (with four alternates in
+  // hand) — `compareWriterCandidates`'s own LAST tiebreak (`usesAlternateSpelling`) sorts every
+  // alt-carrying candidate behind an otherwise-equal source-only one, so the round-robin bucket
+  // walk above (which never looks past an early, plentiful supply of zero-alt candidates in
+  // `remaining`'s own sorted order) can fill every slot before ever reaching one. A candidate that
+  // proposes a better spelling of a unit RANK 1 ITSELF already uses is the single most legible
+  // thing the referee could be shown beside rank 1, so one slot is reserved for the best-ranked
+  // such candidate the moment one exists — evicting only the ballot's CURRENT last slot when it is
+  // already full (never rank 1, never shrinking the ballot below its own prior size).
+  const rank1UnitIds = new Set(rank1.parts.filter((p): p is { unit: string } => 'unit' in p).map((p) => p.unit))
+  const rank1AlternateCandidate = candidatesWithAlternates
+    .filter((c) => c.parts.some((p) => 'unit' in p && !!byId.get(p.unit)?.altOf && rank1UnitIds.has(byId.get(p.unit)!.altOf!)))
+    .sort(compareWriterCandidates)[0]
+  if (rank1AlternateCandidate && !shownLines.has(rank1AlternateCandidate.line)) {
+    if (top.length < WRITER_CANDIDATE_TOP_K) top.push(rank1AlternateCandidate)
+    else top[top.length - 1] = rank1AlternateCandidate
+    shownLines.add(rank1AlternateCandidate.line)
+  }
   // RULING Q7 (round Q, Important, second half — phase-q1-rulings.md: "alternates beyond the eighth
   // pool unit are silently truncated before the search ever sees them — log or fix, never silent").
   // `bounded` already carries a boolean for this (`allOrdinaryGroups.length > ordinaryGroups.length`,
@@ -2708,36 +2728,67 @@ function humanizerPunctuationMultisetViolation(sourceText: string, rewrite: stri
  *  a defect this repo's real admitted pool text does not exhibit (no pool phrase repeats a word
  *  immediately either side of a punctuation mark), unlike the hyphenated-compound attack above,
  *  which this fix does close. */
-function humanizerPunctuationWordEdges(text: string): { endingAt: Map<number, string>; startingAt: Map<number, string> } {
+function humanizerPunctuationWordEdges(text: string): { endingAt: Map<number, string>; startingAt: Map<number, string>; matches: { start: number; end: number }[] } {
   const endingAt = new Map<number, string>()
   const startingAt = new Map<number, string>()
+  const matches: { start: number; end: number }[] = []
   for (const m of text.matchAll(WORD_RE)) {
     startingAt.set(m.index!, m[0])
     endingAt.set(m.index! + m[0].length, m[0])
+    matches.push({ start: m.index!, end: m.index! + m[0].length })
   }
-  return { endingAt, startingAt }
+  return { endingAt, startingAt, matches }
+}
+/** RULING R6 (round R, Important, phase-r1-rulings.md — "the re-key REOPENED what P5 closed").
+ *  Q7's word-pair key falls back to ONE shared sentinel (`\u0000`) for a FREE-STANDING mark's
+ *  absent side (no word directly abuts it — `endingAt`/`startingAt` have nothing at that index),
+ *  so EVERY free-standing position of that mark in a rewrite shares the identical context and is
+ *  "allowed" the instant the source carries the mark free-standing ANYWHERE. Measured, all wrongly
+ *  `{ok:true}`: `"Sweatshirts - Fall Crewneck"` -> `"Sweatshirts Fall Crewneck -"` (relocated to
+ *  the tail), `"- Sweatshirts Fall Crewneck"` (to the head), `"Fall Crewneck - Sweatshirts"`
+ *  (between two words it never sat between) — and the file's own doc comment (below, P5) named the
+ *  first of those as exactly what P5 had already closed. An absent neighbour is now keyed on its
+ *  POSITION — the exact COUNT of whole words between the mark and that edge of the string — never
+ *  on the one shared sentinel: a free-standing mark can only land back in the precise gap (by word
+ *  count from each edge) it occupied in the source, and a true string edge falls out of the same
+ *  arithmetic (0 words to that edge) with no separate case. The WORD-IDENTITY key for a side the
+ *  mark DOES abut (P5/Q7's own working case — "Long-Sleeve Fall Crewneck" -> "Fall Crewneck
+ *  Long-Sleeve") is completely untouched: this only changes what happens when no word abuts.
+ *  ONE exception, needed for the SAME reason P5/Q7's word-identity path exists at all: `WORD_RE`
+ *  itself admits an apostrophe INSIDE a token ("Lady's" is one match, not two), so a mark enclosed
+ *  BY a match (start <= i < end) never abuts a boundary at all and would otherwise fall into the
+ *  new positional path — wrongly pinning an apostrophe THAT NEVER LEFT ITS OWN WORD to the exact
+ *  word-count position that word happened to sit at, and refusing every legitimate reorder of a
+ *  phrase containing one (measured: `"Sweatshirts for Lady's"` -> `"Sweatshirts for the
+ *  Embroidered Lady's"`, wrongly `character-set`). An enclosed mark is keyed on its OWN word's
+ *  value on both sides — it travels with that word wherever the word goes, exactly like the
+ *  working hyphenated-compound case, never by position. */
+function humanizerPunctuationContext(t: string, i: number, endingAt: Map<number, string>, startingAt: Map<number, string>, matches: readonly { start: number; end: number; word: string }[]): string {
+  const enclosing = matches.find((m) => m.start <= i && i < m.end)
+  if (enclosing) return `${t[i]}|${enclosing.word}|${enclosing.word}`
+  const leftWord = endingAt.get(i) ?? `\u0000B${matches.filter((m) => m.end <= i).length}`
+  const rightWord = startingAt.get(i + 1) ?? `\u0000A${matches.filter((m) => m.start >= i + 1).length}`
+  return `${t[i]}|${leftWord}|${rightWord}`
 }
 function humanizerPunctuationContexts(text: string): ReadonlySet<string> {
   const t = text.toLowerCase()
-  const { endingAt, startingAt } = humanizerPunctuationWordEdges(t)
+  const { endingAt, startingAt, matches } = humanizerPunctuationWordEdges(t)
+  const matchesWithWord = matches.map((m) => ({ ...m, word: t.slice(m.start, m.end) }))
   const contexts = new Set<string>()
   for (let i = 0; i < t.length; i++) {
     if (!isHumanizerPunctuationChar(t[i])) continue
-    const leftWord = endingAt.get(i) ?? '\u0000'
-    const rightWord = startingAt.get(i + 1) ?? '\u0000'
-    contexts.add(`${t[i]}|${leftWord}|${rightWord}`)
+    contexts.add(humanizerPunctuationContext(t, i, endingAt, startingAt, matchesWithWord))
   }
   return contexts
 }
 function humanizerPunctuationPositionViolation(sourceText: string, rewrite: string): boolean {
   const allowed = humanizerPunctuationContexts(sourceText)
   const r = rewrite.toLowerCase()
-  const { endingAt, startingAt } = humanizerPunctuationWordEdges(r)
+  const { endingAt, startingAt, matches } = humanizerPunctuationWordEdges(r)
+  const matchesWithWord = matches.map((m) => ({ ...m, word: r.slice(m.start, m.end) }))
   for (let i = 0; i < r.length; i++) {
     if (!isHumanizerPunctuationChar(r[i])) continue
-    const leftWord = endingAt.get(i) ?? '\u0000'
-    const rightWord = startingAt.get(i + 1) ?? '\u0000'
-    const context = `${r[i]}|${leftWord}|${rightWord}`
+    const context = humanizerPunctuationContext(r, i, endingAt, startingAt, matchesWithWord)
     if (!allowed.has(context)) return true
   }
   return false

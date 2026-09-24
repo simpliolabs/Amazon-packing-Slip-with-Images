@@ -2793,7 +2793,29 @@ export async function produceItemHighlightsPerDesign(
   // (`Array.from`'s mapper runs every `worker()` invocation synchronously) — so this plain counter
   // needs no lock. Pinned: budget 18 with 10 always-invalid designs spends AT MOST 18 calls (exactly
   // 6 designs × 3 retries, never the pre-fix 24).
-  const budget = ihWriterMaxCallsBudget()
+  // RULING R4 (round R, Blocking, phase-r1-rulings.md — "the budget still starves a real family").
+  // `ihWriterMaxCallsBudget()`'s default (24) is P4's OWN "theoretical worst case for a 6-design
+  // family" — a fixed constant, never derived from how many designs this regen actually has.
+  // Measured (`w5-budget8.ts`): at 8 designs the worst-case reservation totals 26 (a 7th/8th design
+  // at 4 calls each) against that fixed 24-call budget, and the 8th design ships an EMPTY Item
+  // Highlight (`hold: 'thin-candidates'`, `reasons: ["skip: per-regen call budget (24) exhausted"]`)
+  // on a real CHILD PUSH ROW where flag-off ships a full line — the composer never even attempted
+  // it. An explicit `IH_WRITER_MAX_CALLS` override (used by this repo's own fixed-budget-starvation
+  // pins, e.g. `itemHighlightWriterRunAcceptance.test.ts`'s exact-18 test) is respected EXACTLY,
+  // never widened — an operator who deliberately sized the budget down to test starvation must see
+  // that same starvation. Only the un-overridden DEFAULT is derived from `built.perDesign.length`,
+  // widened to the family's own theoretical worst case (`IH_WRITER_RETRY_CAP` + the humanizer's own
+  // per-design reservation, `IH_HUMANIZER_CALL_BUDGET` — the SAME two constants `perDesignReservation`
+  // below already reads, applied per design here instead of per this fixture's historical six) —
+  // never SHRUNK below the pinned 24 floor for a small family. A family the flag-off path can serve
+  // in full can therefore never be starved by the humanizer alone, regardless of design count.
+  const explicitMaxCalls = (process.env.IH_WRITER_MAX_CALLS ?? '').trim()
+  const budget = /^[0-9]+$/.test(explicitMaxCalls)
+    ? ihWriterMaxCallsBudget()
+    : Math.max(
+        ihWriterMaxCallsBudget(),
+        built.perDesign.length * (IH_WRITER_RETRY_CAP + (ihHumanizerMode() === 'on' ? IH_HUMANIZER_CALL_BUDGET : 0)),
+      )
   // ROUND M6/J1-J7 (the humanizer): a design's worst-case call count is no longer bounded by
   // `IH_WRITER_RETRY_CAP` alone whenever the flag is ON — `runWriterForDesign` can then ALSO spend
   // `IH_HUMANIZER_CALL_BUDGET` (1, never retried) on the humanize stage, in addition to the picker's

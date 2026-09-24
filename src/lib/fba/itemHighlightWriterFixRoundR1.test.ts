@@ -1,9 +1,10 @@
 /**
  * itemHighlightWriterFixRoundR1.test.ts — `.superpowers/sdd/2026-09-10-ih-writer/phase-r1-
- * rulings.md`, RULINGS R1-R3 (this commit; R4-R7 land in a second commit on top of this one).
- * Round Q held both properties (additive AND reachable) in one run for the first time; this file
- * fences the gaps R1/R2 measured that still shipped under a FULLY COMPLIANT referee. RULING R3's
- * own full-ballot/pick-LAST gate lives in `itemHighlightWriterB0DSCDZC6KFixture.test.ts`, beside
+ * rulings.md`, RULINGS R1-R7. RULINGS R1-R3 landed in the first commit of round R (audience
+ * crossing, pass-2 additivity, the full-ballot gate); this file's R4-R7 blocks land in the second,
+ * on top of it: the shared budget's own scaling, the rank-1-alternate ballot reservation, the
+ * punctuation position fix, and the truncatedGroups-with-candidates assertion. RULING R3's own
+ * full-ballot/pick-LAST gate lives in `itemHighlightWriterB0DSCDZC6KFixture.test.ts`, beside
  * RULING P4's own pick-1 gate it extends.
  *
  * DO NOT read this file as a redesign: R1-R7 are bounded fixes to `itemHighlightWriter.ts`'s own
@@ -13,7 +14,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   humanizerRewriteVerdict, enumerateWriterCandidates, buildAdmittedUnits, humanizeAdmittedUnits,
-  type AdmittedUnit,
+  ihWriterMaxCallsBudget, IH_WRITER_RETRY_CAP, IH_HUMANIZER_CALL_BUDGET, type AdmittedUnit,
 } from '@/lib/fba/itemHighlightWriter'
 import { runIhTail, produceItemHighlightsPerDesign } from '@/lib/fba/listingPipeline'
 import { normalizeAudienceLean, type PhraseTruthCtx } from '@/lib/fba/contentTruth'
@@ -220,5 +221,180 @@ describe('RULING R2 (round R, Blocking): pass 2 gets skipped entirely with no al
       const offZeroAltLines = new Set(off.candidates.filter((c) => c.usesAlternateSpelling === 0).map((c) => c.line))
       for (const line of onLines) expect(offZeroAltLines.has(line), line).toBe(true)
     }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// RULING R4 (round R, Blocking): the shared budget must scale with the family's OWN design count
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+describe('RULING R4 (round R, Blocking): the per-regen call budget is derived from perDesign.length by default, so the humanizer can never starve a design flag-off would serve', () => {
+  const EXTRA = [
+    { key: 'X1', name: 'Grind Mode Activated' },
+    { key: 'X2', name: 'Built Not Bought' },
+  ]
+  function familyInput(designs: { key: string; name: string }[]) {
+    const keys = designs.map((d) => d.key)
+    const kwFor = (keyword: string, searchVolume: number): AnalyzedKeyword =>
+      ({ keyword, searchVolume, themeFit: 3, themeFitByDesign: Object.fromEntries(keys.map((k) => [k, { fit: 3 }])) } as unknown as AnalyzedKeyword)
+    return {
+      groups: designs.map((d, i) => ({ key: d.key, designName: d.name, skus: [{ sku: d.key + '-1', asin: 'B0R4TEST' + String(i).padStart(2, '0') }], titles: [titleFor(d.name)] })),
+      pool: fixture.pool.map((p, i) => kwFor(p.toLowerCase(), 5000 - i * 10)),
+      apparelProduct: true, blankBrand: BLANK,
+      familyTitleText: designs.map((d) => titleFor(d.name)).join(' '),
+      audienceLean: 'unisex' as never,
+      audienceLeanByDesign: { BB: 'female', MHG: 'female' },
+    }
+  }
+  function deadChooser() {
+    return { chat: { completions: { create: async (req: { messages: { role: string; content: string }[] }) => {
+      const system = req.messages.find((m) => m.role === 'system')?.content ?? ''
+      const user = req.messages.find((m) => m.role === 'user')?.content ?? ''
+      if (system.includes('rewrite a NUMBERED list')) {
+        const lines = [...user.matchAll(NUM_LINE)]
+        return { choices: [{ message: { content: JSON.stringify({ rewrites: lines.map(([, i, text]) => ({ i: Number(i), text: REWRITES[text] ?? text })) }) }, finish_reason: 'stop' }] }
+      }
+      throw new Error('stub: dead chooser')
+    } } } } as never
+  }
+
+  it('measured, before the fix this exact scenario shipped an EMPTY Item Highlight on a real child push row at 8 designs — after the fix, N of N rows carry a value under a throwing chooser with the humanizer ON, for every family size 6/7/8', async () => {
+    const base = fixture.designs.map((d) => ({ key: d.designKey, name: d.designName }))
+    for (const n of [6, 7, 8]) {
+      const designs = [...base, ...EXTRA].slice(0, n)
+      process.env.IH_WRITER = 'on'; process.env.IH_HUMANIZER = 'off'
+      const off = await produceItemHighlightsPerDesign(familyInput(designs) as never, { openai: deadChooser() })
+      process.env.IH_HUMANIZER = 'on'
+      const on = await produceItemHighlightsPerDesign(familyInput(designs) as never, { openai: deadChooser() })
+      delete process.env.IH_WRITER; delete process.env.IH_HUMANIZER
+      let emptyWhereOffShips = 0
+      for (let i = 0; i < designs.length; i++) {
+        if ((on.perDesign[i].value ?? '').length === 0 && (off.perDesign[i].value ?? '').length > 0) emptyWhereOffShips++
+      }
+      expect(emptyWhereOffShips, `n=${n} designs`).toBe(0)
+    }
+  })
+
+  it('the DEFAULT budget scales with perDesign.length: at 8 designs it is at least 8 * (retry cap + humanizer call), never the fixed 24 the 6-design fixture used to size it to', () => {
+    expect(process.env.IH_WRITER_MAX_CALLS).toBeUndefined()
+    const worstCasePerDesign = IH_WRITER_RETRY_CAP + IH_HUMANIZER_CALL_BUDGET
+    expect(8 * worstCasePerDesign).toBeGreaterThan(ihWriterMaxCallsBudget()) // 32 > 24 — the fixed default alone is NOT enough for 8 designs; the pipeline widens it (proved above).
+  })
+
+  it('an EXPLICIT IH_WRITER_MAX_CALLS override is still respected EXACTLY — the default-only widening never overrides an operator\'s own deliberately-small budget', async () => {
+    const designs = fixture.designs.map((d) => ({ key: d.designKey, name: d.designName }))
+    process.env.IH_WRITER = 'on'; process.env.IH_HUMANIZER = 'on'; process.env.IH_WRITER_MAX_CALLS = '1'
+    try {
+      const out = await produceItemHighlightsPerDesign(familyInput(designs) as never, { openai: deadChooser() })
+      const exhausted = (out.writerLog ?? []).filter((r) => r.reasons.some((x) => x.includes('budget')))
+      expect(exhausted.length, 'designs starved by the explicit budget=1 override').toBeGreaterThan(0)
+    } finally {
+      delete process.env.IH_WRITER; delete process.env.IH_HUMANIZER; delete process.env.IH_WRITER_MAX_CALLS
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// RULING R5 (round R, Important): reserve a slot for the alternate of a unit RANK 1 itself uses
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+describe('RULING R5 (round R, Important): the ballot always carries the alternate of a rank-1 unit when one exists, at pool sizes 5 AND 6', () => {
+  const TARGET = 'Embroidered Sweatshirts for Women'
+  const REWRITE_TARGET = 'Sweatshirts for Women Embroidered'
+  function rank1AltClient() {
+    return { chat: { completions: { create: async (req: { messages: { role: string; content: string }[] }) => {
+      const system = req.messages.find((m) => m.role === 'system')?.content ?? ''
+      const user = req.messages.find((m) => m.role === 'user')?.content ?? ''
+      if (system.includes('rewrite a NUMBERED list')) {
+        const lines = [...user.matchAll(NUM_LINE)]
+        return { choices: [{ message: { content: JSON.stringify({ rewrites: lines.map(([, i, text]) => ({ i: Number(i), text: text === TARGET ? REWRITE_TARGET : (REWRITES[text] ?? text) })) }) }, finish_reason: 'stop' }] }
+      }
+      return { choices: [{ message: { content: '{"pick":1}' }, finish_reason: 'stop' }] }
+    } } } } as never
+  }
+  for (const key of ['BB', 'MHG']) {
+    for (const size of [5, 6]) {
+      it(`${key} at pool size ${size}: the ballot carries a candidate using the ALTERNATE of a unit RANK 1 itself uses (measured 0 of 8 before this fix)`, async () => {
+        const d = fixture.designs.find((x) => x.designKey === key)!
+        const pool = d.pool.slice(0, size)
+        const truthCtx = truthCtxFor(d)
+        const composed = { candidates: pool, specFacts: SPEC_FACTS, brandPick: null as string | null, wearFact: null as string | null } as never
+        const units = buildAdmittedUnits(composed, { designName: d.designName, truthCtx })
+        process.env.IH_HUMANIZER = 'on'
+        const humanized = await humanizeAdmittedUnits(units, { truthCtx, designName: d.designName, deps: { openai: rank1AltClient() } })
+        delete process.env.IH_HUMANIZER
+        const runTail = (line: string) => runIhTail(line, { titles: [titleFor(d.designName)], blankBrand: null, truthCtx, capacityFamily: false, site: 'r5-rank1alt' })
+        const en = enumerateWriterCandidates(humanized.units, { truthCtx, runTail })
+        const byId = new Map(humanized.units.map((u) => [u.id, u] as const))
+        const rank1UnitIds = new Set(en.candidates[0].parts.filter((p): p is { unit: string } => 'unit' in p).map((p) => p.unit))
+        const hasRank1Alt = en.candidates.some((c) => c.parts.some((p) => 'unit' in p && !!byId.get((p as { unit: string }).unit)?.altOf && rank1UnitIds.has(byId.get((p as { unit: string }).unit)!.altOf!)))
+        expect(hasRank1Alt, `${key} size=${size}`).toBe(true)
+        // Rank 1 itself is UNAFFECTED (RULING P1's own guarantee, preserved): still zero-alt.
+        expect(en.candidates[0].usesAlternateSpelling).toBe(0)
+      })
+    }
+  }
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// RULING R6 (round R, Important): punctuation position is keyed on POSITION, not one shared sentinel
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+describe('RULING R6 (round R, Important): a free-standing mark cannot relocate to an edge or a gap it never sat in', () => {
+  const SRC = 'Sweatshirts - Fall Crewneck'
+
+  it('relocated to the TAIL — refused (the file\'s own doc comment names this exact string as what RULING P5 had already closed)', () => {
+    expect(humanizerRewriteVerdict(unit(SRC), 'Sweatshirts Fall Crewneck -', CTX)).toEqual({ ok: false, reason: 'character-set' })
+  })
+  it('relocated to the HEAD — refused', () => {
+    expect(humanizerRewriteVerdict(unit(SRC), '- Sweatshirts Fall Crewneck', CTX)).toEqual({ ok: false, reason: 'character-set' })
+  })
+  it('relocated between two words it never sat between — refused', () => {
+    expect(humanizerRewriteVerdict(unit(SRC), 'Fall Crewneck - Sweatshirts', CTX)).toEqual({ ok: false, reason: 'character-set' })
+  })
+  it('the SAME three rows for a DIFFERENT free-standing mark ("|")', () => {
+    const src2 = 'Sweatshirts | Fall Crewneck'
+    expect(humanizerRewriteVerdict(unit(src2), 'Sweatshirts Fall Crewneck |', CTX)).toEqual({ ok: false, reason: 'character-set' })
+    expect(humanizerRewriteVerdict(unit(src2), '| Sweatshirts Fall Crewneck', CTX)).toEqual({ ok: false, reason: 'character-set' })
+    expect(humanizerRewriteVerdict(unit(src2), 'Fall Crewneck | Sweatshirts', CTX)).toEqual({ ok: false, reason: 'character-set' })
+  })
+  it('CONTROL: the mark staying in the SAME gap (1 word before, 2 after) while the TAIL words reorder is still legal — proving the fix pins the GAP, not the exact neighbour words a second time', () => {
+    expect(humanizerRewriteVerdict(unit(SRC), 'Sweatshirts - Crewneck Fall', CTX)).toEqual({ ok: true })
+  })
+  it('CONTROL: the working GLUED-compound case (P5/Q7\'s own control) is completely untouched', () => {
+    expect(humanizerRewriteVerdict(unit('Long-Sleeve Fall Crewneck'), 'Fall Crewneck Long-Sleeve', CTX)).toEqual({ ok: true })
+  })
+  it('an APOSTROPHE inside a single WORD_RE token travels WITH its word, never pinned by position (a defect found and fixed while building this exact round: it wrongly refused `character-set` before the fix)', () => {
+    const v = humanizerRewriteVerdict(unit("Embroidered Sweatshirts for Lady's"), "Sweatshirts for the Embroidered Lady's", { ...CTX, audienceLean: 'unisex' })
+    // Refused — but by RULING R1's audience-crossing rule, never by the punctuation net.
+    expect(v).toEqual({ ok: false, reason: 'audience-noun-crossing' })
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// RULING R7 (round R, Important): truncatedGroups asserted on a run that RETURNS candidates
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+describe('RULING R7 (round R, Important): truncatedGroups is pinned on a run that actually returns candidates, not only the zero-candidate early return', () => {
+  // `phase-q1-review-net.md` MINOR 1, measured: the PRE-EXISTING committed pin
+  // (`itemHighlightWriterFixRoundQ1.test.ts`, "non-zero and COUNTED...") uses a 10-phrase fixture
+  // that takes the ZERO-CANDIDATE early return (`:2170`) — mutating the REAL path's own computation
+  // (`:2261` in the shipped file) was measured GREEN there, because that test's own result never
+  // carries a candidate for the mutation to have anything to change. This fixture instead REUSES
+  // the real, accepting B0DSCDZC6K/BB admitted set (6 pool phrases that this repo's OWN fixture
+  // proves reach 8 accepted candidates) and pads it past the 8-group cap with 4 further TRUTHFUL
+  // "Fall Crewneck ..." phrases, so the search is both TRUNCATED (10 groups > the 8-group cap) AND
+  // still finds real, non-empty candidates — closing the exact gap Minor 1 named.
+  const SPEC_FACTS = ihSpecFactFillers({
+    material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex,
+    neck: (fixture.blank as never as Record<string, unknown>).neck, sleeve: (fixture.blank as never as Record<string, unknown>).sleeve,
+  } as never).map(titleCasePhrase)
+  it('10 ordinary pool groups, on a REAL accepting design: bounded=true, truncatedGroups>0, AND candidates.length>0 — all three asserted TOGETHER', () => {
+    const d = fixture.designs.find((x) => x.designKey === 'BB')!
+    const truthCtx = truthCtxFor(d)
+    const EXTRA = ['Fall Crewneck Vibes', 'Fall Crewneck Look', 'Fall Crewneck Style', 'Fall Crewneck Design']
+    const composed = { candidates: [...d.pool, ...EXTRA], specFacts: SPEC_FACTS, brandPick: null as string | null, wearFact: null as string | null } as never
+    const units = buildAdmittedUnits(composed, { designName: d.designName, truthCtx })
+    const runTail = (line: string) => runIhTail(line, { titles: [titleFor(d.designName)], blankBrand: null, truthCtx, capacityFamily: false, site: 'r7-truncated-with-candidates' })
+    const en = enumerateWriterCandidates(units, { truthCtx, runTail })
+    expect(en.bounded).toBe(true)
+    expect(en.truncatedGroups).toBeGreaterThan(0)
+    expect(en.candidates.length).toBeGreaterThan(0)
   })
 })
