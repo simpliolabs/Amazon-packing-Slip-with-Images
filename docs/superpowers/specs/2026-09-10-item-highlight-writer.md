@@ -453,6 +453,109 @@ IMPORTED, never re-implemented, by the search. The search does not loosen what s
 every one of those gates in front of the model instead of behind a retry message the model had to
 read correctly to satisfy.
 
+## 3b. AMENDMENT 2026-09-24 (round M6 / phase-j1-rulings.md, PO 2026-09-23 verbatim "A: go with a") — the humanizer
+
+*Why.* §0 opened with the PO's own complaint: *"Crewneck Sweatshirts Women, Fall Sweatshirts for
+Women, Graphic Crewneck, 50% Cotton / 50% Polyester, Classic Fit — THIS READS AWFUL! Where is the
+humanizer?"* Nine rounds (F through L) made the field SAFE — the chooser in §3a now picks among
+lines every gate this codebase owns has already cleared — but safety and readability are different
+axes, and nothing built so far touches the second one. `buildAdmittedUnits` admits a pool phrase
+VERBATIM; `writerReadabilityVerdict` counts clauses and relation joins; no predicate anywhere asks
+whether one UNIT reads as a phrase rather than a search query. The measured result, on the
+corrected B0DSCDZC6K fixture: BB and MHG ship `Embroidered Sweatshirts for Women` in their rank-1
+line — safe, truth-clean, and still a plural noun with the audience trailing after it, because the
+pool phrase itself is a keyword string. A chooser's ceiling is the atoms it is given. So the cure is
+not another line-level gate — every gate downstream already runs correctly on whatever text a unit
+carries. It is one new stage, on the ATOM, before the chooser ever sees it.
+
+*The design.*
+
+1. **Where it sits.** One stage, `humanizeAdmittedUnits`, called from `runWriterForDesign` between
+   `buildAdmittedUnits` and `enumerateWriterCandidates` — specifically AFTER that function's own
+   free, zero-call eligibility/floor skips (so a design already about to skip the writer entirely
+   never spends this call either), and checked synchronously (never merely by the async function's
+   own early return) so `IH_HUMANIZER=off` costs not only zero calls and zero changed bytes but
+   zero changed *scheduling* — no new `await`, no new microtask hop, relative to every round before
+   this one. §3a's grammar, its chooser, `judgeWriterArrangement`, `runIhTail`,
+   `classifyStoredIhLine` and every existing gate are UNCHANGED, and run on whatever text a unit
+   carries after this stage exactly as they always ran on a raw pool phrase — nothing downstream
+   learns a new rule; this stage's only job is deciding what `AdmittedUnit.text` IS before any of
+   them run.
+2. **What is eligible.** POOL-class units only, and never the one unit carrying the mandatory brand
+   (a pool-sourced brand unit still carries `isBrand: true` regardless of its `'pool'` grammar
+   class — §2d/§2g). Every other kind is either the seller's own words (identity), a fact whose
+   exact spelling IS the fact (spec-fact, brand, wear-fact), or a bare truth-derived noun
+   (garment-head) — rewriting any of those is not humanizing, it is inventing a fact or restating
+   the seller's own words for them.
+3. **The proposer.** ONE call per design, never retried (distinct from §3a's picker retry cap). The
+   eligible units go out numbered; the model may reorder a phrase's own words and insert ONLY six
+   closed function words (`for`, `a`, `an`, `the`, `of`, `and`); it may not add, remove or change any
+   other word, and must never use `with`/`in`. The answer is
+   `{"rewrites":[{"i":<integer>,"text":"…"}, …]}`. **The prompt is not the control.** Pool phrases
+   are third-party Amazon search data and can carry text shaped like an instruction; nothing
+   downstream trusts what a rewrite SAYS, only what it structurally IS.
+4. **The net — deterministic, per unit, failing CLOSED to the source.** A rewrite ships only if ALL
+   hold:
+   1. **Content-word multiset equality** under the repo's ONE coverage predicate,
+      `coverageTokens` (`@/lib/keyword-engine/coverage-core` — never a second tokenizer). Plural
+      folding and punctuation stripping come free with it.
+   2. **A closed insertable set, and a second, independent check.** The rewrite's raw words minus
+      the source's own raw words (case-folded, multiset-aware) must be a subset of
+      `{for, a, an, the, of, and}` — AND the rewrite may never carry `with`/`in` at all,
+      unconditionally. This is deliberately TWO checks: `coverageTokens` drops stopwords before
+      comparing, so multiset equality ALONE would silently permit any stopword in, `with`/`in`
+      included — and a unit carrying a relation word reads as a relation CLAUSE to
+      `phraseTruthVerdict`/`segmentClauses`, the exact defect class rounds F through M spent nine
+      rounds closing (a relation belongs between units, in the arrangement, never inside one).
+   3. **Length.** `rewrite.length <= source.length + 6`.
+   4. **Truth, re-run.** `phraseTruthVerdict(rewrite, truthCtx)` must be `ok` — never inferred from
+      the multiset alone. A pure permutation of the same content words can still change meaning (the
+      adversary section below), so the oracle runs again on the rewrite, exactly as it ran on the
+      source at admission.
+   5. **Re-admission, independent.** The rewrite clears the SAME two owner doors the source cleared
+      once, at admission time — `scrubTrademarks`, `hasCelebrityName` — never inherits the source's
+      passing verdict. `numberable` is RECOMPUTED from the rewrite's own trailing word, never copied
+      (a reorder can move which word is last).
+   6. **Brand parity.** `isBrandCarrier` (via `lineCarriesBrand`) must read the SAME on the rewrite
+      as on the source — a rewrite can neither create nor destroy the one permitted carrier.
+   Any single failure keeps the SOURCE text and logs `IH_HUMANIZER_REJECT {design, unitId, reason}`.
+   A unit is never dropped; a rejection is never an error. A transport failure, a timeout, a
+   malformed answer, or an index mismatch against the eligible set is treated as ONE global
+   failure — every eligible unit in that call keeps its source text, and the one call is still
+   spent (never retried).
+5. **Provenance.** An accepted unit carries `sourceText` (the raw pool phrase) alongside its now-
+   rewritten `text`. Every downstream reader of `AdmittedUnit.text` inside this module — the
+   renderer, the grammar validator, the judge's truth walk, the picker's own prompt — wants the
+   CURRENT text (the accepted rewrite, or the source when none was accepted): that IS what ships,
+   and §3b's own net (point 4 above) already re-ran every one of those same predicates on the
+   rewrite before accepting it. `sourceText` exists ONLY for logging and for this stage's own
+   before/after diff; nothing else reads it. No module outside `itemHighlightWriter.ts` imports
+   `AdmittedUnit` at all (confirmed by source scan), so this enumeration is exhaustive.
+6. **Coverage is preserved, structurally.** Because point 4.1 already pins content-word multiset
+   equality under `coverageTokens`, `isCovered(keyword, line)` cannot move for any keyword the
+   source covered — the property is a consequence of the net, not a separate check.
+7. **Budget and flag.** `IH_HUMANIZER` = off (default) | on, echoed in `/api/health`. Up to two
+   calls per design under the existing `IH_WRITER_MAX_CALLS` (one humanize, one pick) —
+   `listingPipeline.ts`'s per-design call RESERVATION widens by exactly one call (`IH_HUMANIZER_
+   CALL_BUDGET`), and ONLY when the flag reads `on`, so the shared budget's arithmetic is untouched
+   with the flag at its default. With the flag off, `humanizeAdmittedUnits` is a no-op — proved
+   byte-identical against the SAME row corpus, with and without the writer path exercised, at zero
+   extra calls.
+
+*The adversary, before the code existed.* Pool phrases are third-party search data — the net, not
+the prompt, is the control, so an instruction-shaped phrase cannot become an instruction-shaped
+claim (no content word can enter that was not already there). A rewrite that is a PURE PERMUTATION
+of the same content words can still change meaning, and no token-level rule can separate it from a
+good one on its own (a gold title and a keyword-stuffed twin can be exact anagrams) — which is why
+point 4.4 re-runs the truth oracle on the rewrite rather than trusting the multiset; measured
+concretely, reordering alone turns "Real Deal Cotton" (truth-clean) into "Real Cotton Deal" (a
+material-lie against a 50/50 blank), turns "Cup Fun World" into a scrubbed trademark, and turns
+"Colors Comfort Club" into a brand-carrying line the source never was. A LEGAL but ugly rewrite is a
+quality regression, not a truth one — caught by reading the measured lines, never by a gate; the
+acceptance for this stage is therefore the pasted before/after lines themselves, not a pass/fail
+count. The band: a rewrite can only grow a unit by 6 characters, but across several eligible units
+that is real length — measured before and after, never rescued by widening the cap.
+
 ## 4. WHAT STAYS PO-GATED
 
 The Amazon push. Credits. The catalogue split.

@@ -41,8 +41,8 @@
  * never a writer defect — see the fixture's own `note` for the full citation trail and the
  * BEFORE/AFTER numbers.
  */
-import { describe, it, expect } from 'vitest'
-import { buildAdmittedUnits, enumerateWriterCandidates, runWriterForDesign, type AdmittedUnit } from '@/lib/fba/itemHighlightWriter'
+import { describe, it, expect, afterEach } from 'vitest'
+import { buildAdmittedUnits, enumerateWriterCandidates, runWriterForDesign, humanizeAdmittedUnits, isHumanizerEligible, type AdmittedUnit } from '@/lib/fba/itemHighlightWriter'
 import { runIhTail } from '@/lib/fba/listingPipeline'
 import { normalizeAudienceLean, type PhraseTruthCtx } from '@/lib/fba/contentTruth'
 import { ihSpecFactFillers } from '@/lib/fba/productDetailAttrs'
@@ -169,4 +169,144 @@ describe('RULING M1/M2 fixture: the committed B0DSCDZC6K family, specFacts DERIV
     // a 10-character design name problem).
     expect(acceptedKeys.sort(), `accepted designs: ${JSON.stringify(acceptedKeys)}`).toEqual(['BB', 'BCSG', 'EDG', 'HDG', 'MHG'])
   })
+})
+
+// ─── ROUND M6/J1-J7 (phase-j1-rulings.md; PO 2026-09-23 "A: go with a") — THE HUMANIZER'S OWN
+// ACCEPTANCE, "the eligible atoms and rank 1, per design, BEFORE and AFTER, verbatim with character
+// counts" — measured on THIS fixture, whose every field is now derived or recorded (RULING M6's own
+// precondition). Built AFTER the M1-M5 fixture corrections above, per the ruling's own ordering.
+describe('ROUND M6/J1-J7: the humanizer, measured on this same corrected fixture — eligible atoms + rank 1, BEFORE and AFTER, per design', () => {
+  afterEach(() => { delete process.env.IH_HUMANIZER })
+
+  // SAME truthCtx shape the M1/M2 describe block above builds (never `mixedFamilies` — RULING M5) —
+  // re-declared locally because `describe` blocks do not share each other's `const`s.
+  const truthCtxBase: PhraseTruthCtx = {
+    garmentFamily: fixture.blank.garmentFamily as 'sweatshirt',
+    spec: { material: fixture.blank.material, fit: fixture.blank.fit, unisex: fixture.blank.unisex } as never,
+    allowedBrand: fixture.blank.brandInCopy ? fixture.blank.brand : null,
+    audience: 'adult',
+    field: 'highlights',
+  }
+
+  // Hand-authored, net-legal rewrite table (reorder-only or insert-from-the-closed-set-only — every
+  // entry independently verified against the REAL `humanizerRewriteVerdict` in
+  // `itemHighlightWriterHumanizer.test.ts`'s own property suite, never asserted here without proof).
+  // "Graphic Crewneck Sweatshirts Women" -> "...for Women" is the round's OWN worked example (J1's
+  // WHY section: an audience word "stranded on the end" with no "for").
+  const REWRITES: Record<string, string> = {
+    'Embroidered Sweatshirts for Women': 'Embroidered Sweatshirts for Women',
+    'Sweatshirts for Women Trendy': 'Trendy Sweatshirts for Women',
+    'Graphic Crewneck Sweatshirts Women': 'Graphic Crewneck Sweatshirts for Women',
+    'Fall Graphic Sweatshirts for Women': 'Fall Graphic Sweatshirts for Women',
+    'Fun Sweatshirts for Women': 'Fun Sweatshirts for Women',
+    'Fall Crewneck': 'Fall Crewneck',
+  }
+  function stubHumanizeAndPickClient() {
+    return {
+      chat: {
+        completions: {
+          create: async (req: { messages: { role: string; content: string }[] }) => {
+            const system = req.messages.find((m) => m.role === 'system')?.content ?? ''
+            const user = req.messages.find((m) => m.role === 'user')?.content ?? ''
+            if (system.includes('rewrite a NUMBERED list')) {
+              const lines = [...user.matchAll(/^(\d+)\.\s(.+)$/gm)]
+              const rewrites = lines.map(([, i, text]) => ({ i: Number(i), text: REWRITES[text] ?? text }))
+              return { choices: [{ message: { content: JSON.stringify({ rewrites }) }, finish_reason: 'stop' }] }
+            }
+            return { choices: [{ message: { content: JSON.stringify({ pick: 1 }) }, finish_reason: 'stop' }] }
+          },
+        },
+      },
+    } as never
+  }
+
+  // MEASURED (2026-09-24, this fixture, this stub table) — pinned so a future change to admission,
+  // the net or the search that moves ANY of these numbers fails this test instead of passing
+  // silently. BB/MHG (women lean) admit all 6 pool phrases and the humanizer touches 2 of them
+  // (reorder + insert "for"); BCSG/EDG/HDG (unisex default) admit only "Fall Crewneck", already
+  // natural, untouched; DQG never reaches this stage (it holds on the 94c-vs-97c floor problem —
+  // RULING M2 — before `runWriterForDesign` ever calls the humanizer).
+  const EXPECTED: Record<string, { eligibleBefore: string[]; eligibleAfter: string[]; rank1Before: string; rank1After: string }> = {
+    BB: {
+      eligibleBefore: ['Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
+      eligibleAfter: ['Embroidered Sweatshirts for Women', 'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
+      rank1Before: 'Business B*tch, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
+      rank1After: 'Business B*tch, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
+    },
+    BCSG: {
+      eligibleBefore: ['Fall Crewneck'], eligibleAfter: ['Fall Crewneck'],
+      rank1Before: 'Billionaire Coming Soon Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+      rank1After: 'Billionaire Coming Soon Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+    },
+    // DQG holds (RULING M2's 94c-vs-97c floor problem) — never reached by the rank1 columns, which
+    // are unused for this key; see the `if (d.designKey === 'DQG')` branch below.
+    DQG: { eligibleBefore: ['Fall Crewneck'], eligibleAfter: ['Fall Crewneck'], rank1Before: '', rank1After: '' },
+    EDG: {
+      eligibleBefore: ['Fall Crewneck'], eligibleAfter: ['Fall Crewneck'],
+      rank1Before: 'Entrepreneur Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+      rank1After: 'Entrepreneur Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+    },
+    HDG: {
+      eligibleBefore: ['Fall Crewneck'], eligibleAfter: ['Fall Crewneck'],
+      rank1Before: 'Hustle Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+      rank1After: 'Hustle Definition Sweatshirt, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit, Unisex Fit',
+    },
+    MHG: {
+      eligibleBefore: ['Embroidered Sweatshirts for Women', 'Sweatshirts for Women Trendy', 'Graphic Crewneck Sweatshirts Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
+      eligibleAfter: ['Embroidered Sweatshirts for Women', 'Trendy Sweatshirts for Women', 'Graphic Crewneck Sweatshirts for Women', 'Fall Graphic Sweatshirts for Women', 'Fun Sweatshirts for Women', 'Fall Crewneck'],
+      rank1Before: 'Mother Hustler, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
+      rank1After: 'Mother Hustler, Embroidered Sweatshirts for Women, Fall Crewneck, with 50% Cotton / 50% Polyester, Classic Fit',
+    },
+  }
+
+  for (const d of fixture.designs) {
+    it(`design ${d.designKey}: eligible atoms + rank-1, BEFORE (IH_HUMANIZER=off) and AFTER (IH_HUMANIZER=on)`, async () => {
+      const truthCtx: PhraseTruthCtx = { ...truthCtxBase, audienceLean: leanForDesign(d.designKey), designTokens: [d.designName] } as PhraseTruthCtx
+      const composed = { candidates: d.pool, specFacts: SPEC_FACTS, brandPick: null as string | null, wearFact: null as string | null } as never
+
+      process.env.IH_HUMANIZER = 'off'
+      const unitsBefore: AdmittedUnit[] = buildAdmittedUnits(composed, { designName: d.designName, truthCtx })
+      const eligibleBefore = unitsBefore.filter(isHumanizerEligible).map((u) => u.text)
+      const runTailBefore = (line: string) => runIhTail(line, { titles: [titleFor(d.designName)], blankBrand: null, truthCtx, capacityFamily: false, site: 'm6-fixture-before' })
+      const rBefore = await runWriterForDesign({ composed, fallbackHold: 'under-floor-no-repeat', designName: d.designName, truthCtx, runTail: runTailBefore, deps: { openai: stubHumanizeAndPickClient() } })
+
+      process.env.IH_HUMANIZER = 'on'
+      const humanized = await humanizeAdmittedUnits(unitsBefore, { truthCtx, designName: d.designName, deps: { openai: stubHumanizeAndPickClient() } })
+      const eligibleAfter = humanized.units.filter(isHumanizerEligible).map((u) => u.text)
+      const runTailAfter = (line: string) => runIhTail(line, { titles: [titleFor(d.designName)], blankBrand: null, truthCtx, capacityFamily: false, site: 'm6-fixture-after' })
+      const rAfter = await runWriterForDesign({ composed, fallbackHold: 'under-floor-no-repeat', designName: d.designName, truthCtx, runTail: runTailAfter, deps: { openai: stubHumanizeAndPickClient() } })
+
+      console.log(JSON.stringify({
+        tag: 'M6_HUMANIZER_ACCEPTANCE', design: d.designName,
+        eligibleBefore: eligibleBefore.map((t) => `${t} [${t.length}c]`),
+        eligibleAfter: eligibleAfter.map((t) => `${t} [${t.length}c]`),
+        rank1Before: rBefore.value ? `${rBefore.value} [${rBefore.value.length}c]` : rBefore.reasons,
+        rank1After: rAfter.value ? `${rAfter.value} [${rAfter.value.length}c]` : rAfter.reasons,
+        humanizeCalls: humanized.calls, humanizeAccepted: humanized.accepted, humanizeRejected: humanized.rejected,
+      }))
+
+      const expected = EXPECTED[d.designKey]
+      expect(eligibleBefore).toEqual(expected.eligibleBefore)
+      expect(eligibleAfter).toEqual(expected.eligibleAfter)
+      expect(rBefore.value || `HOLD: ${rBefore.reasons.join('; ')}`).toBe(d.designKey === 'DQG' ? `HOLD: ${rBefore.reasons.join('; ')}` : expected.rank1Before)
+      expect(rAfter.value || `HOLD: ${rAfter.reasons.join('; ')}`).toBe(d.designKey === 'DQG' ? `HOLD: ${rAfter.reasons.join('; ')}` : expected.rank1After)
+      if (d.designKey === 'DQG') {
+        // RULING M2: DQG holds on the floor-vs-name-length problem — but its naive best-case join
+        // (identity + specFacts + "Fall Crewneck" + heads, plain-comma-joined) DOES clear
+        // `runWriterForDesign`'s own cheap pre-check, so — unlike a design with fewer than 2 admitted
+        // units — it DOES reach and spend the humanizer's one call; `enumerateWriterCandidates`'s
+        // REAL grammar-constrained search (relation clause required, garment-head abutment, etc.)
+        // is what finds zero in-band candidates. Its ONE eligible atom ("Fall Crewneck") is already
+        // natural (unchanged by the humanizer either way), so the hold reason is IDENTICAL before
+        // and after regardless.
+        expect(rBefore.accepted).toBe(false)
+        expect(rAfter.accepted).toBe(false)
+        expect(humanized.calls).toBe(1)
+        expect(rAfter.calls).toBe(1) // the humanizer's own call, spent, then zero candidates — never a picker call (no taste to exercise among zero).
+        expect(rAfter.reasons).toEqual(rBefore.reasons)
+      } else {
+        expect(humanized.accepted + humanized.rejected).toBe(expected.eligibleBefore.length)
+      }
+    })
+  }
 })
