@@ -240,6 +240,82 @@ describe('RULING Q3 (round Q, Blocking): the referee prompt is qualified, and fa
   })
 })
 
+// ─── RULING P3 (round P), pinned here for the FIRST time (phase-p1-review-net.md IMPORTANT 2: a
+// mutant deleting it was GREEN because no committed test exercised it at all) ─────────────────────
+describe('RULING P3 (round P, Blocking): the non-ASCII per-CHARACTER case check — Café/Piñata/Ж all refuse case, pinned for the first time this programme', () => {
+  it('Café -> CafÉ (accented Latin, invisible to WORD_RE) refuses case', () => {
+    expect(humanizerRewriteVerdict(unit('Café Fall Crewneck'), 'CafÉ Fall Crewneck', CTX)).toEqual({ ok: false, reason: 'case' })
+  })
+  it('Piñata -> PiÑata refuses case', () => {
+    expect(humanizerRewriteVerdict(unit('Piñata Fall Crewneck'), 'PiÑata Fall Crewneck', CTX)).toEqual({ ok: false, reason: 'case' })
+  })
+  it('Cyrillic ж -> Ж refuses case', () => {
+    expect(humanizerRewriteVerdict(unit('жFall Crewneck'), 'ЖFall Crewneck', CTX)).toEqual({ ok: false, reason: 'case' })
+  })
+})
+
+// ─── RULING Q4: the case exemption checked against the source's CASE-FOLDED budget ───────────────
+describe('RULING Q4 (round Q, Blocking): the insertable-word canonical-lowercase exemption is checked against the CASE-FOLDED remaining budget, not the one exact-cased key the loop happens to hold', () => {
+  it('measured bug rows (phase-p1-review-net.md BLOCKING 3), pinned RED: source-owned "The"/"For"/"And" LOWERCASED by the rewrite is now refused', () => {
+    expect(humanizerRewriteVerdict(unit('The Fall Crewneck Women'), 'Fall Crewneck the Women', CTX)).toEqual({ ok: false, reason: 'case' })
+    expect(humanizerRewriteVerdict(unit('Sweatshirts For Women Fall'), 'Sweatshirts for Women Fall', CTX)).toEqual({ ok: false, reason: 'case' })
+    expect(humanizerRewriteVerdict(unit('Fall And Crewneck Women'), 'Fall Crewneck and Women', CTX)).toEqual({ ok: false, reason: 'case' })
+  })
+
+  it('the legitimate relocation stays GREEN: "The Fall Crewneck Women" -> "Fall Crewneck The Women" keeps the source\'s own exact casing', () => {
+    expect(humanizerRewriteVerdict(unit('The Fall Crewneck Women'), 'Fall Crewneck The Women', CTX)).toEqual({ ok: true })
+  })
+
+  it('a GENUINELY new insertable word (source carries none of it at any casing) still passes via the canonical-lowercase exemption — the exemption is narrowed, not removed', () => {
+    expect(humanizerRewriteVerdict(unit('Graphic Crewneck Sweatshirts Women'), 'Graphic Crewneck Sweatshirts for Women', CTX)).toEqual({ ok: true })
+  })
+
+  it('the reverse direction (source lowercase "the", rewrite Title-cased "The") is unaffected — still refused (unchanged control)', () => {
+    expect(humanizerRewriteVerdict(unit('Fall the Crewneck Women'), 'Fall Crewneck The Women', CTX)).toEqual({ ok: false, reason: 'case' })
+  })
+})
+
+// ─── RULING Q7 (first half): punctuation position keyed on the neighbour WORD pair ───────────────
+describe('RULING Q7 (round Q, Important, first half): punctuation position keyed on the neighbour WORD pair, not the neighbour CHARACTERS', () => {
+  it('measured bug (phase-p1-review-net.md IMPORTANT 1), pinned RED: a hyphen relocated between an UNRELATED word pair that merely shares the same boundary LETTERS no longer passes', () => {
+    const v = humanizerRewriteVerdict(unit('Long-Sleeve Strong Sweatshirts'), 'Long Sleeve Strong-Sweatshirts', CTX)
+    expect(v).toEqual({ ok: false, reason: 'character-set' })
+  })
+  it('the SAME reordering rows, pinned RED', () => {
+    expect(humanizerRewriteVerdict(unit('Long-Sleeve Strong Sweatshirts'), 'Strong-Sweatshirts Long Sleeve', CTX)).toEqual({ ok: false, reason: 'character-set' })
+    expect(humanizerRewriteVerdict(unit('Long-Sleeve Snug Sweatshirts'), 'Long Sleeve Snug-Sweatshirts', CTX)).toEqual({ ok: false, reason: 'character-set' })
+  })
+  it('CONTROL, pinned GREEN: the compound the source DID bind travels as a unit — reordering "Long-Sleeve Fall Crewneck" to "Fall Crewneck Long-Sleeve" keeps the SAME two neighbour words either side of the hyphen', () => {
+    expect(humanizerRewriteVerdict(unit('Long-Sleeve Fall Crewneck'), 'Fall Crewneck Long-Sleeve', CTX)).toEqual({ ok: true })
+  })
+  it('KNOWN RESIDUAL, measured not claimed closed: a mark relocated between two OTHER occurrences of an identical word pair can still pass — this repo\'s real admitted pool text never repeats a word immediately either side of a punctuation mark', () => {
+    const v = humanizerRewriteVerdict(unit('50/50 Cotton 50 50 Crewneck'), '50 50 Cotton 50/50 Crewneck', CTX)
+    expect(v).toEqual({ ok: true }) // residual — documented, not silently claimed fixed.
+  })
+})
+
+// ─── RULING Q7 (second half): truncated alt-groups are logged as a COUNT, never silent ───────────
+describe('RULING Q7 (round Q, Important, second half): truncatedGroups is a real count on the result, never only the pre-existing boolean', () => {
+  it('zero on the committed fixture (well under the 8-group cap)', async () => {
+    const truthCtx: PhraseTruthCtx = { ...CTX, audienceLean: 'women', designTokens: ['Test'] }
+    const units = buildAdmittedUnits({ candidates: ['Fall Crewneck', 'Graphic Tee'], specFacts: ['Classic Fit'], brandPick: null, wearFact: null } as never, { designName: 'Test', truthCtx })
+    const en = enumerateWriterCandidates(units, { truthCtx, runTail: (line) => ({ value: line, hold: null }) })
+    expect(en.truncatedGroups).toBe(0)
+  })
+
+  it('non-zero and COUNTED once a design carries more than WRITER_CANDIDATE_MAX_POOL_UNITS (8) ordinary pool groups', async () => {
+    const truthCtx: PhraseTruthCtx = { ...CTX, audienceLean: 'unisex', designTokens: ['Test'] }
+    // 10 ordinary pool phrases, each 2+ words so none is dropped by the short-atom skip — the cap
+    // (8) is on GROUP COUNT, so this exercises the same truncation `bounded` already flagged, now
+    // as a real number.
+    const candidates = Array.from({ length: 10 }, (_, i) => `Fall Crewneck ${i}`)
+    const units = buildAdmittedUnits({ candidates, specFacts: ['Classic Fit'], brandPick: null, wearFact: null } as never, { designName: 'Test', truthCtx })
+    const en = enumerateWriterCandidates(units, { truthCtx, runTail: (line) => ({ value: line, hold: null }) })
+    expect(en.bounded).toBe(true)
+    expect(en.truncatedGroups).toBeGreaterThan(0)
+  })
+})
+
 // ─── RULING Q1: additive AND reachable, proved in the SAME run, on the REAL fixture ───────────────
 describe('RULING Q1 (round Q, Blocking): pass 2 gets its OWN evaluation budget — additive (candidate 1 byte-identical to flag-off) AND reachable (an alt-carrying candidate reaches a BOUNDED search on BB/MHG at the family\'s real pool size 6) in the SAME run', () => {
   const SPEC_FACTS = ihSpecFactFillers({

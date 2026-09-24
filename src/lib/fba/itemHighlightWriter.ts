@@ -1844,6 +1844,12 @@ export interface EnumerateWriterCandidatesResult {
    *  the instant this would go true, so `evaluated`/the pool units considered are never exceeded,
    *  never merely reported after the fact. */
   bounded: boolean
+  /** RULING Q7 (round Q, Important): how many of the design's own alt-groups (source + its
+   *  alternates, ONE mask bit) were dropped by `WRITER_CANDIDATE_MAX_POOL_UNITS` before the search
+   *  ever saw them — logged as a COUNT (never only the `bounded` boolean) so this specific class of
+   *  truncation is never silent. Zero on every family this repo currently pushes (the fixture tops
+   *  out at 6 ordinary groups); non-zero only once a design's OWN admitted pool exceeds the cap. */
+  truncatedGroups: number
 }
 
 /** G3 point 1's bound, DOCUMENTED (the ruling's own words: "the bound is documented and logged"):
@@ -2161,7 +2167,7 @@ export function enumerateWriterCandidates(
   // (a source-only line is always a special case of the full search) — if the easier question has no
   // answer, the harder one's answer is never consulted.
   if (candidatesSourceOnly.length === 0) {
-    return { candidates: [], evaluated: pass1Budget.count, bounded }
+    return { candidates: [], evaluated: pass1Budget.count, bounded, truncatedGroups: Math.max(0, allOrdinaryGroups.length - ordinaryGroups.length) }
   }
   const rankedSourceOnly = [...candidatesSourceOnly].sort(compareWriterCandidates)
   // Every entry here has `usesAlternateSpelling === 0` by construction (no alternate was ever a mask
@@ -2217,7 +2223,14 @@ export function enumerateWriterCandidates(
     }
     bucketTurn++
   }
-  return { candidates: top, evaluated: pass1Budget.count + pass2Budget.count, bounded }
+  // RULING Q7 (round Q, Important, second half — phase-q1-rulings.md: "alternates beyond the eighth
+  // pool unit are silently truncated before the search ever sees them — log or fix, never silent").
+  // `bounded` already carries a boolean for this (`allOrdinaryGroups.length > ordinaryGroups.length`,
+  // set above), but a boolean cannot tell a caller/log HOW MANY alt-groups were dropped — logged as
+  // an actual count here so a future round that raises the accepted-rewrite rate can see the number
+  // grow instead of merely re-discovering the boolean was already true.
+  const truncatedGroups = Math.max(0, allOrdinaryGroups.length - ordinaryGroups.length)
+  return { candidates: top, evaluated: pass1Budget.count + pass2Budget.count, bounded, truncatedGroups }
 }
 
 /** W1: the prompt — the admitted units grouped by kind WITH THEIR IDS, the design name EXACTLY as
@@ -2646,27 +2659,56 @@ function humanizerPunctuationMultisetViolation(sourceText: string, rewrite: stri
  *  compound word." Measured: `"Sweatshirts - Fall Crewneck"` -> `"Sweatshirts Fall Crewneck -"`
  *  (the SAME single hyphen, relocated to the tail) and -> `"Sweatshirts Fall-Crewneck"` (glued
  *  mid-word, MAKING a compound the source never had) both passed O6's multiset check unchanged —
- *  the count of hyphens (1) never moved, only where it sat. Fenced by CONTEXT: every punctuation
- *  character in the rewrite must occur between the SAME pair of case-folded neighbouring
- *  characters (or a string edge, `'\0'`) that character occupied SOMEWHERE in the source — a
- *  reorder that carries a punctuation mark's own neighbours along with it (there is no such case
- *  in this net's admitted pool text, but the rule does not depend on that) still passes; one that
- *  drops it at a NEW edge or glues it into a word it never touched does not. */
+ *  the count of hyphens (1) never moved, only where it sat.
+ *  RULING Q7 (round Q, Important, first half — phase-q1-rulings.md: "P5 bounded punctuation by
+ *  neighbour CHARACTER, so a source's single hyphen or slash still moves into a new compound
+ *  word"). P5's context key was the neighbour CHARACTERS, so any OTHER word pair sharing the same
+ *  boundary letters was an equally "allowed" home — measured (`p1b-punct.ts`,
+ *  `phase-p1-review-net.md` IMPORTANT 1): `"Long-Sleeve Strong Sweatshirts"` ->
+ *  `"Long Sleeve Strong-Sweatshirts"` wrongly ACCEPTED (the mark's neighbour letters, `g`/`s`,
+ *  coincided with a word pair — "Strong"/"Sweatshirts" — the source never bound at all). The
+ *  context key is now the neighbour WORD pair (`WORD_RE`-tokenized, case-folded), not the
+ *  neighbour characters: every punctuation character in the rewrite must sit between the SAME two
+ *  WORDS (or a string edge, `'\0'`) it sat between SOMEWHERE in the source — a reorder that carries
+ *  a mark's own two neighbour words along with it still passes; one that drops it at a new edge or
+ *  glues it between two words it never sat between does not. KNOWN RESIDUAL, measured and left
+ *  open rather than silently claimed closed (`itemHighlightWriterFixRoundQ1.test.ts`, "RULING Q7
+ *  residual"): when the SAME word occurs more than once in a phrase (e.g. `"50/50 Cotton 50 50
+ *  Crewneck"`), the word-VALUE key cannot distinguish which occurrence of that word the mark sat
+ *  next to, so a mark can still relocate between two OTHER occurrences of the identical word pair —
+ *  a defect this repo's real admitted pool text does not exhibit (no pool phrase repeats a word
+ *  immediately either side of a punctuation mark), unlike the hyphenated-compound attack above,
+ *  which this fix does close. */
+function humanizerPunctuationWordEdges(text: string): { endingAt: Map<number, string>; startingAt: Map<number, string> } {
+  const endingAt = new Map<number, string>()
+  const startingAt = new Map<number, string>()
+  for (const m of text.matchAll(WORD_RE)) {
+    startingAt.set(m.index!, m[0])
+    endingAt.set(m.index! + m[0].length, m[0])
+  }
+  return { endingAt, startingAt }
+}
 function humanizerPunctuationContexts(text: string): ReadonlySet<string> {
   const t = text.toLowerCase()
+  const { endingAt, startingAt } = humanizerPunctuationWordEdges(t)
   const contexts = new Set<string>()
   for (let i = 0; i < t.length; i++) {
     if (!isHumanizerPunctuationChar(t[i])) continue
-    contexts.add(`${t[i]}|${i > 0 ? t[i - 1] : '\u0000'}|${i + 1 < t.length ? t[i + 1] : '\u0000'}`)
+    const leftWord = endingAt.get(i) ?? '\u0000'
+    const rightWord = startingAt.get(i + 1) ?? '\u0000'
+    contexts.add(`${t[i]}|${leftWord}|${rightWord}`)
   }
   return contexts
 }
 function humanizerPunctuationPositionViolation(sourceText: string, rewrite: string): boolean {
   const allowed = humanizerPunctuationContexts(sourceText)
   const r = rewrite.toLowerCase()
+  const { endingAt, startingAt } = humanizerPunctuationWordEdges(r)
   for (let i = 0; i < r.length; i++) {
     if (!isHumanizerPunctuationChar(r[i])) continue
-    const context = `${r[i]}|${i > 0 ? r[i - 1] : '\u0000'}|${i + 1 < r.length ? r[i + 1] : '\u0000'}`
+    const leftWord = endingAt.get(i) ?? '\u0000'
+    const rightWord = startingAt.get(i + 1) ?? '\u0000'
+    const context = `${r[i]}|${leftWord}|${rightWord}`
     if (!allowed.has(context)) return true
   }
   return false
@@ -2712,11 +2754,32 @@ function humanizerCaseViolation(sourceText: string, rewrite: string): boolean {
   const rewriteWordsCased = humanizerRawWordsCased(rewrite)
   const remaining = new Map<string, number>()
   for (const w of sourceWordsCased) remaining.set(w, (remaining.get(w) ?? 0) + 1)
+  // RULING Q4 (round Q, Blocking — phase-q1-rulings.md, "the case exemption fires backwards").
+  // O3's OWN doc comment states the exemption "exists for words the rewrite adds BEYOND the
+  // source's own budget, never for one the source already owned at that exact casing" — the code
+  // below it did the opposite: when the EXACT-cased lookup failed (source owns "For", rewrite
+  // writes "for"), the canonical-lowercase exemption fired anyway and passed it, because it only
+  // ever checked the ONE exact-cased key the loop happened to still be holding, never every cased
+  // spelling of the SAME word. Measured (`p1a-case.ts` rows 30/32/34, `phase-p1-review-net.md`
+  // BLOCKING 3): `"Sweatshirts For Women Fall"` -> `"Sweatshirts for Women Fall"` wrongly ACCEPTED.
+  // `caseFoldedLeft` sums the remaining count across EVERY key in `remaining` sharing this word's
+  // lowercase form — recomputed fresh each call (never snapshotted once), so consuming one cased
+  // spelling of a word correctly starves a LATER occurrence's own attempt at the exemption too. A
+  // relocation that keeps the source's exact casing ("The Fall Crewneck Women" -> "Fall Crewneck
+  // The Women") is unaffected: it matches at the exact-case lookup above and never reaches this
+  // check at all.
+  const caseFoldedLeft = (lower: string): number => {
+    let total = 0
+    for (const [key, count] of remaining) if (key.toLowerCase() === lower) total += count
+    return total
+  }
   for (const w of rewriteWordsCased) {
     const left = remaining.get(w) ?? 0
     if (left > 0) { remaining.set(w, left - 1); continue } // exact-case reuse of one of the source's own words
     const lower = w.toLowerCase()
-    if (HUMANIZER_INSERTABLE_WORDS.has(lower) && w === lower) continue // a genuinely NEW word, in its one canonical (lowercase) spelling
+    // Q4: genuinely NEW, canonical lowercase, AND nothing of this word is left in the source's own
+    // budget at ANY casing — never merely "this one exact spelling wasn't the leftover key".
+    if (HUMANIZER_INSERTABLE_WORDS.has(lower) && w === lower && caseFoldedLeft(lower) === 0) continue
     return true // this exact CASED spelling was never one of the source's own words, and is not a canonically-cased insertion either
   }
   // RULING P3 (round P, Blocking — phase-p1-rulings.md): the WORD-level check above reads
@@ -3184,6 +3247,7 @@ export async function runWriterForDesign(args: {
   console.log(JSON.stringify({
     tag: 'IH_WRITER_CANDIDATES', design: args.designName,
     evaluated: enumerated.evaluated, bounded: enumerated.bounded, found: enumerated.candidates.length,
+    truncatedGroups: enumerated.truncatedGroups,
   }))
   // G3 point 4: "Zero candidates — the composer's own result stands, with 0 calls [beyond whatever
   // the humanizer already spent]." The ONLY case this function ever returns `accepted: false` for,
