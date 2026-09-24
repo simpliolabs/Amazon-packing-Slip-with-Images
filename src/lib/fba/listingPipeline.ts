@@ -2592,7 +2592,13 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
     // per-design STRICT-NAMES ship path can never honor it — an exemption sourced from the
     // family title would be circular here for the same reason it is at the bullets/description/
     // title ship door (`perChildDesignScope`, `familyTitleText: ''`).
-    { familyTitleText: '', poolKeywords: pool.map((k) => k.keyword), strictNames: true },
+    // U2 (Round U, cross-design leak) — `phraseNames: false`: this composer keeps the ORIGINAL
+    // per-token bag-of-words name matching, unchanged. The phrase-based fix (a multi-word name's
+    // surviving tokens must appear as one contiguous phrase, not any bare one of them) targets the
+    // per-child bullets/description ship door specifically (measured, cost1/cost3.probe.test.ts);
+    // this composer's own pad-budget tests are pinned to specific composed strings under the old
+    // semantics, and `itemHighlightWriter.ts`/this programme is explicitly fenced out of this round.
+    { familyTitleText: '', poolKeywords: pool.map((k) => k.keyword), strictNames: true, phraseNames: false },
   )
 
   const perDesign: PerDesignItemHighlight[] = groups.map((g) => {
@@ -10474,8 +10480,50 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * it in the title branch (:10678), and the section-regen rebuild (below, :11370ish) populates it
    * from stored per-child titles BEFORE the bullets/description stages run — never from an output one
    * path does not produce. */
-  const perChildDesignVocab = designGroupContexts.map((c) => ({ key: c.key, name: c.designName }))
-  const perChildBaseScope = buildForeignDesignTokens(perChildDesignVocab, { familyTitleText: '', poolKeywords: [], strictNames: true })
+  /* U3 (Round U, cross-design leak) — measured (cleared.probe.test.ts): BOTH documented degraded
+   * values of the stored `designName` column disarm this scope completely for the design whose
+   * identity failed — `''` (S4/T4's own refusal) and the designKey-derived LABEL the FULL regen
+   * itself stores whenever `extractDesignName` comes back empty (e.g. "Bb", :10886 below). With
+   * either value stored, HDG and MHG both leak "Business B*tch" in their bullets AND descriptions
+   * on a bullets-only / description-only regen — every sibling's foreign set loses BB's tokens the
+   * instant BB's own row degrades, because this scope's ONLY source was that one nullable column.
+   * The stored TITLE still carries the slogan in both degraded arms (it is what the child's title
+   * has always said), so recover a vocabulary phrase FROM the title with the SAME deterministic,
+   * no-vision/no-LLM heuristic the T4 rebuild already uses as its own last resort
+   * (`leadingDesignPhrase`, :6796) whenever the stored name is empty or is that generated label —
+   * never overriding a name that actually resolved. Non-alphanumeric characters are normalized to
+   * spaces before the heuristic runs (rather than calling it on the raw title): `leadingDesignPhrase`
+   * cleans each word by DELETING (not splitting on) punctuation, which MERGES "B*tch" into one word
+   * "Btch", while a bullet's prose form of the same phrase always SPLITS on the asterisk into two
+   * tokens ("b"+"tch") once it reaches `designScopeTokens`'s one canonical tokenizer — feeding the
+   * merged form back through that same tokenizer built a phrase that could never match its own
+   * slogan quoted in running text. Pre-splitting on punctuation here keeps both paths converging on
+   * the identical token sequence. */
+  const allVocabKeys = designGroupContexts.map((c) => c.key)
+  const vocabNameFor = (c: { key: string; designName: string; title: string }): string => {
+    const stored = (c.designName ?? '').trim()
+    const label = deriveDesignLabel(c.key, allVocabKeys)
+    const degraded = !stored || (!!label && stored.toLowerCase() === label.toLowerCase())
+    if (!degraded) return stored
+    const spacedTitle = (c.title || '').replace(/[^A-Za-z0-9'\s]/g, ' ')
+    const fromTitle = leadingDesignPhrase(spacedTitle, input.brandName || '')
+    return fromTitle || stored
+  }
+  const perChildDesignVocab = designGroupContexts.map((c) => ({ key: c.key, name: vocabNameFor(c) }))
+  // `phraseNames: false` (explicit): this scope's Set feeds `titleScopeFor` below, which hands it
+  // out as `foreignTokens` to callers that do their OWN raw per-token `Set.has()` membership check
+  // WITHOUT going through `isForeignToDesign` — `contentTruth.ts`'s `scrubMoneyPhrase`
+  // (`toks.some((t) => foreignTokens.has(t))`) and several `titleBand.ts` money-tail paths.
+  // U2's phrase-joined multi-token Set entries (e.g. "busines tch") are invisible to a raw
+  // single-token `.has()` check, which silently STOPPED catching "Business B*tch" in the title
+  // pathway when this was briefly the shared default (measured, truthBandGate.test.ts regressing).
+  // Kept OLD/unchanged here; the phrase fix is scoped to its own scope below.
+  const perChildBaseScope = buildForeignDesignTokens(perChildDesignVocab, { familyTitleText: '', poolKeywords: [], strictNames: true, phraseNames: false })
+  // U2 (Round U, cross-design leak) — the PHRASE-AWARE twin of the scope above, used ONLY by the
+  // per-child bullets/description ship door (`rejectForeignBullets`/`rejectForeignDescription`,
+  // both of which call ONLY `isForeignToDesign`, never a raw `Set.has()`) — never handed out as
+  // `foreignTokens` to a raw-membership consumer. See designScope.ts's `phraseNames` doc comment.
+  const perChildBaseScopePhrase = buildForeignDesignTokens(perChildDesignVocab, { familyTitleText: '', poolKeywords: [], strictNames: true, phraseNames: true })
   /* T5 (Round T) — `refusedIdentityVocab` carries forward the ORIGINAL name of any group S4
    * refused/cleared for its OWN identity (see the rebuild loop below): a cleared name must stay
    * FOREIGN vocabulary to every SIBLING even though it is no longer that design's own identity.
@@ -10499,6 +10547,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const out = new Set(base)
     for (const t of refusedVocabToks) if (!own.has(t)) out.add(t)
     perChildScopeCache.set(key, out)
+    return out
+  }
+  // Phrase-aware twin of `perChildDesignScope` above (same T5 refused-identity union), for the
+  // bullets/description ship door only.
+  const perChildScopeCachePhrase = new Map<string, Set<string>>()
+  const perChildDesignScopePhrase = (key: string): Set<string> => {
+    const hit = perChildScopeCachePhrase.get(key)
+    if (hit) return hit
+    const base = perChildBaseScopePhrase(key)
+    if (!refusedVocabToks.size) { perChildScopeCachePhrase.set(key, base); return base }
+    const own = ownTokensByKey.get(key) ?? new Set<string>()
+    const out = new Set(base)
+    for (const t of refusedVocabToks) if (!own.has(t)) out.add(t)
+    perChildScopeCachePhrase.set(key, out)
     return out
   }
   /** ONE per-child exit scope: the design name to protect, the sibling-design rejector, and the
@@ -10593,27 +10655,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // comment here claimed otherwise ("the push does NOT consume them yet") and was stale and false
     // at this commit's base ref; a `scrubPub`-only exit (trademark/celebrity scrub, blind to a
     // sibling's name) is how "Business B*tch" shipped in two other designs' bullets for a month.
-    // T2 (Round T) — `key && own`, the SAME guard the title door has always used (:10460 below),
-    // restored here: `designKey` is OPTIONAL on this stored row, so an unset one fell back to the
-    // SKU — a key `perChildDesignScope` was never built with. `buildForeignDesignTokens` used to
-    // answer an UNKNOWN key with the UNION of every design's vocabulary (nothing is "own"), so
-    // `isForeignToDesign(<this child's OWN name>, foreign)` came back TRUE — measured
-    // (unknownkey.probe.test.ts): 3 own bullets in, 2 shipped, the identity bullet DROPPED, and the
-    // description's own `<p>` deleted. Fixed at BOTH ends: `buildForeignDesignTokens` (designScope.ts)
-    // now answers an unrecognized key with an EMPTY set (never the union), and this guard additionally
-    // never even calls it without a resolved own-name, matching the title door byte-for-byte.
+    // T2 (Round T) — `buildForeignDesignTokens` answers an UNKNOWN key (never in the `designs`
+    // list it was built with) with an EMPTY set, never the old dangerous union — measured
+    // (unknownkey.probe.test.ts). U4 (Round U) — DROPPED the `&& own` half of this guard the
+    // title door still keeps (:10512 above): T2 restored `key && own` here as "the same guard the
+    // title door has always used", but T2's own source-level fix already makes an unresolved key
+    // safe (empty set), so requiring `own` too was redundant for the case it was restored for —
+    // and it switched the door fully OFF for exactly the cleared-identity design U3/T5 exist to
+    // protect. Measured (cost4.probe.test.ts): when S4 clears a design's OWN stored name to `''`
+    // (because its identity ratcheted onto a sibling's), `key && own` made `foreign` an empty set
+    // for THAT row, so it shipped the live "Business B*tch" bullet unchanged while its correctly-
+    // named sibling was refused. `perChildDesignScope`/`perChildDesignVocab` are built from
+    // `designGroupContexts`, whose keys ARE the known-keys list `buildForeignDesignTokens` was
+    // built with — `key` alone (not `key && own`) is the right and sufficient guard here.
     per_child_bullets: r.per_child_bullets?.map((c) => {
       const key = c.designKey || c.sku || c.asin || ''
-      const own = (c.designName ?? '').trim()
-      const foreign = key && own ? perChildDesignScope(key) : new Set<string>()
-      const priorBullets = (input.priorPerChildBullets ?? []).find((p) => (c.sku && p.sku === c.sku) || (!c.sku && c.asin && p.asin === c.asin))?.bullets ?? []
+      const foreign = key ? perChildDesignScopePhrase(key) : new Set<string>()
       const scrubbed = c.bullets.map((b) => scrubPub(b, 'per-child-bullets'))
-      return { ...c, bullets: rejectForeignBullets(scrubbed, foreign, priorBullets) }
+      return { ...c, bullets: rejectForeignBullets(scrubbed, foreign) }
     }),
     per_child_descriptions: r.per_child_descriptions?.map((c) => {
       const key = c.designKey || c.sku || c.asin || ''
-      const own = (c.designName ?? '').trim()
-      const foreign = key && own ? perChildDesignScope(key) : new Set<string>()
+      const foreign = key ? perChildDesignScopePhrase(key) : new Set<string>()
       return { ...c, description: rejectForeignDescription(scrubPub(c.description, 'per-child-description'), foreign) }
     }),
     // Per-design Item Highlights ship per SKU (PO 2026-08-21) — same publish-boundary scrub + the
@@ -11567,9 +11630,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // description TEXT is gated separately, at the ship door, by `perChildDesignScope`
   // (`familyTitleText: ''`) via `rejectForeignBullets`/`rejectForeignDescription` (S2) — this pool
   // scoper only shapes what a writer may draw FROM, never what it is judged BY.
+  // U2 (Round U, cross-design leak) — phraseNames: false (explicit): `scopeKwsToGroup` below does
+  // its OWN raw per-token `foreign.has(t)` check, never `isForeignToDesign` — a phrase-joined
+  // multi-token Set entry would be invisible to it (same class of bug as `contentTruth.ts`'s
+  // `scrubMoneyPhrase`). This is a candidate-POOL filter, not the ship door, so the original
+  // per-token behavior is also the conservative (more-exclusive, never-under-protective) one here.
   const foreignToksFor = buildForeignDesignTokens(
     designGroupContexts.map((c) => ({ key: c.key, name: c.designName })),
-    { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: analysis.map((k) => k.keyword) },
+    { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: analysis.map((k) => k.keyword), phraseNames: false },
   )
   // dropTitleCovered: bullets/description pools dedupe against the group's OWN title (token
   // coverage, not raw substring — "gator" inside "alligator" is NOT coverage; review-caught).

@@ -169,6 +169,45 @@ describe('Round S — a stored identity carrying a sibling\'s name is refused, e
     const result = await runListingPipeline(input)
     const mhgRows = result.per_child_bullets?.filter((c) => c.designKey === 'MHG') ?? []
     expect(mhgRows.length).toBeGreaterThan(0)
-    for (const row of mhgRows) expect(row.bullets.length).toBeGreaterThan(0)
+    // U5 (Round U) — RESTORES the per-child bullet-count FLOOR this round's own commit (`00e9ef6`)
+    // deleted, replacing it with `toBeGreaterThan(0)`: after that change the suite had NO
+    // assertion anywhere that a section-regen per-child bullets row ships the contract's five —
+    // it would have gone green if a regen shipped ONE bullet per child. U1 (all-or-nothing ship
+    // door) is what makes `toHaveLength(5)` correct to pin again: on HEALTHY copy (this fixture)
+    // there is no partial array any more, only the full five or a refusal, so every row here
+    // ships exactly five, never a length-4 casualty of a false-positive foreign match.
+    for (const row of mhgRows) expect(row.bullets).toHaveLength(5)
+    const bbRows = result.per_child_bullets?.filter((c) => c.designKey === 'BB') ?? []
+    const hdgRows = result.per_child_bullets?.filter((c) => c.designKey === 'HDG') ?? []
+    for (const row of bbRows) expect(row.bullets).toHaveLength(5)
+    for (const row of hdgRows) expect(row.bullets).toHaveLength(5)
+  }, 30_000)
+
+  /** U1/U5 (Round U) — a REFUSED row must leave the child's LIVE copy untouched, never ship
+   *  anything short. Forces a genuine leak (HDG's OWN stored title is corrupted to literally
+   *  carry BB's slogan, so even after S4's fallback resolution HDG's bullets legitimately name
+   *  BB) and pins that the shipped row is EMPTY — `pushFields.resolveProposed`'s bullets case
+   *  then reads `[]` as "nothing to push" and the SKU's currently-live Amazon bullets stand,
+   *  rather than receiving a shortened or lossy array. */
+  it('U1/U5: a per-child row that genuinely leaks a sibling is REFUSED to empty, never shipped short', async () => {
+    const LEAK_BULLETS = [
+      "BOLD STATEMENT - Featuring the empowering phrase 'Business B*tch,' this sweatshirt celebrates ambition for every day of the week and beyond.",
+      'RELAXED FIT - A classic crewneck cut that layers easily for any season and keeps its shape wash after wash for years.',
+      'GREAT GIFT - Perfect for the go-getter who never stops chasing the next goal, a thoughtful present for any occasion.',
+      'BUILT TO LAST - Durable stitching holds up wash after wash, season after season, so the design stays crisp and bright.',
+      'EASY CARE - Machine washable, holds its shape and color through repeated washing cycles without shrinking or fading.',
+    ]
+    const leakSink = { title: 'THE CEO Graphic Sweatshirt | Long Sleeve Comfort Colors Crewneck', bullets: LEAK_BULLETS, description: '<p>x</p>', backend_drop: [] }
+    const openai = {
+      chat: { completions: { create: vi.fn(async () => ({ choices: [{ message: { content: JSON.stringify(leakSink) }, finish_reason: 'stop' }] })) } },
+    } as unknown as PipelineInput['openai']
+    const input: PipelineInput = { ...makeBaseInput(openai), onlySection: 'bullets' }
+    const result = await runListingPipeline(input)
+    const hdgRows = result.per_child_bullets?.filter((c) => c.designKey === 'HDG') ?? []
+    expect(hdgRows.length).toBeGreaterThan(0)
+    for (const row of hdgRows) expect(row.bullets).toEqual([])
+    // BB genuinely owns the slogan — its row ships the full, real five, never collaterally refused.
+    const bbRows = result.per_child_bullets?.filter((c) => c.designKey === 'BB') ?? []
+    for (const row of bbRows) expect(row.bullets).toHaveLength(5)
   }, 30_000)
 })

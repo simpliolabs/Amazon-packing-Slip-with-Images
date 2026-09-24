@@ -109,15 +109,16 @@ describe('familyTitleText — every value assignment is empty OR justified (S1 e
 
   it('sanity: the scanner actually found every known site (a scanner matching nothing is a false green)', () => {
     const sites = scanCallSites(files)
-    // listingPipeline.ts x5 (the STRICT-NAMES IH composer's own call, the ship door, the title
+    // listingPipeline.ts x6 (the STRICT-NAMES IH composer's own call, the ship door AND its
+    // U2 phrase-aware twin (`perChildBaseScopePhrase`, bullets/description only), the title
     // candidate filter, the bullets/description pool scoper, and the per-design IH pipeline
     // caller — T3 turned the composer's own call AND the pipeline caller empty), route.ts x1 (the
     // regenerate-item-highlight route's caller — T3 turned it empty too), truthBandHarness.ts x2.
-    expect(sites.length).toBe(8)
+    expect(sites.length).toBe(9)
     const listingPipelineSites = sites.filter((s) => s.file.includes('listingPipeline.ts'))
     const harnessSites = sites.filter((s) => s.file.includes('truthBandHarness.ts'))
     const routeSites = sites.filter((s) => s.file.includes('regenerate-item-highlight') && s.file.includes('route.ts'))
-    expect(listingPipelineSites.length).toBe(5)
+    expect(listingPipelineSites.length).toBe(6)
     expect(harnessSites.length).toBe(2)
     expect(routeSites.length).toBe(1)
   })
@@ -127,9 +128,10 @@ describe('familyTitleText — every value assignment is empty OR justified (S1 e
     const emptySites = sites.filter((s) => s.empty)
     // truthBandHarness's two title-door simulations + listingPipeline's per-child title door
     // (`perChildDesignScope`, reused verbatim by S2 for bullets/descriptions) + listingPipeline's
+    // U2 phrase-aware twin of that same ship door (`perChildDesignScopePhrase`) + listingPipeline's
     // STRICT-NAMES Item Highlight composer (T3) + listingPipeline's per-design IH pipeline caller
     // (T3) + the regenerate-item-highlight route's caller (T3).
-    expect(emptySites.length).toBe(6)
+    expect(emptySites.length).toBe(7)
   })
 })
 

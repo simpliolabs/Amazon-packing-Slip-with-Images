@@ -404,9 +404,14 @@ export function runTruthBandHarness(): HarnessResult {
   }
 
   // ── PER-DESIGN SCOPE: each group judged against ITS OWN resolved blank, through THE DOOR ──────
+  // U2 (Round U, cross-design leak) — phraseNames: false (explicit): this Set feeds
+  // `foreignTokens` to callers that do their OWN raw per-token `Set.has()` check
+  // (contentTruth.ts's scrubMoneyPhrase, several titleBand.ts money-tail paths) WITHOUT going
+  // through `isForeignToDesign` — a phrase-joined multi-token entry is invisible to those, so
+  // this harness (a title-door harness) keeps the ORIGINAL per-token behavior explicitly.
   const foreignFor = buildForeignDesignTokens(
     DESIGNS.map((d) => ({ key: d.key, name: d.name })),
-    { familyTitleText: '', poolKeywords: [], strictNames: true },
+    { familyTitleText: '', poolKeywords: [], strictNames: true, phraseNames: false },
   )
 
   for (const d of DESIGNS) {
@@ -529,9 +534,14 @@ export function runLiveFailureRepro(): HarnessRow {
     audienceLean: 'unisex',
     field: 'title',
   }
+  // U2 (Round U, cross-design leak) — phraseNames: false (explicit): this Set feeds
+  // `foreignTokens` to callers that do their OWN raw per-token `Set.has()` check
+  // (contentTruth.ts's scrubMoneyPhrase, several titleBand.ts money-tail paths) WITHOUT going
+  // through `isForeignToDesign` — a phrase-joined multi-token entry is invisible to those, so
+  // this harness (a title-door harness) keeps the ORIGINAL per-token behavior explicitly.
   const foreignFor = buildForeignDesignTokens(
     DESIGNS.map((d) => ({ key: d.key, name: d.name })),
-    { familyTitleText: '', poolKeywords: [], strictNames: true },
+    { familyTitleText: '', poolKeywords: [], strictNames: true, phraseNames: false },
   )
   const foreign = foreignFor('HD')
   const reject = (seg: string): boolean => isForeignToDesign(seg, foreign)

@@ -61,6 +61,18 @@ export interface DesignScopeOpts {
    *  title or ≥50% name-sharing; identity (vision) tokens keep every exemption. Default false = the
    *  bullets/description behavior (review-caught "Fishing Trip" niche-word regression) unchanged. */
   strictNames?: boolean
+  /** U2 (Round U, cross-design leak) — DEFAULT ON (opt-OUT, not opt-in: the mandated acceptance
+   *  probes call `buildForeignDesignTokens` with no other change and require the phrase behavior,
+   *  so it must be what an unset option means). A MULTI-word name's SURVIVING (non-niche) tokens
+   *  must appear as one contiguous ORDERED PHRASE, never any bare one of them alone — "hustle",
+   *  "mother", "definition" etc. are ordinary English words this family's OWN copy legitimately
+   *  uses; single-token matching convicted every one of them (measured, cost1/cost3.probe.test.ts).
+   *  Pass `false` explicitly to keep the ORIGINAL per-token bag-of-words behavior byte-for-byte —
+   *  used ONLY by the Item Highlight composer (`buildItemHighlightsPerDesign`), whose own
+   *  pad-budget tests are pinned to specific composed strings under the old semantics and are OUT
+   *  of this round's scope (the ruling fences `itemHighlightWriter.ts`; this keeps that composer's
+   *  INPUT-side scoping byte-identical too). */
+  phraseNames?: boolean
 }
 
 /**
@@ -73,7 +85,10 @@ export interface DesignScopeOpts {
  * that row's OWN name/words look foreign to itself.
  */
 export function buildForeignDesignTokens(designs: DesignVocab[], opts: DesignScopeOpts): (key: string) => Set<string> {
-  const nameToks = new Map(designs.map((d) => [d.key, new Set(designScopeTokens(d.name))]))
+  // U2 (Round U, cross-design leak) — ORDERED per-design name tokens, kept alongside the Set so a
+  // multi-word name can be required to match as a whole PHRASE (see the build loop below).
+  const nameToksOrdered = new Map(designs.map((d) => [d.key, designScopeTokens(d.name)]))
+  const nameToks = new Map(designs.map((d) => [d.key, new Set(nameToksOrdered.get(d.key) ?? [])]))
   const identToks = new Map(designs.map((d) => [d.key, new Set((d.identity ?? []).flatMap((p) => designScopeTokens(p)))]))
   const ownToks = new Map(designs.map((d) => [d.key, new Set([...(nameToks.get(d.key) ?? []), ...(identToks.get(d.key) ?? [])])]))
   // Name-sharing counts use the NAME tokens only (identity seeds are broad and would inflate sharing).
@@ -113,14 +128,44 @@ export function buildForeignDesignTokens(designs: DesignVocab[], opts: DesignSco
     if (hit) return hit
     const own = ownToks.get(key) ?? new Set<string>()
     const foreign = new Set<string>()
+    const tokExempt = (t: string): boolean => {
+      if (own.has(t) || titleToks.has(t)) return true
+      if ((nameTokCounts.get(t) ?? 0) >= nameShareThresh) return true
+      if (!opts.strictNames && poolToks.has(t)) return true
+      return false
+    }
     for (const d of designs) {
       if (d.key === key) continue
-      for (const t of nameToks.get(d.key) ?? []) {
-        if (own.has(t) || titleToks.has(t)) continue
-        if ((nameTokCounts.get(t) ?? 0) >= nameShareThresh) continue
-        if (!opts.strictNames && poolToks.has(t)) continue
-        foreign.add(t)
-      }
+      /* U2 (Round U, cross-design leak) — a sibling's NAME is foreign only as a whole ORDERED
+       * PHRASE, never one bare token. "hustle", "mother", "definition", "coming", "soon", "quit"
+       * are ordinary English words this family's OWN copy legitimately uses; single-token
+       * matching convicted every one of them — measured (cost1/cost3.probe.test.ts): the design
+       * that genuinely owns "Business B*tch" lost its OWN identity bullet because that sentence
+       * also used the word "hustle", a bare token of sibling "Hustle Definiton", and four more
+       * healthy families each lost 1-2 of their five on-brand bullets the same way.
+       *
+       * The exemptions (own/title/name-share/pool) still apply PER TOKEN first — a name can be
+       * "Fishing Trip" on a family whose OWN title/niche is fishing, where "fishing" is the
+       * family's shared word and "trip" is the design's real distinguishing one (review-caught,
+       * titleTruthNetGate.test.ts): pruning the whole phrase on any one exempt token would let
+       * "trip" straight through as a niche word too. So: prune the EXEMPT tokens out first, in
+       * the name's own order. What SURVIVES is the design's actual distinguishing vocabulary —
+       * zero survivors, the name is pure niche and never foreign; exactly ONE survivor (e.g.
+       * "trip", or a single-word name), that one token alone is enough, same as before; TWO OR
+       * MORE survivors (e.g. "hustle"+"definiton", neither exempt), `isForeignToDesign` requires
+       * that exact run to appear CONTIGUOUSLY — so a bullet using "hustle" alone never matches
+       * "hustle definiton" and a bullet using "mother" alone never matches "mother hustler", but
+       * the full phrase, quoted, still does. */
+      const ordered = nameToksOrdered.get(d.key) ?? []
+      const surviving = ordered.filter((t) => !tokExempt(t))
+      if (opts.phraseNames === false) {
+        // Explicit opt-OUT: ORIGINAL per-token bag-of-words, byte-for-byte (the Item Highlight
+        // composer only — see the option's doc comment).
+        for (const t of surviving) foreign.add(t)
+      } else if (surviving.length === 1) foreign.add(surviving[0])
+      else if (surviving.length > 1) foreign.add(surviving.join(' '))
+      // Identity (vision) tokens stay SOFT bag-of-words, every exemption, byte-for-byte — broad
+      // vocabulary extensions ("gym", "motivation"), never a design's own distinguishing NAME.
       for (const t of identToks.get(d.key) ?? []) {
         if (own.has(t) || titleToks.has(t) || poolToks.has(t)) continue
         if ((nameTokCounts.get(t) ?? 0) >= nameShareThresh) continue
@@ -132,11 +177,18 @@ export function buildForeignDesignTokens(designs: DesignVocab[], opts: DesignSco
   }
 }
 
-/** TRUE when a pool phrase carries a token foreign to design `key` — i.e. it names ANOTHER design.
- *  A BM line never carries "don't quit" (PO 2026-08-21). */
+/** TRUE when a pool phrase carries a token — or, for a multi-word design name (U2), the WHOLE
+ *  ordered phrase, contiguously — foreign to design `key`, i.e. it names ANOTHER design. A BM line
+ *  never carries "don't quit" (PO 2026-08-21); an HDG line using the ordinary word "hustle" alone
+ *  no longer convicts it of "Mother Hustler" or "Hustle Definiton" (PO 2026-09-24, Round U). Each
+ *  entry in `foreign` is a space-joined run of one or more normalized tokens; matching it against a
+ *  space-padded, space-joined haystack turns "does this ordered phrase occur contiguously?" into a
+ *  substring check with no risk of a partial-token false match (every token is already atomic). */
 export function isForeignToDesign(keyword: string, foreign: Set<string>): boolean {
   if (foreign.size === 0) return false
-  return designScopeTokens(keyword).some((t) => foreign.has(t))
+  const hay = ` ${designScopeTokens(keyword).join(' ')} `
+  for (const phrase of foreign) if (hay.includes(` ${phrase} `)) return true
+  return false
 }
 
 /**
@@ -148,30 +200,36 @@ export function isForeignToDesign(keyword: string, foreign: Set<string>): boolea
  * design X?" has one answer everywhere a per-child field ships.
  */
 
-/** The per-child BULLETS ship-door rejector (S2). `bullets` are THIS child's own scrubbed
- *  candidates; `foreign` is a per-design foreign-token set built the same way the title door builds
- *  its own (`buildForeignDesignTokens(..., { familyTitleText: '', strictNames: true })` — see
- *  listingPipeline.ts's `perChildDesignScope`, reused verbatim rather than a second scope). A bullet
- *  naming a sibling design is refused: restored from `priorBullets` at the SAME index when that
- *  prior is itself clean, else DROPPED — never replaced with the sibling's slogan, and never with a
- *  blank placeholder in its place (a shorter true array beats a longer false one). Idempotent and a
- *  byte-identical no-op when `foreign` is empty (the overwhelming majority of families). */
+/** The per-child BULLETS ship door (U1, Round U). `bullets` are THIS child's own scrubbed
+ *  candidates; `foreign` is a per-design foreign-phrase set built the same way the title door
+ *  builds its own (`buildForeignDesignTokens(..., { familyTitleText: '', strictNames: true })` —
+ *  see listingPipeline.ts's `perChildDesignScope`, reused verbatim rather than a second scope).
+ *
+ *  U1 REPLACES the old per-bullet edit with an ALL-OR-NOTHING verdict for the whole row: a
+ *  SUBTRACTIVE net with no additive producer will always ship something short (this repo's own
+ *  rule: it once made true 29-49c titles against a 70-75 band — #630/#631, reverted live). Here the
+ *  old per-bullet drop-and-splice made 4-bullet rows against this family's five-bullet contract,
+ *  and on the PO's OWN click convicted the design that genuinely OWNS a sibling's shared word
+ *  ("hustle") of naming that sibling — measured, cost1/cost3.probe.test.ts. So there is no partial
+ *  edit any more: if ANY candidate bullet names a sibling design, the WHOLE row is refused — an
+ *  empty array, which `pushFields.resolveProposed` (bullets case) treats as "nothing to push", so
+ *  the child's CURRENTLY LIVE bullets on Amazon stand untouched rather than being overwritten by a
+ *  short or lossy array. A refusal is logged loudly, never silent. Byte-identical no-op when
+ *  `foreign` is empty (the overwhelming majority of families) or when nothing leaks. */
 export function rejectForeignBullets(
   bullets: readonly string[],
   foreign: Set<string>,
-  priorBullets: readonly string[] = [],
 ): string[] {
-  if (!foreign.size) return bullets.map((b) => (b ?? '').trim()).filter(Boolean)
-  const out: string[] = []
-  for (let i = 0; i < bullets.length; i++) {
-    const b = (bullets[i] ?? '').trim()
-    if (!b) continue
-    if (!isForeignToDesign(b, foreign)) { out.push(b); continue }
-    const prior = (priorBullets[i] ?? '').trim()
-    if (prior && !isForeignToDesign(prior, foreign)) out.push(prior)
-    // else: drop this ONE bullet. Never ship a sibling's slogan; never pad the gap with ''.
-  }
-  return out
+  const cleaned = bullets.map((b) => (b ?? '').trim()).filter(Boolean)
+  if (!foreign.size) return cleaned
+  const leaking = cleaned.filter((b) => isForeignToDesign(b, foreign))
+  if (leaking.length === 0) return cleaned
+  console.warn(JSON.stringify({
+    tag: 'DESIGN_SCOPE_REFUSED', field: 'bullets',
+    reason: `${leaking.length}/${cleaned.length} candidate bullet(s) name a sibling design`,
+    leaking,
+  }))
+  return []
 }
 
 /** Drop whole `<p>…</p>` / `<li>…</li>` blocks (matched as WHOLE tag pairs, never mid-tag) whose
@@ -189,14 +247,20 @@ export function stripForeignHtmlBlocks(html: string, isForeign: (segment: string
   return out
 }
 
-/** The per-child DESCRIPTION ship-door rejector (S2). Whole-string fast path (byte-identical
- *  no-op on the healthy majority); only when the FULL description carries a foreign mention does it
- *  pay for the block-level split. Falls back to `''` only when EVERY block names a sibling — which
- *  the push resolver (`pushFields.resolveProposed`) already treats as "nothing to push" rather than
- *  a broadcast fallback, so the worst case is a refusal, never a shipped lie. */
+/** The per-child DESCRIPTION ship door (U1, Round U). Whole-string fast path (byte-identical no-op
+ *  on the healthy majority — most descriptions carry no foreign mention at all). U1 REPLACES the
+ *  old block-level strip (`stripForeignHtmlBlocks`, still exported below for direct callers) with
+ *  an ALL-OR-NOTHING verdict: removing only the offending `<p>`/`<li>` block is a SUBTRACTIVE edit
+ *  with no additive producer, and it silently deleted a child's OWN legitimate closing paragraph
+ *  whenever that paragraph happened to share an ordinary word with a sibling's name (measured,
+ *  cost2.probe.test.ts — a −34% description on 4 of 6 children). When ANY foreign mention is
+ *  found, refuse the WHOLE description to `''` — `pushFields.resolveProposed` (description case)
+ *  treats an empty string as "nothing to push", so the child's CURRENTLY LIVE description stands
+ *  untouched rather than being overwritten by a shortened one. Logged loudly, never silent. */
 export function rejectForeignDescription(description: string, foreign: Set<string>): string {
   if (!foreign.size || !description || !isForeignToDesign(description, foreign)) return description
-  return stripForeignHtmlBlocks(description, (seg) => isForeignToDesign(seg, foreign))
+  console.warn(JSON.stringify({ tag: 'DESIGN_SCOPE_REFUSED', field: 'description', reason: 'description names a sibling design' }))
+  return ''
 }
 
 /** S4 — the identity ratchet. TRUE when `name` carries EVERY token of one of `siblingNames` (a
