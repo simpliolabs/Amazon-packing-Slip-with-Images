@@ -296,7 +296,7 @@ describe("G2: F1 is narrowed to ',' only — 'and'/'&'/'|'/'—' immediately bef
   })
 
   it('the chooser prompt (G4, built in THIS round — see itemHighlightWriterFixRoundG3.test.ts) is unaffected by this narrowing: it renders from CANDIDATES, never from the grammar this file pins', () => {
-    const { system } = buildWriterPrompt([{ parts: [], line: 'Fall Crewneck, with 50% Cotton / 50% Polyester', keywordShapedClauses: 0, distinctPoolUnits: 1, lengthFromTarget: 0 }], 'Fall Crewneck')
+    const { system } = buildWriterPrompt([{ parts: [], line: 'Fall Crewneck, with 50% Cotton / 50% Polyester', keywordShapedClauses: 0, distinctPoolUnits: 1, lengthFromTarget: 0, usesAlternateSpelling: 0 }], 'Fall Crewneck')
     expect(typeof system).toBe('string')
   })
 })

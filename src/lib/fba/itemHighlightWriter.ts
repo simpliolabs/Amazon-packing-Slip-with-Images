@@ -136,6 +136,14 @@ export interface AdmittedUnit {
    *  `ihHumanizerMode`); every one of them reads `text`, which IS the rewrite once accepted. Absent
    *  on every unit `buildAdmittedUnits` produces — set only by `humanizeAdmittedUnits`. */
   sourceText?: string
+  /** RULING N2 (round N, phase-n1-rulings.md, Blocking): present only on an ALTERNATE-spelling unit
+   *  the humanizer appends alongside its source (never a replacement any more — see
+   *  `humanizeAdmittedUnits`) — carries the id of the unit this one is an alternate SPELLING of. Two
+   *  units sharing the same `altOf` group (a unit's own id, and every alt unit that names it) are
+   *  MUTUALLY EXCLUSIVE: `enumerateWriterCandidates` never builds a candidate carrying both (the
+   *  same underlying pool fact would then appear twice). Absent on every unit `buildAdmittedUnits`
+   *  produces — set only by `humanizeAdmittedUnits`, exactly like `sourceText`. */
+  altOf?: string
 }
 
 /** Does `text`'s LAST tokenized word LITERALLY (case-insensitive) belong to `GARMENT_HEAD_WORDS`
@@ -1807,6 +1815,13 @@ export interface WriterCandidate {
   keywordShapedClauses: number
   distinctPoolUnits: number
   lengthFromTarget: number
+  /** N2 (round N, Blocking): count of units used in `parts` that are a humanizer ALTERNATE spelling
+   *  (`altOf` set) rather than the design's own admitted (source) spelling — the rank's LAST
+   *  tiebreak (below) prefers 0 here, i.e. the source, when every earlier discriminator ties. Always
+   *  0 when no alternate unit exists at all (flag off, dead/malformed client, or the N5 short-atom
+   *  skip never allocate one), which is what makes rank 1 byte-identical to flag-off in that case —
+   *  not the tiebreak itself, the ABSENCE of anything for it to prefer over. */
+  usesAlternateSpelling: number
 }
 
 export interface EnumerateWriterCandidatesResult {
@@ -1900,6 +1915,21 @@ export function enumerateWriterCandidates(
   const relationCandidates = allRelationCandidates.slice(0, WRITER_CANDIDATE_MAX_REL_UNITS)
   const allOrdinaryPool = units.filter((u) => u.kind === 'pool' && !u.isBrand)
   const ordinaryPool = allOrdinaryPool.slice(0, WRITER_CANDIDATE_MAX_POOL_UNITS)
+  const byId = new Map(units.map((u) => [u.id, u] as const))
+  // N2 (round N, Blocking): a source unit and its humanizer ALTERNATE(s) (`altOf` naming the
+  // source's own id) are MUTUALLY EXCLUSIVE — the same underlying pool fact must never appear twice
+  // in one line. Grouped by the source's own id (a unit with no `altOf` is its own one-member
+  // group), so this generalizes to any number of alternates per unit without hardcoding "exactly
+  // two". `n <= WRITER_CANDIDATE_MAX_POOL_UNITS` (8) keeps this O(n^2) pair scan trivial.
+  const altGroupKey = (u: AdmittedUnit): string => u.altOf ?? u.id
+  const poolConflictPairs: [number, number][] = []
+  for (let i = 0; i < ordinaryPool.length; i++) {
+    for (let j = i + 1; j < ordinaryPool.length; j++) {
+      if (altGroupKey(ordinaryPool[i]) === altGroupKey(ordinaryPool[j])) poolConflictPairs.push([i, j])
+    }
+  }
+  const maskHasConflict = (mask: number): boolean =>
+    poolConflictPairs.some(([i, j]) => (mask & (1 << i)) !== 0 && (mask & (1 << j)) !== 0)
 
   // Every PREFIX variant to try: identity+garmentHead-abutted (rule 1's usual shape) AND, whenever
   // a garmentHead exists, identity ALONE (no abutment). Both are legal by construction — the
@@ -1936,6 +1966,8 @@ export function enumerateWriterCandidates(
   outer:
   for (const prefix of prefixVariants) {
   for (let mask = 0; mask < (1 << n); mask++) {
+    // N2: never a source unit AND its own alternate spelling together in one candidate.
+    if (maskHasConflict(mask)) continue
     // Build THIS subset's pool clause, pruning the INSTANT it is already over the ceiling — G3
     // point 1's "prune on the band early": rendered length is monotonically non-decreasing as units
     // are appended, so no later addition (relation, wear fact) could ever bring it back in band.
@@ -1985,6 +2017,8 @@ export function enumerateWriterCandidates(
             keywordShapedClauses: shapes.filter(Boolean).length,
             distinctPoolUnits: finalParts.filter((p) => 'unit' in p && ordinaryPool.some((u) => u.id === p.unit)).length,
             lengthFromTarget: Math.abs(verdict.value.length - target),
+            // N2: count of this candidate's OWN parts that are a humanizer alternate spelling.
+            usesAlternateSpelling: finalParts.filter((p) => 'unit' in p && !!byId.get(p.unit)?.altOf).length,
           })
         }
       }
@@ -2003,10 +2037,19 @@ export function enumerateWriterCandidates(
   // `CONTENT_CONTRACT.itemHighlights.fillTarget`); `keywordShapedClauses` is demoted to a
   // tiebreak. Deterministic, never `Math.random` — `Array.prototype.sort` is a stable sort (ES2019),
   // so the final tiebreak is the candidates' own stable (evaluation) order.
+  // RULING N2 (round N, Blocking): a FOURTH, LAST tiebreak — prefer fewer humanizer-alternate units,
+  // i.e. prefer the design's own SOURCE spelling, when every earlier discriminator ties. This is
+  // deliberately the lowest-priority key: the model's taste (via the chooser, `askWriter`'s "pick")
+  // and the earlier band-fit/readability discriminators decide FIRST; this only breaks a genuine tie
+  // between two candidates that are otherwise indistinguishable, and — since no alternate unit is
+  // ever allocated when the flag is off, the client is dead/malformed, or N5's short-atom skip
+  // fires — is a no-op (every candidate's `usesAlternateSpelling` is 0) in exactly those cases,
+  // which is what makes rank 1 byte-identical to flag-off in them BY CONSTRUCTION.
   const ranked = [...candidates].sort((a, b) =>
     a.lengthFromTarget - b.lengthFromTarget ||
     a.keywordShapedClauses - b.keywordShapedClauses ||
     b.distinctPoolUnits - a.distinctPoolUnits ||
+    a.usesAlternateSpelling - b.usesAlternateSpelling ||
     0,
   )
   // RULING H3(b): the top-K SHOWN must span the OCCUPIED band, not one end of it — taste between
@@ -2317,8 +2360,68 @@ function isBrandCarrierText(text: string, allowedBrand: string | null | undefine
 }
 
 export type HumanizerRejectReason =
-  | 'empty' | 'content-word-multiset' | 'inserted-word' | 'relation-glue-in-unit'
+  | 'empty' | 'character-set' | 'content-word-multiset' | 'inserted-word' | 'relation-glue-in-unit'
+  | 'duplicate-function-word' | 'boundary-function-word'
   | 'length' | `truth:${PhraseTruthReason}` | 'trademark' | 'celebrity' | 'brand-parity'
+
+/** RULING N1 (round N, phase-n1-rulings.md, Blocking): the WORD_RE tokenizer J4.1/J4.2 both read
+ *  sees ONLY `[A-Za-z0-9]` — every character outside that class (a fullwidth Latin "Ｗｏｍｅｎ", CJK,
+ *  an emoji, "™"/"®", or a bare punctuation mark the source never carried) is invisible to both
+ *  checks and ships. This is a property of the rewrite's WHOLE character content, never of its
+ *  WORD_RE tokens: every character `rewrite` carries must belong to the SET of characters `source`
+ *  itself carries, union the six insertable words' own characters, union `{' '}` — case-folded, so a
+ *  casing-only change (which nothing else in this net treats as a defect — J4.1/J4.2 both compare
+ *  case-folded) is never mistaken for a foreign character. This ALSO closes the punctuation hole
+ *  (review `phase-m1-review-net.md` IMPORTANT 2): a `,`/`|`/`—`/`:`/`&` the source did not carry is
+ *  just another character outside the allowed set, never a separate rule. */
+const HUMANIZER_INSERTABLE_CHARS: ReadonlySet<string> = new Set([...HUMANIZER_INSERTABLE_WORDS].join('').toLowerCase())
+function humanizerAllowedCharSet(sourceText: string): Set<string> {
+  const allowed = new Set<string>(HUMANIZER_INSERTABLE_CHARS)
+  for (const ch of sourceText.toLowerCase()) allowed.add(ch)
+  allowed.add(' ')
+  return allowed
+}
+function humanizerCharacterSetViolation(sourceText: string, rewrite: string): boolean {
+  const allowed = humanizerAllowedCharSet(sourceText)
+  for (const ch of rewrite.toLowerCase()) if (!allowed.has(ch)) return true
+  return false
+}
+
+/** RULING N2 (round N)'s "cheap deterministic hygiene that is objectively right and needs no
+ *  referee": walks `rewriteWordsRaw` LEFT TO RIGHT, greedily consuming `sourceWordsRaw`'s own
+ *  multiset budget (exactly the same accounting `multisetAdditions` already does, order-aware here
+ *  because the two hygiene rules below are positional) — a word whose occurrence exceeds what the
+ *  source's own budget can cover at that point is one this rewrite ADDED, i.e. an insertion. */
+function humanizerInsertionMask(sourceWordsRaw: readonly string[], rewriteWordsRaw: readonly string[]): boolean[] {
+  const remaining = new Map<string, number>()
+  for (const w of sourceWordsRaw) remaining.set(w, (remaining.get(w) ?? 0) + 1)
+  return rewriteWordsRaw.map((w) => {
+    const left = remaining.get(w) ?? 0
+    if (left > 0) { remaining.set(w, left - 1); return false }
+    return true
+  })
+}
+/** "Embroidered for for Sweatshirts Women" — two adjacent identical function words. Checked
+ *  unconditionally on the rewrite's own rendered word order, regardless of which occurrence (if any)
+ *  the source already carried: two adjacent copies of the SAME function word read as a typo/glitch
+ *  no fluent line would produce, never a legitimate rephrasing. */
+function humanizerAdjacentDuplicateFunctionWord(rewriteWordsRaw: readonly string[]): boolean {
+  for (let i = 0; i + 1 < rewriteWordsRaw.length; i++) {
+    if (rewriteWordsRaw[i] === rewriteWordsRaw[i + 1] && HUMANIZER_INSERTABLE_WORDS.has(rewriteWordsRaw[i])) return true
+  }
+  return false
+}
+/** "for Sweatshirts for Embroidered Women for" — a modifier may not cross the head/be stranded by an
+ *  inserted function word sitting at either edge of the line. Keyed on `humanizerInsertionMask` (an
+ *  edge word the SOURCE itself already carried there is untouched — this rule is about what the
+ *  rewrite ADDED at the boundary, never about the source's own shape). */
+function humanizerBoundaryInsertedFunctionWord(rewriteWordsRaw: readonly string[], inserted: readonly boolean[]): boolean {
+  if (!rewriteWordsRaw.length) return false
+  const first = 0
+  const last = rewriteWordsRaw.length - 1
+  return (inserted[first] && HUMANIZER_INSERTABLE_WORDS.has(rewriteWordsRaw[first]))
+    || (inserted[last] && HUMANIZER_INSERTABLE_WORDS.has(rewriteWordsRaw[last]))
+}
 
 /** J4 — THE NET, deterministic, per unit, failing CLOSED to the original: EVERY check below must
  *  hold, or the rewrite is refused and the caller keeps `source.text`. THE PROMPT IS NOT THE
@@ -2343,6 +2446,22 @@ export function humanizerRewriteVerdict(
   const sourceWordsRaw = humanizerRawWords(source.text)
   const additions = multisetAdditions(sourceWordsRaw, rewriteWordsRaw)
   if (additions.some((w) => !HUMANIZER_INSERTABLE_WORDS.has(w))) return { ok: false, reason: 'inserted-word' }
+  // N1 (round N, Blocking), placed AFTER J4.1/J4.2 so an ASCII-visible defect keeps its own precise
+  // reason (`content-word-multiset`/`inserted-word`) exactly as before — but STILL runs before
+  // anything else, because it is the ONLY check left that can see a character outside
+  // `humanizerRawWords`' `[A-Za-z0-9]` tokenizer at all: a fullwidth Latin "Ｗｏｍｅｎ", CJK, an
+  // emoji or a "™"/"®" produces ZERO word tokens, so J4.1/J4.2 above are structurally blind to it
+  // and would both silently PASS it. Every character the rewrite carries must belong to the
+  // source's own characters, union the six insertable words, union a bare space — this also closes
+  // the punctuation hole (review `phase-m1-review-net.md` IMPORTANT 2: a `,`/`|`/`—`/`:`/`&` the
+  // source did not carry is just another character outside the allowed set, never a separate rule).
+  if (humanizerCharacterSetViolation(source.text, rewrite)) return { ok: false, reason: 'character-set' }
+  // N2 (round N)'s cheap deterministic hygiene — objectively right, needs no referee: no two
+  // adjacent identical function words ("Embroidered for for Sweatshirts Women"), and no inserted
+  // function word stranded at either edge of the line.
+  if (humanizerAdjacentDuplicateFunctionWord(rewriteWordsRaw)) return { ok: false, reason: 'duplicate-function-word' }
+  const insertionMask = humanizerInsertionMask(sourceWordsRaw, rewriteWordsRaw)
+  if (humanizerBoundaryInsertedFunctionWord(rewriteWordsRaw, insertionMask)) return { ok: false, reason: 'boundary-function-word' }
   // J4.3: length.
   if (rewrite.length > source.text.length + 6) return { ok: false, reason: 'length' }
   // J4.4: truth, re-run on the REWRITE — never trusted from multiset equality alone. A pure
@@ -2425,6 +2544,12 @@ async function askHumanizer(
 }
 
 export interface HumanizeResult {
+  /** N2 (round N, Blocking): the ORIGINAL `units` array (never mutated, never replaced-in-place) with
+   *  one ALTERNATE-spelling unit APPENDED for every eligible unit whose proposed rewrite was
+   *  ACCEPTED — same array reference as the input when nothing was accepted (0 calls, or a rejected
+   *  batch), so the flag-off/dead-model byte-identity guarantee costs nothing extra to prove. Every
+   *  alt unit carries `altOf` (its source unit's id); the enumerator (below) treats the two as
+   *  mutually exclusive and the rank prefers the source when tied. */
   units: AdmittedUnit[]
   calls: number
   accepted: number
@@ -2471,26 +2596,34 @@ export async function humanizeAdmittedUnits(
 
   let accepted = 0
   let rejected = 0
+  let altSeq = 0
   const rewriteByIndex = new Map((rewrites as { i: number; text: string }[]).map((r) => [r.i, r.text]))
-  const nextUnits = units.map((u) => {
-    const eligibleIndex = eligible.indexOf(u)
-    if (eligibleIndex === -1) return u
+  const alternates: AdmittedUnit[] = []
+  for (const [eligibleIndex, u] of eligible.entries()) {
     const rewriteText = (rewriteByIndex.get(eligibleIndex + 1) ?? '').trim()
     const verdict = humanizerRewriteVerdict(u, rewriteText, args.truthCtx)
     if (!verdict.ok) {
       console.warn(JSON.stringify({ tag: 'IH_HUMANIZER_REJECT', design: args.designName, unitId: u.id, reason: verdict.reason }))
       rejected++
-      return u
+      continue
     }
     accepted++
     console.log(JSON.stringify({ tag: 'IH_HUMANIZER_ACCEPT', design: args.designName, unitId: u.id, from: u.text, to: rewriteText }))
-    // J5: `sourceText` carries the raw pool phrase (never overwritten on a second humanize pass,
-    // though today's ordering only ever calls this once per design). J4.5: `numberable` is
-    // RECOMPUTED here, never copied from the source unit — a reordered rewrite can change which
-    // word is LAST, which is exactly what `isNumberable` keys on.
-    return { ...u, text: rewriteText, sourceText: u.sourceText ?? u.text, numberable: isNumberable(rewriteText) }
-  })
-  return { units: nextUnits, calls: 1, accepted, rejected }
+    // N2 (round N, Blocking, supersedes the pre-N replace-in-place): the accepted rewrite is
+    // APPENDED as a new sibling unit, an ALTERNATE spelling of `u` — `u` itself is NEVER mutated.
+    // `enumerateWriterCandidates` (below) offers BOTH to the search/rank/chooser, mutually exclusive
+    // in any one arrangement, and the rank prefers `u`'s own (source) spelling when all else ties —
+    // so a dead client, a malformed answer, or the N5/eligibility skips above never allocate an alt
+    // unit at all, and rank 1 is then byte-identical to flag-off BY CONSTRUCTION (no alt unit exists
+    // to compete with the source). J4.5: `numberable` is RECOMPUTED for the alt unit, never copied
+    // from the source — a reordered rewrite can change which word is LAST, which `isNumberable`
+    // keys on. `sourceText` carries the raw pool phrase, for provenance/logging only (J5).
+    alternates.push({
+      id: `${u.id}~alt${altSeq++}`, text: rewriteText, kind: u.kind, isBrand: u.isBrand,
+      numberable: isNumberable(rewriteText), altOf: u.id, sourceText: u.text,
+    })
+  }
+  return { units: alternates.length ? [...units, ...alternates] : (units as AdmittedUnit[]), calls: 1, accepted, rejected }
 }
 
 export async function runWriterForDesign(args: {

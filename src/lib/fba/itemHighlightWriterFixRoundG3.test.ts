@@ -169,8 +169,8 @@ describe('G3 point 1: enumerateWriterCandidates only ever returns judge-accepted
 
 describe('G3 point 3 / G4: buildWriterPrompt shows numbered candidate lines and asks for one index', () => {
   const sample: WriterCandidate[] = [
-    { parts: [], line: 'Dear Queen Sweatshirt, Fall Graphic Crewneck Sweatshirts, with 50% Cotton / 50% Polyester', keywordShapedClauses: 1, distinctPoolUnits: 1, lengthFromTarget: 5 },
-    { parts: [], line: 'Dear Queen Sweatshirt, Made For Chilly Mornings, with 50% Cotton / 50% Polyester', keywordShapedClauses: 1, distinctPoolUnits: 1, lengthFromTarget: 2 },
+    { parts: [], line: 'Dear Queen Sweatshirt, Fall Graphic Crewneck Sweatshirts, with 50% Cotton / 50% Polyester', keywordShapedClauses: 1, distinctPoolUnits: 1, lengthFromTarget: 5, usesAlternateSpelling: 0 },
+    { parts: [], line: 'Dear Queen Sweatshirt, Made For Chilly Mornings, with 50% Cotton / 50% Polyester', keywordShapedClauses: 1, distinctPoolUnits: 1, lengthFromTarget: 2, usesAlternateSpelling: 0 },
   ]
 
   it('the user message numbers every candidate 1..N, in the ORDER given (already ranked by the caller)', () => {
