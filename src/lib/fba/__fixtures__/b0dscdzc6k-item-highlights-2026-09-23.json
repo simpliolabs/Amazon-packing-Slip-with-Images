@@ -1,0 +1,47 @@
+{
+  "asin": "B0DSCDZC6K",
+  "note": "RULING I6 (round I, phase-i1-rulings.md, Minor). Three rounds (F1/G1/H1) measured acceptance on this family from a prior session's own scratch directory, never committed, so no later round or reviewer could re-run the same measurement. Landed here as a FIXTURE (identity phrases, pool units, blank specs, the six design keys) — not production code. Per fba-generation-invariants-retrospective.md / unisex-lean-vs-a-women-pool-starves-the-field.md: a Gildan 18000 sweatshirt family, Classic fit, 50/50 cotton-poly blend, family lean UNISEX (48 of 69 real keywords were gendered and correctly refused by the truth rule, which is why the real family holds at 97 for most designs and is not reproduced verbatim here). This fixture instead gives each design a SYNTHETIC pool that deliberately carries one fit/cut-carrying phrase alongside ordinary ones (the exact class phase-h1-review-truth.md's t8-scale.ts swept, and the live 'relaxed unisex fit' defect came from) plus 1-2 ordinary keyword phrases, so a future round measures the SAME shape of family H1/I1 exist to guard, not the shape that trivially never carries the class at all.",
+  "blank": {
+    "brand": "Gildan",
+    "brandInCopy": false,
+    "fit": "Classic",
+    "material": "Cotton/Polyester Blend",
+    "unisex": true,
+    "garmentFamily": "sweatshirt",
+    "styleCode": "18000",
+    "audienceLean": "unisex"
+  },
+  "specFacts": ["Classic Fit", "Unisex Fit", "Cotton Polyester Blend"],
+  "designs": [
+    {
+      "designKey": "A",
+      "designName": "Don't Quit",
+      "pool": ["Relaxed Weekend Layer", "Perfect for Layering Season", "Cute Crewnecks"]
+    },
+    {
+      "designKey": "B",
+      "designName": "Boss Definition",
+      "pool": ["Oversized Cozy Layer", "Made For Chilly Mornings", "Cute Crewnecks"]
+    },
+    {
+      "designKey": "C",
+      "designName": "Real King",
+      "pool": ["Slim Everyday Layer", "Perfect for Layering Season", "Embroidered Sweatshirts for Women"]
+    },
+    {
+      "designKey": "D",
+      "designName": "Self Made",
+      "pool": ["Heavyweight Winter Warmth", "Cute Crewnecks", "Made For Chilly Mornings"]
+    },
+    {
+      "designKey": "E",
+      "designName": "Beast Mode",
+      "pool": ["Boxy Streetwear Layer", "Perfect for Layering Season", "Cozy Autumn Pullover"]
+    },
+    {
+      "designKey": "F",
+      "designName": "Relax I'm a CEO",
+      "pool": ["Relaxed Weekend Layer", "Cozy Autumn Pullover", "Embroidered Sweatshirts for Women"]
+    }
+  ]
+}

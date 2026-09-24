@@ -725,13 +725,29 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
   // (or the brand) back inside the SAME relation's reading with no check at all ("Retro Sunset Shirt
   // with a Classic Fit and Deep Pockets" — the pockets are attached by "with", not by "and", but
   // nothing walked that far). Once a relation join ("with"/"in") opens, EVERY unit up to the next
-  // "," must be SPEC-class and never the brand unit — a list join or an article inside the open
-  // clause does not close it; only a comma does (the SAME clause boundary the tail's own span-truth
-  // check already uses, `judgeWriterArrangement` below). Walked separately from the pair-wise passes
-  // above so E02's direct-violation message (the FIRST unit after "with"/"in") is unchanged — this
-  // pass only ever fires for a unit that pass already let through.
+  // REAL clause boundary must be SPEC-class and never the brand unit — a list join or an article
+  // inside the open clause does not close it.
+  // RULING I3 (round I, phase-i1-rulings.md, Important — fix, not merely a comment correction):
+  // "only a comma does" used to mean EVERY comma, unconditionally — but `segmentClauses` (RULING
+  // H1, "the single exported authority on where a clause begins/ends") does NOT close on a comma
+  // that CHAINS a further relation-target fact into the clause that is already open ("with A, B" is
+  // ONE clause). Review H1 IMPORTANT 1 (`t2-thirdwalk.ts`) proved this walk disagreed: it reset
+  // `relationOpenGlue` on that SAME chaining comma, so nothing downstream of it was ever checked
+  // again, letting an arbitrary pool unit ride in on the very next join
+  // ("…with Crew Neck, Classic Fit and Deep Front Pockets Design" — legal here, pre-fix; refused by
+  // `segmentClauses`'s own `hasRelationGlue` clause, which the truth walk already judges against).
+  // `chainedCommaIdx` is derived from `segmentClauses(parts, units)` — READABILITY'S own default
+  // params (`GLUE_PUNCTUATION` closers, `wearFactCloses` false), never the truth walk's widened
+  // view (RULING I1) — because this is a GRAMMAR question ("is this arrangement well-formed at
+  // all"), not the truth-only question of what gets judged. Walked separately from the pair-wise
+  // passes above so E02's direct-violation message (the FIRST unit after "with"/"in") is unchanged
+  // — this pass only ever fires for a unit that pass already let through. RULING B8a S2 rule 6's
+  // OWN acceptance ("Retro Sunset Shirt with a Classic Fit, Deep Pockets and Stretchy Waistband,
+  // …" — T01b, ruled legal, picker-bounded, FILED) is preserved: "Deep Pockets" is a POOL unit, so
+  // the comma before it is never chaining, and the relation closes there exactly as before.
+  const { chainedCommaIdx: q1ChainedCommaIdx } = segmentClauses(parts, [...byId.values()])
   let relationOpenGlue: string | null = null
-  for (const part of parts) {
+  for (const [idx, part] of parts.entries()) {
     if ('unit' in part) {
       if (relationOpenGlue) {
         const u = byId.get(part.unit)!
@@ -744,7 +760,7 @@ function validateGrammar(parts: readonly ArrangementPart[], byId: ReadonlyMap<st
       }
       continue
     }
-    if (part.glue === ',') { relationOpenGlue = null; continue }
+    if (part.glue === ',') { if (!q1ChainedCommaIdx.has(idx)) relationOpenGlue = null; continue }
     if (RELATION_GLUE.has(part.glue)) { relationOpenGlue = part.glue; continue }
     // A list join, an article, or any other closed-glue token neither opens nor closes the clause.
   }
@@ -1680,13 +1696,28 @@ export const WRITER_RULE_REGISTRY: readonly WriterRuleSpec[] = [
  *  was actively wrong: it told a literal-following model to look for the relation WORD, and the
  *  judge's own retry message for the "Christmas in July" rejection said the same thing, so the one
  *  unit for which the system already knows the right answer was teaching the model the wrong one. */
+/** RULING I4 (round I, phase-i1-rulings.md, Important — correction, not deletion): this sentence
+ *  used to say "split the line at every {glue char} into clauses" — literally true before RULING
+ *  H1 (fix round H1), false after it. `clauseShapesFromParts` (what `writerReadabilityVerdict`'s
+ *  parts-based branch — every production caller — actually reads) derives from `segmentClauses`'s
+ *  DEFAULT call (`GLUE_PUNCTUATION` closers, `wearFactCloses` false), which keeps H1's stacking
+ *  exception live regardless of RULING I1 (I1 only widened the TRUTH walk's SEPARATE call, passing
+ *  `TRUTH_CLAUSE_CLOSERS`/`wearFactCloses: true` — readability's own clause count is unchanged by
+ *  I1). So "with A, B" was already ONE readability clause, not two, and this sentence taught the
+ *  wrong count. Corrected to state the stacking exception explicitly — still built from the SAME
+ *  constants (`READABILITY_CLAUSE_SPLIT_RE`, `RELATION_GLUE`), so the two still cannot drift apart.
+ *  This function is currently UNREACHABLE from any live prompt (RULING G3/G4, spec §3a: the model
+ *  only picks an index; `buildWriterPrompt` renders no rule sentence at all) — corrected rather
+ *  than deleted because `WRITER_RULE_REGISTRY` is explicitly KEPT as the one place documenting
+ *  every rule the validator/judge enforce, for a human reader, even though nothing renders it into
+ *  a prompt any more. */
 function writerReadabilityFidelitySentence(): string {
   const splitChars = READABILITY_CLAUSE_SPLIT_RE.source.replace(/[[\]]/g, '').split('').join(' ')
   const relationWords = [...RELATION_GLUE].join('"/"')
   // RULING Q11 (fix round B6, readability shape refined): a list SECTION is a RUN OF TWO OR MORE
   // consecutive clauses lacking a relation word — a single such clause, sitting between two
   // relation clauses, is ordinary prose, not a list section (`countListSections` above).
-  return `READABILITY: split the line at every ${splitChars} into clauses. AT LEAST ONE clause must contain a "${relationWords}" JOIN (a glue token connecting two units) — a "${relationWords}" appearing INSIDE a unit's own text does not count, and a line with ZERO such join clauses reads as a keyword list and is rejected. After that, a RUN OF TWO OR MORE consecutive clauses that all lack a "${relationWords}" join counts as ONE list section (a trailing run of any length still counts once; a SINGLE such clause on its own, between two relation clauses, is ordinary prose and does NOT count) — AT MOST ONE such list section is allowed; a SECOND one, split off by another relation clause, will also be rejected. If the design has an identity unit, the line must also name or evoke it.`
+  return `READABILITY: split the line into clauses at every ${splitChars} — EXCEPT a "," that chains a further "${relationWords}"-target fact into a relation clause already open ("with A, B" is ONE clause carrying two facts, not two clauses). AT LEAST ONE clause must contain a "${relationWords}" JOIN (a glue token connecting two units) — a "${relationWords}" appearing INSIDE a unit's own text does not count, and a line with ZERO such join clauses reads as a keyword list and is rejected. After that, a RUN OF TWO OR MORE consecutive clauses that all lack a "${relationWords}" join counts as ONE list section (a trailing run of any length still counts once; a SINGLE such clause on its own, between two relation clauses, is ordinary prose and does NOT count) — AT MOST ONE such list section is allowed; a SECOND one, split off by another relation clause, will also be rejected. If the design has an identity unit, the line must also name or evoke it.`
 }
 
 // RULING G3/G4 (fix round G1, phase-g1-rulings.md, the design change, spec §3a): `buildWorkedExample`
@@ -1751,14 +1782,21 @@ const WRITER_CANDIDATE_MAX_EVALUATED = 300
 /** G3 point 3: "the top K (K <= 8) RENDERED LINES". */
 export const WRITER_CANDIDATE_TOP_K = 8
 /** RULING H3(b) (fix round H1): three length buckets spanning the writer's own accepted band —
- *  the two ENDS read from `CONTENT_CONTRACT.itemHighlights` (never hardcoded), the two INTERNAL
- *  split points (104, 112) are the ruling's own literal cut points (roughly a third of the way up
- *  from the floor; two characters past the fill target). Half-open `[lo, hi)` except the last,
- *  which is closed at `max` (the ruling's own band is inclusive there). */
+ *  the two ENDS read from `CONTENT_CONTRACT.itemHighlights` (never hardcoded). RULING I7 (round I,
+ *  phase-i1-rulings.md, Minor): the two INTERNAL split points now DERIVE from
+ *  `CONTENT_CONTRACT.itemHighlights.fillTarget` too, instead of the literal numbers `104`/`112` —
+ *  the ruling's own wording for the second cut point ("two characters past the fill target") is
+ *  now the actual arithmetic (`fillTarget + 2`), not merely a description of a number that could
+ *  drift out of sync with it; the first mirrors it on the other side (`fillTarget - 6`). At the
+ *  contract's CURRENT values (min 97, fillTarget 110, max 125) this evaluates to the identical
+ *  104/112 the fix round chose — a fillTarget change now moves the buckets with it, the effect
+ *  RULING H3(b) always intended `CONTENT_CONTRACT` to have and the two hardcoded literals did not.
+ *  Half-open `[lo, hi)` except the last, which is closed at `max` (the ruling's own band is
+ *  inclusive there). */
 const WRITER_CANDIDATE_LENGTH_BUCKETS: readonly [number, number][] = [
-  [CONTENT_CONTRACT.itemHighlights.min, 104],
-  [104, 112],
-  [112, CONTENT_CONTRACT.itemHighlights.max + 1],
+  [CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.fillTarget - 6],
+  [CONTENT_CONTRACT.itemHighlights.fillTarget - 6, CONTENT_CONTRACT.itemHighlights.fillTarget + 2],
+  [CONTENT_CONTRACT.itemHighlights.fillTarget + 2, CONTENT_CONTRACT.itemHighlights.max + 1],
 ]
 
 /** Appends `unit` to `parts`, joined by `glue` UNLESS `parts` is still empty (nothing to join to
