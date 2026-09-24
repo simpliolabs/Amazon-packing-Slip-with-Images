@@ -34,7 +34,7 @@ import type OpenAI from 'openai'
 import {
   phraseTruthVerdict, garmentNounConstraint, LEAN_FEM_CORE, LEAN_MASC_CORE,
   KIDS_AUDIENCE_RE, ADULT_AUDIENCE_RE, FIT_CLAIM_RE, PURITY_ADJACENT_RE, FIBER_RE,
-  type PhraseTruthCtx,
+  type PhraseTruthCtx, type PhraseTruthReason,
 } from '@/lib/fba/contentTruth'
 import { PERFORMANCE_CLAIM_RE } from '@/lib/fba/blankSpecs'
 import {
@@ -1368,57 +1368,95 @@ export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUni
   })
   // RULING H1 (fix round H1, phase-h1-rulings.md, Blocking): clause boundaries over `truthParts`
   // are DERIVED from `segmentClauses` (the single authority, above) — never a second, narrower
-  // walk. A `,` that CHAINS a further fact into an already-open relation clause ("with A, B") no
-  // longer closes the clause here either, widening the truth walk's own span checks to match. THE
-  // MECHANIC (because widening the clause boundary alone measures nothing): `phraseTruthVerdict`
-  // stops at a `,` inside the STRING it is handed, so a wider clause whose rendered span still
-  // reads "...A, B" would still be judged as if it stopped at the comma — the identical hole, now
-  // with a green-looking test.
-  // RULING I1 (round I, phase-i1-rulings.md, Blocking — the class fix): H1's mechanic covered only
-  // the STACKING comma inside an already-open relation. Review H1 (Blocking 1) found the SAME hole
-  // one level up — a plain LIST comma between two POOL units, reached before any relation glue, so
-  // whether a pool phrase shares a truth clause with a later relation fact depended on where in the
-  // list it sat (order-dependent), not on the unit sequence. `TRUTH_CLAUSE_CLOSERS` is now EMPTY
-  // (above), so `segmentClauses` no longer closes the clause on ANY plain list comma — the whole
-  // pool run and the relation clause it eventually opens are ONE truth clause, unless
-  // `segmentClauses`'s own relation-hand-off branch (RULING S2, a comma reached while a relation is
-  // ALREADY open, handing off to a non-fact unit) closes it, exactly as it always did. Extending
-  // H1's OWN rewrite mechanic to match (per the ruling's own wording): EVERY surviving list comma
-  // in `truthParts` — not only the ones `segmentClauses` happens to flag as "chained" under the now
-  // -empty closer set — is rewritten to the list glue `and` before being handed to
-  // `phraseTruthVerdict`, which stops at a literal `,` inside the string. The real OUTPUT `line`
-  // (rendered above, from the UNMODIFIED `v.parts`) is never touched by this — `truthRenderParts`
-  // exists only to decide what gets judged. A comma that `segmentClauses` DOES still close on (the
-  // S2 hand-off) can safely be rewritten too: it is never part of any span this walk renders, because
-  // every span comes from ONE clause's own `unitIdx`, and a closed comma always sits at a clause
-  // boundary, never inside one clause's index range.
+  // walk.
+  // RULING K1 (fix round K1, phase-k1-rulings.md, Blocking — the class fix, stated as a PROPERTY,
+  // superseding rounds H1/I1's CONTIGUOUS-span mechanic below this comment). Four rounds each closed
+  // ONE instance of ONE class (a `,` before a relation join; a `,` chaining facts inside an open
+  // relation; which POOL POSITION a unit occupied) — this round states the property itself: the
+  // verdict for an arrangement must be a function of the unit MULTISET (and the glue grammar),
+  // NEVER of the order units appear in, the punctuation between them, or which unit sits in the
+  // middle. `contentTruth.ts`'s `FIT_CLAIM_RE` (and its sibling regexes — OUT OF BOUNDS this round;
+  // the fix lives here, on the writer's side of the call) has its own lazy guard that stops the
+  // FIRST time it meets a second fit-class word, so H1/I1's CONTIGUOUS rendered span — which drags
+  // in whatever intervening unit the arrangement's own order happens to place between two units —
+  // shields whichever claim comes first in the rendered text from ever being examined; move the
+  // intervening unit and the OTHER claim gets shielded instead (review I1 BLOCKING 1: 14.6% of
+  // offered candidates at scale, 10,816 divergences in a from-scratch permutation harness).
+  // MECHANIC (a) from the ruling (the implementer's choice — mechanic (b), "normalise the span",
+  // was the alternative): judge every UNORDERED PAIR of claim-eligible units, in BOTH orders,
+  // rendered with NOTHING between them — never a contiguous span that could carry a third unit's
+  // text between the two halves of a claim — PLUS the clause's full claim-eligible unit set,
+  // rendered ONCE more in a CANONICAL order (a pure function of the units' own stable `id`s, never
+  // of this arrangement's chosen order), which catches an N-ARY (3+) claim that only shows itself
+  // across more than two units. Both halves are, BY CONSTRUCTION, invariant under permuting the
+  // arrangement's unit order or glue spelling: a pair rendered alone never had a third unit to drag
+  // in, and the canonical render is the IDENTICAL string for every permutation of the identical unit
+  // SET, so it can never itself become a second order-dependent escape. Narrowest first (RULING K6,
+  // "keep the width-first minimal-span search... it produces the tightest violation message"): every
+  // pair (width 2, the narrowest possible claim span) is tried before the wider canonical render.
+  // `b2-breakdown.ts` (the reviewer's own from-scratch acceptance probe) is PURE ORDER = 0 under this
+  // mechanic (phase-k1-report.md).
+  // RULING K2 (fix round K1, Blocking — a regression RULING I1 caused). Emptying
+  // `TRUTH_CLAUSE_CLOSERS` (I1) merged the identity unit into the SAME truth clause as the relation
+  // facts, so a design NAME carrying a fit word ("Classic Mom Era") now bound that word to a
+  // trailing "... Fit" spec fact across the whole line — 20 of 72 fit-word-named families offered
+  // ZERO candidates for exactly this reason (review I1, IMPORTANT 2), and I2's own STOP measurement
+  // could not see it because no fixture it used had a fit-word design name. The spec's own reading
+  // (§2g) rules this correctly: the identity is a PERSONA, not a product claim. `identity` units are
+  // therefore TRUTH-INERT IN COMBINATION — their OWN truth is already checked standalone, at
+  // admission (`buildAdmittedUnits`'s `phraseTruthVerdict` gate on the design name, above) — so they
+  // take no part in any CROSS-unit claim span here. Garment-head units stay IN: they are derived
+  // from the SAME truth-gated allowed-noun table `phraseTruthVerdict`'s own wrong-garment-noun rule
+  // already gates with, so they can never launder a claim the way a free-text identity could.
+  // RULING K7 (fix round K1): the wear fact's own position-dependence, closed by the SAME exclusion
+  // mechanism as K2, for the same underlying reason. A wear-fact unit ("Can be worn as Oversized")
+  // can never legally be list-joined OR relation-joined to a neighbour at all
+  // (`validateGrammar`'s S2 / relation-target rules already refuse that before this walk ever runs)
+  // — every rendered occurrence of it is already, structurally, its OWN assertion, standing alone in
+  // its own "," comma clause wherever the grammar allows it to sit (start, middle or end — S2 does
+  // not restrict which). The OLD mechanic (`segmentClauses`'s `wearFactCloses` parameter: "a ','
+  // next to a wear-fact unit force-closes the clause, unconditionally") gave that isolation a
+  // POSITION-DEPENDENT boundary that review I1 (MINOR 4) proved still depended on WHERE the wear
+  // fact sat relative to its neighbours — exactly the class this round exists to remove, reintroduced
+  // by the very mechanism meant to guard a DIFFERENT sanctioned pattern. Excluding the wear-fact unit
+  // from every cross-unit span — the identical treatment K2 gives the identity unit, justified the
+  // identical way (its own truth is a closed question the grammar already settled) — makes the
+  // exclusion a pure function of the unit's KIND, never of its position or its neighbours' commas,
+  // so `wearFactCloses` is never read by this walk any more (still a valid, default-`false` parameter
+  // of `segmentClauses` for any other caller — this walk simply never opts in).
   const { clauses: truthClauses } = segmentClauses(truthParts, units, TRUTH_CLAUSE_CLOSERS, true)
-  const truthRenderParts: ArrangementPart[] = truthParts.map((p) => ('unit' in p ? p : (p.glue === ',' ? { glue: 'and' } : p)))
-  // RULING I1: with the truth clause now spanning the WHOLE pool/relation run (above), a clause can
-  // hold many more units than before, so the pair search is walked WIDTH-FIRST (the narrowest
-  // contiguous sub-span first, then wider ones) rather than anchored at the clause's first unit.
-  // This keeps the reported span the TIGHTEST one that actually carries the lie, instead of always
-  // dragging in every unit that happens to precede it in THIS particular ordering — the span search
-  // itself must not reintroduce an order dependency the ruling just removed from clause scoping.
-  // P4 still requires a CONTIGUOUS sub-span (never skipping over an intervening unit), so two
-  // orderings that put a different unit BETWEEN the same lying pair still render different (but
-  // both truthful) violation text — that residual difference is the intervening unit genuinely being
-  // part of the claim's context, not a punctuation or order escape.
+  const CROSS_UNIT_CLAIM_EXEMPT_KINDS: ReadonlySet<AdmittedUnitKind> = new Set(['identity'])
+  const truthById = new Map(units.map((u) => [u.id, u] as const))
+  const renderClaimSpan = (parts: readonly ArrangementPart[]): string => renderArrangement(parts, units).trim()
+  const reportSpanViolation = (span: string, verdict: { ok: false; reason: PhraseTruthReason }): JudgeWriterLineResult => {
+    const label = SPAN_REASON_MESSAGES[verdict.reason] ?? verdict.reason
+    return { ok: false, violations: [`join: '${span}' — ${label}`] }
+  }
   for (const clause of truthClauses) {
-    const unitIdx = clause.unitIdx
-    for (let w = 1; w < unitIdx.length; w++) {
-      for (let a = 0; a + w < unitIdx.length; a++) {
-        const b = a + w
-        const span = renderArrangement(truthRenderParts.slice(unitIdx[a], unitIdx[b] + 1), units).trim()
-        const spanVerdict = phraseTruthVerdict(span, ctx.truthCtx)
-        if (!spanVerdict.ok) {
-          // RULING Q5 (fix round B6, value Blocking B2): plain-language — never the raw internal
-          // reason code, which named nothing the model was taught.
-          const label = SPAN_REASON_MESSAGES[spanVerdict.reason] ?? spanVerdict.reason
-          return { ok: false, violations: [`join: '${span}' — ${label}`] }
+    const claimUnits = clause.unitIdx
+      .map((idx) => truthParts[idx])
+      .filter((p): p is ArrangementUnitPart => 'unit' in p)
+      .map((p) => truthById.get(p.unit)!)
+      .filter((u) => !CROSS_UNIT_CLAIM_EXEMPT_KINDS.has(u.kind))
+    if (claimUnits.length < 2) continue
+    for (let a = 0; a < claimUnits.length; a++) {
+      for (let b = a + 1; b < claimUnits.length; b++) {
+        for (const [left, right] of [[claimUnits[a], claimUnits[b]], [claimUnits[b], claimUnits[a]]] as const) {
+          const span = renderClaimSpan([{ unit: left.id }, { glue: 'and' }, { unit: right.id }])
+          const spanVerdict = phraseTruthVerdict(span, ctx.truthCtx)
+          if (!spanVerdict.ok) return reportSpanViolation(span, spanVerdict)
         }
       }
     }
+    // the WHOLE clause's claim-eligible units, in a fixed CANONICAL order (unit id, never this
+    // arrangement's own order) — catches a claim that only shows itself across 3+ units, without
+    // itself becoming a second order-dependent span.
+    const canonical = [...claimUnits].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0))
+    const canonicalParts: ArrangementPart[] = []
+    canonical.forEach((u, i) => { if (i > 0) canonicalParts.push({ glue: 'and' }); canonicalParts.push({ unit: u.id }) })
+    const wholeSpan = renderClaimSpan(canonicalParts)
+    const wholeVerdict = phraseTruthVerdict(wholeSpan, ctx.truthCtx)
+    if (!wholeVerdict.ok) return reportSpanViolation(wholeSpan, wholeVerdict)
   }
   // RULING P1 (fix round B5, compliance Blocking, defense in depth): more than one unit carrying
   // the brand in the FINAL arrangement is a named violation — never only an admission-time drop.
@@ -1773,6 +1811,11 @@ const WRITER_CANDIDATE_MAX_POOL_UNITS = 8
  *  added: stacking every true spec fact into ONE clause is what the composer's own flag-off line
  *  already does (comma-joined, no relation word required of it); this cap is the search's mirror
  *  of that same freedom, bounded the same way the pool subset is. */
+// RULING K5 (fix round K1, phase-k1-rulings.md): 6 -> 5. Review I1 (MINOR 3) measured depth 6 as
+// NEVER offered in-band on any real family — the deepest admitted lines topped out at depth 5, and
+// depth 5 itself was already only 1.3% of offered candidates and read worse (a spec-sheet run of 5
+// attribute nouns in a row) than every depth-2/3 line it competed with. Lowering the cap to 5 costs
+// zero observed acceptance and shrinks the search.
 const WRITER_CANDIDATE_MAX_REL_UNITS = 6
 /** At most this many full `judgeWriterArrangement` calls (each already running its own `runTail`)
  *  are spent evaluating candidates for ONE design, across every subset/relation-unit/relation-glue/
