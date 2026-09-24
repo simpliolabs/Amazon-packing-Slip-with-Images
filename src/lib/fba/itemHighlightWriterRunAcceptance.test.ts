@@ -21,7 +21,7 @@ import {
 } from './listingPipeline'
 import {
   runWriterForDesign, writerReadabilityVerdict, ihWriterMode, ihWriterModel, ihWriterMaxCallsBudget, ihWriterDeadlineMs,
-  buildAdmittedUnits, renderArrangement, IH_WRITER_RETRY_CAP,
+  buildAdmittedUnits, renderArrangement, IH_WRITER_RETRY_CAP, enumerateWriterCandidates,
   type AdmittedUnit,
 } from './itemHighlightWriter'
 import { CONTENT_CONTRACT } from './contentContract'
@@ -59,6 +59,14 @@ function stubArrangementClient(responses: unknown[]) {
     i++
     return { choices: [{ message: { content: JSON.stringify(parts) }, finish_reason: 'stop' }] }
   })
+  return { client: { chat: { completions: { create: mockCreate } } } as never, create: mockCreate }
+}
+/** RULING H4 (fix round H1): a client that always THROWS — a genuine transport/client error, the
+ *  ONLY shape still worth a retry up to `IH_WRITER_RETRY_CAP` (a well-formed, successfully-parsed
+ *  response with no "pick" key no longer retries at all — see `stubArrangementClient` callers that
+ *  used to rely on a no-"pick" response spending the full cap). */
+function stubThrowingClient() {
+  const mockCreate = vi.fn(async () => { throw new Error('simulated client/transport failure') })
   return { client: { chat: { completions: { create: mockCreate } } } as never, create: mockCreate }
 }
 
@@ -132,18 +140,18 @@ describe('B9: IH_WRITER mode resolution', () => {
     expect(ihWriterModel(undefined)).toBe('gpt-4.1')
     expect(ihWriterModel('gpt-5')).toBe('gpt-5')
   })
-  it('W8: IH_WRITER_MAX_CALLS (the per-regen budget) defaults to 18, parses a positive int, ignores garbage', () => {
-    expect(ihWriterMaxCallsBudget(undefined)).toBe(18)
+  it('W8: IH_WRITER_MAX_CALLS (the per-regen budget) defaults to 24 (RULING P4, round P: raised from 18 — deadwhy.ts measured the OLD default starving the last design of a 6-design family, 20 calls reserved against an 18 budget), parses a positive int, ignores garbage', () => {
+    expect(ihWriterMaxCallsBudget(undefined)).toBe(24)
     expect(ihWriterMaxCallsBudget('5')).toBe(5)
-    expect(ihWriterMaxCallsBudget('0')).toBe(18)
-    expect(ihWriterMaxCallsBudget('-3')).toBe(18)
-    expect(ihWriterMaxCallsBudget('bogus')).toBe(18)
+    expect(ihWriterMaxCallsBudget('0')).toBe(24)
+    expect(ihWriterMaxCallsBudget('-3')).toBe(24)
+    expect(ihWriterMaxCallsBudget('bogus')).toBe(24)
     // RULING W5 (fix round B7b, wire minor 1): strict, like `ihWriterDeadlineMs` below —
     // `Number.parseInt` alone parses only a PREFIX, so '2.9' silently became 2 and '/api/health'
     // echoed a value nobody set (review B6/wire, health2.out.txt: "on/-/2.9/1e3 -> 2").
-    expect(ihWriterMaxCallsBudget('2.9')).toBe(18)
-    expect(ihWriterMaxCallsBudget('1e3')).toBe(18)
-    expect(ihWriterMaxCallsBudget('18ms')).toBe(18)
+    expect(ihWriterMaxCallsBudget('2.9')).toBe(24)
+    expect(ihWriterMaxCallsBudget('1e3')).toBe(24)
+    expect(ihWriterMaxCallsBudget('18ms')).toBe(24)
     expect(ihWriterMaxCallsBudget('  5  ')).toBe(5)
   })
   it('IH_WRITER_RETRY_CAP (the PER-DESIGN retry cap) is 3 — distinct constant from the per-regen budget', () => {
@@ -343,59 +351,93 @@ describe('B8/W8: eligibility', () => {
     const maxPossible = units.map((u) => u.text).join(', ')
     expect(maxPossible.length).toBeLessThan(CONTENT_CONTRACT.itemHighlights.min)
   })
-  it('IS eligible for under-floor-no-repeat / thin-candidates / under-floor (non-zero pool, apparel family)', async () => {
+  // RULING G3 (fix round G1, design change): `COMPOSED`'s own pool is 3 phrases, one of which
+  // (`'Graphic Retro Tee'`) is dropped at admission for colliding with the identity ("Retro
+  // Sunset") — the 2 that survive, even combined, cannot clear the 97-char floor (measured: every
+  // combination renders 60-91 chars). Under the OLD compose-then-judge design that never mattered
+  // to THIS pin: the model was always CALLED at least once whenever eligible, regardless of
+  // whether any draft it could ever propose would pass. Under the chooser, `enumerateWriterCandidates`
+  // runs a FREE, exhaustive local search FIRST — for a family no arrangement could ever pass, it
+  // correctly finds zero candidates and skips the call entirely, a STRONGER guarantee ("never
+  // spend a billable call on a hopeless family"), but the WRONG signal for what THIS pin is
+  // actually about (whether these 3 hold reasons are exempt from the terminal early-skip list,
+  // never whether a specific thin fixture happens to have a findable candidate). A richer,
+  // LOCAL pool — never `COMPOSED`, which other tests in this file depend on staying exactly as
+  // thin as it is — gives the search real room to find one.
+  it('IS eligible for under-floor-no-repeat / thin-candidates / under-floor (non-zero pool, apparel family) — the search finds a REAL candidate, so the model is asked', async () => {
+    const richComposed = {
+      candidates: ['Soft Everyday Cotton Feel', 'Perfect For Weekend Wear', 'Made For Chilly Fall Mornings', 'Cozy Layer For Every Day'],
+      specFacts: ['Classic Fit', 'Relaxed Everyday Comfort'],
+      brandPick: null as string | null, wearFact: null as string | null,
+    }
     for (const hold of ['under-floor-no-repeat', 'thin-candidates', 'under-floor']) {
       const { client } = stubArrangementClient([arrangementJson(['u0', { glue: 'with' }, 'u1'])])
-      const r = await runWriterForDesign({ composed: COMPOSED, fallbackHold: hold, designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
+      const r = await runWriterForDesign({ composed: richComposed, fallbackHold: hold, designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
       expect(r.calls, hold).toBeGreaterThan(0)
     }
   })
 })
 
-describe('mechanics: a malformed/hallucinating arrangement is rejected on every attempt; a real re-word is accepted', () => {
-  it('a unit id that does not exist is rejected on every attempt -> falls back', async () => {
+// RULING G3 (fix round G1, design change): this describe block's ORIGINAL premise — the model
+// COMPOSES an arrangement (a unit-id list), and code judges what it composed, retrying on a
+// malformed one — is the exact design G3 replaces. `COMPOSED`'s own thin pool (2 units survive
+// admission, neither combination clears the 97-char floor) means BOTH tests below now finish
+// before the model is ever asked anything (`enumerateWriterCandidates` finds zero candidates,
+// same as the eligibility fix above) — a DIFFERENT outcome than either test's original intent
+// (grammar-retry mechanics; an honest re-word shipping). Rewritten below for the chooser: a richer
+// pool proves candidates exist, and the "malformed" shape is now a missing "pick" key, not a bad
+// unit id — there is no unit-id parsing left for the model to get wrong.
+describe('mechanics: a malformed/hallucinating pick is retried, then falls back to candidate 1; a valid pick ships that exact candidate', () => {
+  const richComposed = {
+    candidates: ['Soft Everyday Cotton Comfort Feel', 'Made For Weekend Adventures', 'Perfect For Layering Season'],
+    specFacts: ['Classic Fit'],
+    brandPick: null as string | null, wearFact: null as string | null,
+  }
+
+  it('RULING H4 (fix round H1, supersedes this pin\'s own old title): a well-formed response with no "pick" key at all is a DECIDED answer, never retried — 1 call, ships the search\'s OWN top candidate', async () => {
     const { client, create: c } = stubArrangementClient([
       arrangementJson(['u999']), arrangementJson(['u998']), arrangementJson(['u997']),
     ])
-    const r = await runWriterForDesign({ composed: COMPOSED, fallbackHold: 'thin-candidates', designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
-    expect(r.accepted).toBe(false)
-    expect(c).toHaveBeenCalledTimes(IH_WRITER_RETRY_CAP)
-    console.log('malformed-id stub — rejected every attempt:', JSON.stringify(r.reasons))
+    const units = buildAdmittedUnits(richComposed, { designName: 'Retro Sunset', truthCtx: TEE_CTX })
+    const expectedTop = enumerateWriterCandidates(units, { truthCtx: TEE_CTX, runTail: passthroughTail }).candidates[0]
+    expect(expectedTop, 'a candidate must exist for this pin to mean anything').toBeDefined()
+    const r = await runWriterForDesign({ composed: richComposed, fallbackHold: 'thin-candidates', designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
+    expect(r.accepted, JSON.stringify(r.reasons)).toBe(true) // G3 point 4: a malformed response never falls all the way back to "no line"
+    expect(r.value).toBe(expectedTop.line)
+    expect(c).toHaveBeenCalledTimes(1) // RULING H4: never retried — a well-formed keyless response is not a client error
+    console.log('no-pick-key stub — fell back to candidate 1:', JSON.stringify(r.value))
   })
 
-  it('a stub that arranges REAL admitted unit ids (identity + pool units + a spec fact) is accepted on the first attempt', async () => {
-    // RULING K1 (fix round B4): the judge's own band/repeat pre-checks now run even under a
-    // pass-through stub tail, so — unlike the pre-K1 fixture, which relied on the stub tail's
-    // total silence about length — this arrangement must ITSELF clear the 97-125 band. RULING K7:
-    // a RELATION join ("with", not "and") to the spec-fact unit keeps the whole line as ONE
-        // non-keyword-shaped clause (no comma at all, so there is nothing to split it into more).
-    const bigComposed = {
-      candidates: ['Soft Everyday Cotton Comfort Feel', 'Made For Weekend Adventures'],
-      specFacts: ['Classic Fit'],
-      brandPick: null as string | null, wearFact: null as string | null,
-    }
-    const units = buildAdmittedUnits(bigComposed, { designName: 'Retro Sunset', truthCtx: TEE_CTX })
-    const identityId = units.find((u) => u.kind === 'identity')!.id
-    const poolA = units.find((u) => u.text === 'Soft Everyday Cotton Comfort Feel')!.id
-    const poolB = units.find((u) => u.text === 'Made For Weekend Adventures')!.id
-    const factId = units.find((u) => u.text === 'Classic Fit')!.id
-    const { client, create: c } = stubArrangementClient([arrangementJson([
-      identityId, { glue: 'and' }, poolA, { glue: 'and' }, poolB, { glue: 'with' }, factId,
-    ])])
-    const r = await runWriterForDesign({ composed: bigComposed, fallbackHold: 'thin-candidates', designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
+  it('a VALID pick ships that EXACT candidate on the first call — the model no longer composes, so there is no unit id to hallucinate', async () => {
+    const units = buildAdmittedUnits(richComposed, { designName: 'Retro Sunset', truthCtx: TEE_CTX })
+    const cands = enumerateWriterCandidates(units, { truthCtx: TEE_CTX, runTail: passthroughTail }).candidates
+    expect(cands.length).toBeGreaterThan(1)
+    const { client, create: c } = stubArrangementClient([{ pick: 2 }])
+    const r = await runWriterForDesign({ composed: richComposed, fallbackHold: 'thin-candidates', designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
     expect(r.accepted, JSON.stringify(r.reasons)).toBe(true)
+    expect(r.value).toBe(cands[1].line)
     expect(c).toHaveBeenCalledTimes(1)
-    console.log('honest-arrangement stub — accepted:', r.value)
+    console.log('valid-pick stub — accepted:', r.value)
   })
 })
 
-describe('Part 2 acceptance item 3 (retained): an always-malformed stub makes exactly the retry cap of calls, then the composer result', () => {
-  it(`exactly ${IH_WRITER_RETRY_CAP} calls, never accepted, value is never blanked to \'\' over a real fallback`, async () => {
+// RULING G3 (fix round G1, design change): this pin's original claim — "an always-malformed stub
+// makes exactly the retry cap of calls, then the composer result" — assumed the model is ALWAYS
+// asked at least once when eligible. `COMPOSED`'s own thin pool (see the "eligibility" fix above)
+// yields ZERO real candidates, so under the chooser this is now the "zero candidates" case: the
+// search alone (no call at all) already proves no line could ever ship, and the composer's result
+// stands at 0 calls — the SAME end state (never accepted, value never blanked), reached WITHOUT
+// spending the 3 calls the old design always spent chasing a family that could never succeed.
+describe('Part 2 acceptance item 3 (retained, re-grounded for G3): a family with ZERO real candidates spends ZERO calls, never accepted, value is never blanked to \'\' over a real fallback', () => {
+  it('0 calls, never accepted, the composer\'s own result stands', async () => {
     const { client, create: c } = stubArrangementClient([arrangementJson(['does-not-exist'])])
+    const units = buildAdmittedUnits(COMPOSED, { designName: 'Retro Sunset', truthCtx: TEE_CTX })
+    expect(enumerateWriterCandidates(units, { truthCtx: TEE_CTX, runTail: passthroughTail }).candidates, 'this fixture is deliberately thin — no candidate should exist').toEqual([])
     const r = await runWriterForDesign({ composed: COMPOSED, fallbackHold: 'thin-candidates', designName: 'Retro Sunset', truthCtx: TEE_CTX, runTail: passthroughTail, deps: { openai: client } })
     expect(r.accepted).toBe(false)
     expect(r.value).toBe('')
-    expect(c).toHaveBeenCalledTimes(IH_WRITER_RETRY_CAP)
+    expect(r.calls).toBe(0)
+    expect(c).not.toHaveBeenCalled()
   })
 
   it('produceItemHighlights(on), when the writer never accepts, ships the COMPOSER result — never blanks a HOLD to \'\'', async () => {
@@ -421,54 +463,54 @@ describe('W3: end-to-end through the REAL tail (produceItemHighlights / produceI
   ]
   const GATOR_TITLE = 'THE CEO Later Gator Tee Shirt | Alligator Tshirt for Women'
 
-  it('a stub arrangement built from REAL admitted units is accepted end-to-end: produceItemHighlights(on) returns the value renderArrangement produces, and it clears the real 97-125 floor', async () => {
+  // RULING G3 (fix round G1, design change): all three tests below used to stub the model's
+  // COMPOSED arrangement directly (`buildAcceptableArrangement`, a real-but-hand-assembled parts
+  // list) and assert it shipped VERBATIM after 1 call. The model no longer composes — it picks an
+  // index into `enumerateWriterCandidates`'s own ranked output — so the stub now answers
+  // `{"pick": 1}` and the expected value is the SEARCH's own top candidate, computed the SAME way
+  // production does (never a hand-built parts list `buildAcceptableArrangement` assembles by its
+  // own, different, greedy strategy). What each test proves — the WIRE from an accepted line to
+  // the entry point's return, in on/shadow/per-design mode — is unchanged.
+  it('a valid pick is accepted end-to-end: produceItemHighlights(on) returns an in-band accepted writer line', async () => {
     process.env.IH_WRITER = 'on'
     try {
-      // blankBrand: null (not CC) — a mandatory-brand blank's `ensureBlankBrandInHighlights` net
-      // would INSERT a brand phrase and evict a candidate when the arrangement doesn't happen to
-      // carry the brand itself, which is a REAL, correct byte change but would make this test's
-      // "value equals the rendered arrangement" assertion depend on brand-net internals unrelated
-      // to what this test is proving (that the entry point ships the ACCEPTED WRITER line verbatim).
       const input = { finalTitle: GATOR_TITLE, pool: GATOR_POOL, apparelProduct: true, blankBrand: GILDAN, netTitles: [GATOR_TITLE], identityDesignName: 'Later Gator' }
       const preview = buildItemHighlights(input)
       expect(preview.composed, 'fixture must compose for this test to mean anything').toBeTruthy()
-      const units = buildAdmittedUnits(preview.composed!, { designName: 'Later Gator', truthCtx: preview.truthCtx! })
-      const arrangement = buildAcceptableArrangement(units, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max)
-      expect(arrangement, 'fixture must supply enough admitted units to reach the floor').not.toBeNull()
-      const { client } = stubArrangementClient([arrangement!.json])
+      const { client } = stubArrangementClient([{ pick: 1 }])
       const result = await produceItemHighlights(input, { openai: client as never })
-      // ASSERTED AT THE ENTRY POINT'S RETURN — downstream of validate -> render -> the REAL tail ->
-      // readability, all inside produceItemHighlights itself.
-      expect(result.value).toBe(arrangement!.expected)
+      // ASSERTED AT THE ENTRY POINT'S RETURN — downstream of the search -> pick -> the REAL tail's
+      // OWN byte-identity check, all inside produceItemHighlights itself.
+      expect(result.writerLog?.accepted, JSON.stringify(result.writerLog)).toBe(true)
+      expect(result.value).toBe(result.writerLog?.writer)
       expect(result.value.length).toBeGreaterThanOrEqual(CONTENT_CONTRACT.itemHighlights.min)
       expect(result.value.length).toBeLessThanOrEqual(CONTENT_CONTRACT.itemHighlights.max)
       expect(result.hold).toBeNull()
-      expect(result.writerLog?.accepted).toBe(true)
     } finally { delete process.env.IH_WRITER }
   })
 
-  it('the SAME stub arrangement, in SHADOW mode: the composer line ships, and the writer\'s accepted line appears in the shadow block', async () => {
+  it('the SAME valid pick, in SHADOW mode: the composer line ships, and the writer\'s accepted line appears in the shadow block', async () => {
     process.env.IH_WRITER = 'shadow'
     try {
       const input = { finalTitle: GATOR_TITLE, pool: GATOR_POOL, apparelProduct: true, blankBrand: GILDAN, netTitles: [GATOR_TITLE], identityDesignName: 'Later Gator' }
       const sync = buildItemHighlights(input)
-      const units = buildAdmittedUnits(sync.composed!, { designName: 'Later Gator', truthCtx: sync.truthCtx! })
-      const arrangement = buildAcceptableArrangement(units, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max)
-      expect(arrangement).not.toBeNull()
-      const { client } = stubArrangementClient([arrangement!.json])
+      const { client } = stubArrangementClient([{ pick: 1 }])
       const result = await produceItemHighlights(input, { openai: client as never })
       // The COMPOSER's own bytes ship — never the writer's, in shadow.
       expect(result.value).toBe(sync.value)
       expect(result.hold).toBe(sync.hold)
       // ...but the writer's accepted line is visible in the shadow readout (spec §2a "Rollout": the
-      // PO reads real lines before anything ships-affecting).
-      expect(result.writerLog?.accepted).toBe(true)
-      expect(result.writerLog?.writer).toBe(arrangement!.expected)
+      // PO reads real lines before anything ships-affecting), and it is a REAL, in-band line —
+      // never the composer's own bytes re-labelled as the writer's.
+      expect(result.writerLog?.accepted, JSON.stringify(result.writerLog)).toBe(true)
+      expect(result.writerLog?.writer).not.toBe(sync.value)
+      expect(result.writerLog?.writer?.length).toBeGreaterThanOrEqual(CONTENT_CONTRACT.itemHighlights.min)
+      expect(result.writerLog?.writer?.length).toBeLessThanOrEqual(CONTENT_CONTRACT.itemHighlights.max)
       expect(result.writerLog?.composer).toBe(sync.value)
     } finally { delete process.env.IH_WRITER }
   })
 
-  it('produceItemHighlightsPerDesign(on): a stub arrangement accepted for ONE design ships through the per-child assembly — perChild/shared re-derived, not a second writer', async () => {
+  it('produceItemHighlightsPerDesign(on): a valid pick accepted for ONE design ships through the per-child assembly — perChild/shared re-derived, not a second writer', async () => {
     process.env.IH_WRITER = 'on'
     try {
       // LEXICALLY DIVERSE pool (deliberately NOT sharing "alligator"/"gator" across every phrase, as
@@ -488,18 +530,16 @@ describe('W3: end-to-end through the REAL tail (produceItemHighlights / produceI
       const sync = buildItemHighlightsPerDesign(input)
       const designA = sync.perDesign.find((d) => d.designKey === 'A')!
       expect(designA.composed, 'fixture must compose design A for this test to mean anything').toBeTruthy()
-      const units = buildAdmittedUnits(designA.composed!, { designName: 'Sunny Beach Vibes', truthCtx: designA.truthCtx! })
-      const arrangement = buildAcceptableArrangement(units, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max)
-      expect(arrangement).not.toBeNull()
-      const { client } = stubArrangementClient([arrangement!.json])
+      const { client } = stubArrangementClient([{ pick: 1 }])
       const result = await produceItemHighlightsPerDesign(input, { openai: client as never })
       const resultA = result.perDesign.find((d) => d.designKey === 'A')!
-      expect(resultA.value).toBe(arrangement!.expected)
+      const logA = result.writerLog?.find((r) => r.design === 'A')
+      expect(logA?.accepted, JSON.stringify(logA)).toBe(true)
+      expect(resultA.value).toBe(logA?.writer)
       // Downstream of the SAME assembly `buildItemHighlightsPerDesign` uses (assemblePerDesignItemHighlights) —
       // the per-child row for design A's own SKU carries the accepted writer line, not a re-derivation.
       const childA = result.perChild.find((c) => c.designKey === 'A')!
-      expect(childA.item_highlight).toBe(arrangement!.expected)
-      expect(result.writerLog?.find((r) => r.design === 'A')?.accepted).toBe(true)
+      expect(childA.item_highlight).toBe(logA?.writer)
     } finally { delete process.env.IH_WRITER }
   })
 })
@@ -586,11 +626,19 @@ describe('W8/G8: per-regen call budget (shared across designs) + bounded concurr
         kwPD('cozy everyday casual wear', 250, 3, KEYS), kwPD('bold bright colorful design', 200, 2, KEYS), kwPD('soft comfortable cotton feel', 5000, 2, KEYS),
         kwPD('playful humor apparel gift', 150, 2, KEYS), kwPD('trendy modern weekend outfit', 5000, 3, KEYS), kwPD('unique custom art print top', 5000, 3, KEYS),
       ]
-      const input = { groups, pool, apparelProduct: true, blankBrand: null, familyTitleText: 'Beach Family' }
-      // Every stub call always fails (bad unit id) -> every design that gets to run spends its FULL
-      // IH_WRITER_RETRY_CAP (3) calls. 18 / 3 = exactly 6 designs can reserve; the other 4 are
-      // skipped with 0 calls each.
-      const { client } = stubArrangementClient([arrangementJson(['does-not-exist'])])
+      // RULING G3 (fix round G1, design change): `blankBrand: null` (an UNRESOLVED blank) gives no
+      // material/fit spec fact at all — `enumerateWriterCandidates` then has no relation-eligible
+      // unit to build a clause from and correctly finds ZERO candidates, so a design that gets to
+      // run would spend 0 calls, never the full retry cap this pin's budget math depends on. GILDAN
+      // (a RESOLVED blank, material+fit both real) gives the search real room, so a design that
+      // reserves genuinely spends its cap chasing the always-no-"pick"-key stub below.
+      const input = { groups, pool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: 'Beach Family' }
+      // RULING H4 (fix round H1): a well-formed no-"pick" response no longer retries at all (1
+      // call, not the full cap), so this pin's ORIGINAL budget-exhaustion math needs a GENUINE
+      // client/transport failure to still spend the full `IH_WRITER_RETRY_CAP` per design — every
+      // stub call now THROWS. 18 / 3 = exactly 6 designs can reserve; the other 4 are skipped with
+      // 0 calls each.
+      const { client } = stubThrowingClient()
       const result = await produceItemHighlightsPerDesign(input, { openai: client as never })
       const totalCalls = (result.writerLog ?? []).reduce((n, r) => n + r.calls, 0)
       expect(totalCalls).toBeLessThanOrEqual(18)
@@ -630,6 +678,14 @@ describe('Part 2 acceptance item 5: six B0DSCDZC6K-shaped designs — REAL runIh
   })
   const REAL_TAIL_CTX = { titles: ['THE CEO Cozy Sweatshirt'], blankBrand: null, truthCtx: SWEAT_UNISEX }
 
+  // RULING G3 (fix round G1, design change): this row used to prove ONE hand-assembled, honest
+  // re-word (`buildAcceptableArrangement`) shipped VERBATIM through a stub that answered with it
+  // directly. The model no longer composes; it picks. Rewritten to measure the ACCEPTANCE THAT
+  // MATTERS MOST for this round (phase-g1-rulings.md's own acceptance criterion): for each of the
+  // six B0DSCDZC6K-shaped designs, does `enumerateWriterCandidates` — the REAL search, through the
+  // REAL `runIhTail` — find at least one candidate, and does `runWriterForDesign` (with a REAL
+  // `{"pick": 1}` stub, never a hand-fed arrangement) ship it end to end. Both are measured and
+  // logged per design; the count logged below IS the number `phase-g1-report.md` reports.
   for (const name of DESIGNS) {
     it(`${name}: an honest re-word of REAL admitted units, run through the REAL runIhTail, clears the 97-125 floor and is accepted`, async () => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -638,19 +694,22 @@ describe('Part 2 acceptance item 5: six B0DSCDZC6K-shaped designs — REAL runIh
       const truthCtx = { ...SWEAT_UNISEX, designTokens: [name] }
       const units = buildAdmittedUnits(composed, { designName: name, truthCtx })
       expect(units.length).toBeGreaterThan(0)
-      const arrangement = buildAcceptableArrangement(units, CONTENT_CONTRACT.itemHighlights.min, CONTENT_CONTRACT.itemHighlights.max)
-      expect(arrangement, `${name}: fixture must supply enough admitted content to reach the real floor`).not.toBeNull()
-      const { client, create: c } = stubArrangementClient([arrangement!.json])
+      const runTail = (line: string) => runIhTail(line, { ...REAL_TAIL_CTX, truthCtx })
+      const enumerated = enumerateWriterCandidates(units, { truthCtx, runTail })
+      const { client, create: c } = stubArrangementClient([{ pick: 1 }])
       const r = await runWriterForDesign({
-        composed, fallbackHold: 'under-floor-no-repeat', designName: name, truthCtx,
-        runTail: (line) => runIhTail(line, { ...REAL_TAIL_CTX, truthCtx }),
+        composed, fallbackHold: 'under-floor-no-repeat', designName: name, truthCtx, runTail,
         deps: { openai: client },
       })
-      console.log(JSON.stringify({ tag: 'B0DSCDZC6K_ACCEPTANCE_REAL_TAIL', design: name, calls: c.mock.calls.length, accepted: r.accepted, value: r.value || null, len: r.value.length, reasons: r.reasons }))
+      console.log(JSON.stringify({
+        tag: 'B0DSCDZC6K_ACCEPTANCE_REAL_TAIL', design: name, found: enumerated.candidates.length,
+        calls: c.mock.calls.length, accepted: r.accepted, value: r.value || null, len: r.value.length, reasons: r.reasons,
+      }))
+      expect(enumerated.candidates.length, `${name}: fixture must supply enough admitted content for the search to find a candidate`).toBeGreaterThan(0)
       expect(r.accepted, JSON.stringify(r.reasons)).toBe(true)
       expect(r.value.length).toBeGreaterThanOrEqual(CONTENT_CONTRACT.itemHighlights.min)
       expect(r.value.length).toBeLessThanOrEqual(CONTENT_CONTRACT.itemHighlights.max)
-      expect(r.value).toBe(arrangement!.expected)
+      expect(r.value).toBe(enumerated.candidates[0].line)
     })
   }
 })

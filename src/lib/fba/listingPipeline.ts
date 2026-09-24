@@ -77,7 +77,7 @@ import { loadBlankSpecRows, loadBlankAssignments, resolveFamilyBlank, familyBlan
 import { composeItemHighlightDetailed, ihAudienceOf, type ComposerResult } from '@/lib/fba/itemHighlightComposer'
 // WRITER SPEC PART 2 (2026-09-10, B4) — the writer is a LEAF (see its own header for why); this file
 // is a CONSUMER, never the other way, so the dependency graph stays acyclic.
-import { ihWriterMode, ihWriterMaxCallsBudget, ihWriterDeadlineMs, runWriterForDesign, IH_WRITER_RETRY_CAP, WriterPartialCallsError, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
+import { ihWriterMode, ihWriterMaxCallsBudget, ihWriterDeadlineMs, runWriterForDesign, IH_WRITER_RETRY_CAP, IH_HUMANIZER_CALL_BUDGET, ihHumanizerMode, humanizerWouldSkip, buildAdmittedUnits, WriterPartialCallsError, type WriterDeps } from '@/lib/fba/itemHighlightWriter'
 /* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
  * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
  * highlights. Blank-grounded (resolveFamilyBlank), never title-derived: a title cannot vouch for
@@ -2793,7 +2793,61 @@ export async function produceItemHighlightsPerDesign(
   // (`Array.from`'s mapper runs every `worker()` invocation synchronously) — so this plain counter
   // needs no lock. Pinned: budget 18 with 10 always-invalid designs spends AT MOST 18 calls (exactly
   // 6 designs × 3 retries, never the pre-fix 24).
-  const budget = ihWriterMaxCallsBudget()
+  // RULING R4 (round R, Blocking, phase-r1-rulings.md — "the budget still starves a real family").
+  // `ihWriterMaxCallsBudget()`'s default (24) is P4's OWN "theoretical worst case for a 6-design
+  // family" — a fixed constant, never derived from how many designs this regen actually has.
+  // Measured (`w5-budget8.ts`): at 8 designs the worst-case reservation totals 26 (a 7th/8th design
+  // at 4 calls each) against that fixed 24-call budget, and the 8th design ships an EMPTY Item
+  // Highlight (`hold: 'thin-candidates'`, `reasons: ["skip: per-regen call budget (24) exhausted"]`)
+  // on a real CHILD PUSH ROW where flag-off ships a full line — the composer never even attempted
+  // it. An explicit `IH_WRITER_MAX_CALLS` override (used by this repo's own fixed-budget-starvation
+  // pins, e.g. `itemHighlightWriterRunAcceptance.test.ts`'s exact-18 test) is respected EXACTLY,
+  // never widened — an operator who deliberately sized the budget down to test starvation must see
+  // that same starvation. Only the un-overridden DEFAULT is derived from `built.perDesign.length`,
+  // widened to the family's own theoretical worst case (`IH_WRITER_RETRY_CAP` + the humanizer's own
+  // per-design reservation, `IH_HUMANIZER_CALL_BUDGET` — the SAME two constants `perDesignReservation`
+  // below already reads, applied per design here instead of per this fixture's historical six) —
+  // never SHRUNK below the pinned 24 floor for a small family. A family the flag-off path can serve
+  // in full can therefore never be starved by the humanizer alone, regardless of design count.
+  const explicitMaxCalls = (process.env.IH_WRITER_MAX_CALLS ?? '').trim()
+  const budget = /^[0-9]+$/.test(explicitMaxCalls)
+    ? ihWriterMaxCallsBudget()
+    : Math.max(
+        ihWriterMaxCallsBudget(),
+        built.perDesign.length * (IH_WRITER_RETRY_CAP + (ihHumanizerMode() === 'on' ? IH_HUMANIZER_CALL_BUDGET : 0)),
+      )
+  // ROUND M6/J1-J7 (the humanizer): a design's worst-case call count is no longer bounded by
+  // `IH_WRITER_RETRY_CAP` alone whenever the flag is ON — `runWriterForDesign` can then ALSO spend
+  // `IH_HUMANIZER_CALL_BUDGET` (1, never retried) on the humanize stage, in addition to the picker's
+  // own retries. Gated on `ihHumanizerMode() === 'on'`, never unconditional: an unconditional widen
+  // was tried first and measurably changed byte-for-call-count behaviour with the flag OFF (two
+  // pre-existing pins — `itemHighlightWriterRunAcceptance.test.ts`'s G8 exact-18 pin and
+  // `itemHighlightWriterFixRoundB7b.test.ts`'s deadline pin — went RED, because reserving headroom
+  // that the flag-off path can never spend changes how many designs fit in a fixed shared budget).
+  // Gating on the SAME effective-mode function `humanizeAdmittedUnits` itself reads keeps this
+  // exactly byte-identical with `IH_HUMANIZER=off` (J7's own guarantee), and widens ONLY when the
+  // flag is actually on.
+  // RULING N5 (round N, Important — closing review `phase-m1-review-wire.md` IMPORTANT 1): the widen
+  // used to be a single value, `IH_WRITER_RETRY_CAP + IH_HUMANIZER_CALL_BUDGET`, applied UNIFORMLY
+  // to every design whenever the flag was on — but a design whose every eligible atom is too short
+  // to humanize (`humanizerWouldSkip`, itemHighlightWriter.ts) never spends that extra call at all.
+  // Measured (`probe-n5-budget.ts`, this repo's own B0DSCDZC6K family: 4 of 6 designs have only a
+  // 2-word eligible atom, 2 have a 6-phrase pool): with the OLD uniform reservation
+  // (`IH_WRITER_RETRY_CAP + IH_HUMANIZER_CALL_BUDGET` for EVERY design, `4 x 6 = 24` worst case
+  // against the default budget of 18), a throwing client served only 4 of 6. `perDesignReservation`
+  // is now computed PER DESIGN, from the SAME admitted units `runWriterForDesign` will build (a
+  // cheap, pure, local call — never billable): the 4 short-atom designs reserve only 3 each (12
+  // total), the 2 long-atom designs reserve 4 each (8 total) — worst case 20, still 2 over the
+  // (then-)default 18, so the SAME probe served 5 of 6, not the full 6. RULING N5 named this a
+  // genuine, measured improvement (4 -> 5 of 6), not a complete fix, and deliberately did NOT raise
+  // `IH_WRITER_MAX_CALLS`'s default — "this round has no measured reason to move" it.
+  // RULING P4 (round P, Blocking — phase-p1-rulings.md) IS that reason: `deadwhy.ts` measured the
+  // 6th design (MHG, this same family) skipped with `reasons: ["skip: per-regen call budget (18)
+  // exhausted"]` — the composer's own HOLD then ships as `""`, an EMPTY Item Highlight on a real
+  // CHILD PUSH ROW, under nothing more exotic than "the humanizer is on and the chooser throws" (a
+  // client error, not a bug). The default is now 24 (`itemHighlightWriter.ts`'s own P4 doc
+  // comment) — the theoretical worst case for a 6-design family, clear of the measured 20 — and
+  // `itemHighlightWriterHumanizer.test.ts` pins 6 of 6 served under this exact scenario.
   let callsReserved = 0
   const writerLogByIndex: (IhWriterLogRow | null)[] = new Array(built.perDesign.length).fill(null)
   // RULING K10 (fix round B4, wire Important I2): a REGEN-LEVEL wall-time deadline, checked before
@@ -2810,13 +2864,21 @@ export async function produceItemHighlightsPerDesign(
       writerLogByIndex[i] = row
       return d
     }
-    if (callsReserved + IH_WRITER_RETRY_CAP > budget) {
+    // RULING N5: sized to what THIS design's own admitted units will actually attempt — never a
+    // uniform worst case. `humanizerWouldSkip` (and therefore `buildAdmittedUnits`) is only ever
+    // called when the flag is on (`&&` short-circuits), so this is a pure no-op, zero extra calls
+    // and zero extra CPU, with the flag off.
+    const perDesignReservation = IH_WRITER_RETRY_CAP + (
+      ihHumanizerMode() === 'on' && !humanizerWouldSkip(buildAdmittedUnits(d.composed, { designName: d.designName, truthCtx: d.truthCtx }))
+        ? IH_HUMANIZER_CALL_BUDGET : 0
+    )
+    if (callsReserved + perDesignReservation > budget) {
       console.warn(JSON.stringify({ tag: 'IH_WRITER_BUDGET_EXHAUSTED', design: d.designKey, budget }))
       const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [`skip: per-regen call budget (${budget}) exhausted`], calls: 0 }
       writerLogByIndex[i] = row
       return d
     }
-    callsReserved += IH_WRITER_RETRY_CAP
+    callsReserved += perDesignReservation
     const g = groupsByKey.get(d.designKey)
     const titles = g?.titles ?? []
     const truthCtx = d.truthCtx
@@ -2853,7 +2915,7 @@ export async function produceItemHighlightsPerDesign(
       const callsMade = e instanceof WriterPartialCallsError ? e.callsMade : 0
       const priorReasons = e instanceof WriterPartialCallsError ? e.reasonsSoFar : []
       console.warn(JSON.stringify({ tag: 'IH_WRITER_ERROR', design: d.designKey, error: e instanceof Error ? e.message : String(e), callsMade }))
-      callsReserved -= (IH_WRITER_RETRY_CAP - callsMade)
+      callsReserved -= (perDesignReservation - callsMade)
       const row: IhWriterLogRow = { design: d.designKey, composer: d.value, writer: null, accepted: false, reasons: [...priorReasons, `error: ${e instanceof Error ? e.message : String(e)}`], calls: callsMade }
       writerLogByIndex[i] = row
       return d
@@ -2864,7 +2926,7 @@ export async function produceItemHighlightsPerDesign(
     // design. "Never exceed budget" still holds (the reservation was already taken before this
     // design started; refunding only ever gives MORE room to later designs, never less to already-
     // reserved ones). Pinned: 8 designs each accepted on call 1 -> 8 written lines for 8 calls.
-    callsReserved -= (IH_WRITER_RETRY_CAP - outcome.calls)
+    callsReserved -= (perDesignReservation - outcome.calls)
     const row: IhWriterLogRow = {
       design: d.designKey, composer: d.value, writer: outcome.accepted ? outcome.value : null,
       accepted: outcome.accepted, reasons: outcome.reasons, calls: outcome.calls,

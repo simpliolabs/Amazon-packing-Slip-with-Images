@@ -100,10 +100,15 @@ describe('RULING W3 (fix round B7b, wire Important): the per-design wall-time pi
       // per-call cutoff shrinking with elapsed time) runs the full 1+2 retries per design at the
       // per-call cap (20_000ms) each — 2 designs x 3 calls x 20_000ms, far past this bound.
       expect(wall, `wall=${wall}ms`).toBeLessThanOrEqual(deadlineMs + 20_000)
+      // RULING G3 (fix round G1, design change): a hung server is a TIMEOUT — G3 point 4's own
+      // words: "a client error, a timeout — candidate 1 ships." A real candidate exists for both
+      // designs here (the search never touches the network), so each design ships the search's
+      // OWN top candidate rather than falling back to the composer — the wall-time bound above is
+      // W3's real point and is unaffected.
       for (const d of result.perDesign) {
         const builtD = composer.perDesign.find((x) => x.designKey === d.designKey)!
-        expect(d.value).toBe(builtD.value)
-        expect(d.hold).toBe(builtD.hold)
+        expect(d.value).not.toBe(builtD.value)
+        expect(d.hold).toBeNull()
       }
     } finally {
       delete process.env.IH_WRITER
@@ -140,10 +145,12 @@ describe('RULING W3 (fix round B7b, wire Important): the per-design wall-time pi
       // 2 designs, since the per-call cap of 20_000ms never shrinks without a real `deadlineAt`) —
       // see the round's report for the pasted mutation-proof run.
       expect(wall, `wall=${wall}ms`).toBeLessThanOrEqual(deadlineMs + 20_000)
+      // RULING G3 (fix round G1, design change): see the dead-server test above — a timeout ships
+      // the search's own candidate, never the composer's fallback, when one exists.
       for (const d of result.perDesign) {
         const builtD = composer.perDesign.find((x) => x.designKey === d.designKey)!
-        expect(d.value).toBe(builtD.value)
-        expect(d.hold).toBe(builtD.hold)
+        expect(d.value).not.toBe(builtD.value)
+        expect(d.hold).toBeNull()
       }
     } finally {
       delete process.env.IH_WRITER
@@ -170,7 +177,13 @@ describe('RULING W5 (fix round B7b, wire minor 2): a deadline-skipped askWriter 
     }
     const built = buildItemHighlights(input)
     const units: readonly AdmittedUnit[] = buildAdmittedUnits(built.composed!, { designName: 'Deadline Race', truthCtx: built.truthCtx! })
-    const runTail = () => ({ value: 'stub', hold: null as string | null })
+    // RULING G3 (fix round G1, design change): a PASS-THROUGH tail, not a fixed-string stub — the
+    // OLD stub (`() => ({value: 'stub', ...})`) never equalled the actual rendered line, so under
+    // `enumerateWriterCandidates` (which judges EVERY candidate through the real byte-identity
+    // check) it silently found ZERO candidates, returning before the retry loop's `Date.now()` race
+    // this test exists to force ever ran at all — a vacuous pass, not a proof. A real candidate
+    // must exist for the mocked `Date.now()` sequence below to be consumed where this pin intends.
+    const runTail = (l: string) => ({ value: l, hold: null as string | null })
     const neverCalled = vi.fn(() => { throw new Error('askWriter must never reach the client after its own deadline check fires') })
     const stubClient = { chat: { completions: { create: neverCalled } } } as unknown as OpenAI
 
@@ -184,7 +197,10 @@ describe('RULING W5 (fix round B7b, wire minor 2): a deadline-skipped askWriter 
         truthCtx: built.truthCtx!, runTail, deps: { openai: stubClient }, deadlineAt,
       })
       expect(result.calls).toBe(0)
-      expect(result.accepted).toBe(false)
+      // RULING G3 (fix round G1, design change): a mid-call deadline skip still ships the search's
+      // OWN top candidate (G3 point 4: "a timeout — candidate 1 ships") at zero calls — the
+      // NEVER-BILLED guarantee this pin exists for (`neverCalled` below) is unaffected.
+      expect(result.accepted).toBe(true)
       expect(result.reasons.some((r) => r.includes('deadline exceeded mid-call'))).toBe(true)
       expect(neverCalled).not.toHaveBeenCalled()
     } finally {

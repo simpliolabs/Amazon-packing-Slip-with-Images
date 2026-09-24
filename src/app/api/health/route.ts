@@ -13,7 +13,7 @@
 import { NextResponse } from 'next/server'
 import { describeContentReconcileMode } from '@/lib/fba/contentReconcile'
 import { describeVariantDeathAlarm } from '@/lib/fba/variantDeathAlarm'
-import { ihWriterMode, ihWriterModel, ihWriterMaxCallsBudget, ihWriterDeadlineMs } from '@/lib/fba/itemHighlightWriter'
+import { ihWriterMode, ihWriterModel, ihWriterMaxCallsBudget, ihWriterDeadlineMs, ihHumanizerMode } from '@/lib/fba/itemHighlightWriter'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -65,8 +65,9 @@ const BEHAVIOR_FLAGS = [
   'VARIANT_DEATH_ALARM', // on (DEFAULT — read-only alarm card) | off — per-family dead-variant detector (variantDeathAlarm.ts): a child SKU whose content_synced_at froze >14d behind its siblings' max (sync_lag) OR whose stored listing_health offer evidence says no live offer (offer_dead; fail-open on a missing row) is surfaced as a revenue-leak card on the listing page, each SKU labelled with its reason (the Later Gator XL/2XL Orchid two-months-unbuyable incident). UNSET = ON, so it is echoed as the EFFECTIVE mode below — a raw null would read as 'off' to the flag census, the opposite of the truth.
   'IH_WRITER', // off (DEFAULT) | shadow | on — the Item Highlight WRITER (2026-09-10 spec, Part 2): off delegates straight to the deterministic composer, byte-identical, zero calls; shadow makes the writer call(s) and logs/returns IH_WRITER_SHADOW per design but still SHIPS the composer's own result; on ships the accepted writer line, else the composer's own vetted result — never worse than off. UNSET = OFF, the honest raw echo (code default), so no effective-mode wrapper is needed here, unlike CONTENT_RECONCILE_ENABLED's shadow default.
   'IH_WRITER_MODEL', // model PIN for the Item Highlight writer, default 'gpt-4.1' — echoed as the EFFECTIVE model below (cost-guard pass precedent: a judge/writer silently defaulting to an unnamed model is invisible from outside the container).
-  'IH_WRITER_MAX_CALLS', // FIX ROUND B2 (RULING W8): the PER-REGEN writer call budget across every design (default 18, distinct from the per-design retry cap) — echoed as the EFFECTIVE count below, same convention as MULTI_DESIGN_AUDIT_MAX_GROUPS.
+  'IH_WRITER_MAX_CALLS', // FIX ROUND B2 (RULING W8); default RAISED 18 -> 24 by RULING P4 (round P): the PER-REGEN writer call budget across every design (distinct from the per-design retry cap) — echoed as the EFFECTIVE count below, same convention as MULTI_DESIGN_AUDIT_MAX_GROUPS.
   'IH_WRITER_DEADLINE_MS', // RULING K10 (fix round B4): the regen-level wall-time deadline for the per-design writer loop, default 45000 — echoed as the EFFECTIVE count below.
+  'IH_HUMANIZER', // off (DEFAULT) | on — ROUND M6/J1-J7 (`phase-j1-rulings.md`, PO 2026-09-23 "A: go with a"): rewrites eligible POOL units at the presentation boundary, under a deterministic net (J4), before the unchanged chooser ever runs. UNSET = OFF, the honest raw echo (code default, no 'shadow' mode — see `ihHumanizerMode`'s own doc), so no effective-mode wrapper is needed here, same convention as IH_WRITER's own off default.
 ] as const
 
 export async function GET() {
@@ -132,6 +133,10 @@ export async function GET() {
         // RULING K10: the effective regen-level writer deadline (ms), mirroring
         // `ihWriterDeadlineMs`'s own resolution chain.
         IH_WRITER_DEADLINE_MS: ihWriterDeadlineMs(),
+        // ROUND M6/J1-J7: the effective humanizer mode, same reasoning as IH_WRITER above — a raw
+        // `IH_HUMANIZER` typo ("On" with trailing whitespace, wrong case, anything but exactly
+        // "on") silently runs `off`; the raw value stays visible via the flat spread above.
+        IH_HUMANIZER: ihHumanizerMode(),
       },
     },
     { headers: { 'Cache-Control': 'no-store, max-age=0' } },
