@@ -46,28 +46,67 @@
  * function -> marker -> the EXACT set of already-vetted occurrence texts (captured once, from the
  * real file, by `dump-current-allowed.ts` under `.../scratchpad/writer/l1/` — never invented). A
  * NEW occurrence of an already-allowlisted (function, marker) pair, whose text does not match one
- * of those known-good strings, is now a violation. This has one honestly-documented limit: an
- * adversary who copies an EXISTING vetted line's variable names verbatim (plant K's injected
- * `part.glue === ','` happens to be byte-identical to `validateGrammar`'s own real occurrence,
- * because both use the loop variable name `part`) evades THAT one marker's shape check — but plant
- * K's `relation-open-state` occurrence (`secondRelationOpen = false`) uses ITS OWN state-variable
- * name, which is NOT in `validateGrammar`'s known-good `relation-open-state` text set, so it is
- * caught by that marker regardless. Every self-test below pins the ACTUAL marker set each plant
- * trips, not an idealized one, so this limit is visible rather than assumed away.
+ * of those known-good strings, is now a violation. At the time of RULING L3 this had one
+ * honestly-documented limit: an adversary who copies an EXISTING vetted line's variable names
+ * verbatim (plant K's injected `part.glue === ','` happens to be byte-identical to
+ * `validateGrammar`'s own real occurrence, because both use the loop variable name `part`) evaded
+ * THAT one marker's shape check, caught only via `relation-open-state`'s own distinct state-variable
+ * name. RULING M4 (round M) closes that limit: the allowlist is now POSITIONAL (a spend-once BUDGET
+ * per vetted text, not a plain membership `Set`), so plant K's copied `part.glue === ','` and
+ * `RELATION_GLUE.has(part.glue)` are now ALSO violations in their own right — the real occurrence
+ * already spent that text's one legitimate use. Every self-test below pins the ACTUAL marker set
+ * each plant trips, not an idealized one, so any remaining limit stays visible rather than assumed
+ * away.
  *
  * THE INVERSE (RULING L3: "because a marker set will always have a next evasion, ALSO assert the
- * inverse"). `describe`'s last `it` re-runs every marker pass with NO shape filter at all — only
- * "not the authority function" — and collects the SET of distinct function names that produced ANY
- * hit, of ANY marker. That set must equal the CLOSED list of functions this file already knows touch
- * a clause boundary (`KNOWN_CLAUSE_TOUCHING_FUNCTIONS`). A walk in a genuinely NEW function fails
- * this even if none of the FOUR markers above happens to fit its exact idiom — the enumeration does
- * not depend on which marker fired, only on whether the function's NAME was already on the list.
+ * inverse"). `describe`'s last `it` re-runs every marker pass with NO shape/text filter at all —
+ * only "not the authority function" — and collects the SET of distinct function names that produced
+ * ANY hit, of ANY marker. That set must equal the CLOSED list of functions this file already knows
+ * touch a clause boundary (`KNOWN_CLAUSE_TOUCHING_FUNCTIONS`).
+ *
+ * RULING M4 (round M) corrects an overstatement in this paragraph, found by review
+ * `phase-l1-review-truth.md` IMPORTANT 3: this is an inverse over MARKER HITS, never over clause
+ * walks in general, and the sentence that used to stand here claimed otherwise. `scanClauseAuthority
+ * RawHits` only ever emits a row when ONE of the four markers (comma-glue-test / glue-has-call /
+ * relation-open-state / readability-clause-split-re) fires — so a walk in a genuinely NEW function
+ * is caught by the inverse ONLY IF it trips at least one of those four idioms; within that scope the
+ * enumeration does not depend on WHICH marker fired, or on the hit's exact text, only on whether the
+ * function's NAME produced any hit at all (which is why plants G/H/I/J/K/L/N/N2 are all visible to
+ * it, each tripping at least one marker however indirectly). A walk built to avoid every one of the
+ * four idioms outright — no `.glue`-shaped read, no `,` comparison, no `.has()`/mutation/
+ * reassignment tracking a relation, no reference to `READABILITY_CLAUSE_SPLIT_RE` (for example, a
+ * complement-style test using `.includes()` instead of `.has()`, or clause boundaries derived from
+ * an inline regex split on the RENDERED line rather than the `parts` array) trips NO marker and so
+ * produces NO row for the inverse to see either. That residual is FILED, not fixed by this ruling —
+ * see review `phase-l1-review-truth.md` IMPORTANT 3's plants P and R for the executed evasions.
  *
  * Function attribution (unchanged from K3): the real AST parent chain to the nearest enclosing
  * function-like node — never a brace-counted range — with a callback ARGUMENT treated as lexically
  * transparent (attributed to the function that PASSED it), exactly as `segmentClauses`'s own
  * `parts.forEach` at :1075 needs to keep resolving to `segmentClauses`, and `judgeWriterArrangement`'s
  * own `v.parts.forEach` at :1378 needs to keep resolving to `judgeWriterArrangement`.
+ *
+ * RULING M4 (round M, phase-m1-rulings.md, Important — review `phase-l1-review-truth.md`
+ * IMPORTANT 1/2, plants N/N2). L3's `relation-open-state` marker required a PLAIN REASSIGNMENT
+ * (`=` to an identifier declared outside the loop) as its evidence of open/close state. Plant N2 —
+ * a WHOLE second clause partition, planted inside `judgeWriterArrangement`, computed with
+ * `segmentClauses`' OWN idiom (`current.push(idx)` / `current = []` at :1075-1076 is itself half
+ * reassignment, half mutation; N2 uses ONLY the mutation half: `n2Cur.push(...)` / `n2Clauses.push(
+ * ...)` / `n2Cur.length = 0`) — never reassigns a single identifier, so it produced zero
+ * `relation-open-state` hits. Its `comma-glue-test` hit (`p.glue === ','`) is also byte-identical to
+ * `judgeWriterArrangement`'s OWN already-vetted occurrence, so the old SET-membership allowlist
+ * exempted it as if it were that one real line. Two independent fixes:
+ *   1. `relation-open-state` now ALSO fires on a MUTATION of a container declared outside the loop —
+ *      a call to `.push`/`.pop`/`.splice`/`.shift`/`.unshift` on an outer identifier, or an
+ *      assignment to that identifier's own `.length` — the exact idiom `segmentClauses` itself uses,
+ *      never only the plain `=` L3 checked for.
+ *   2. The allowlist is now POSITIONAL, not merely textual: each (function, marker, text) triple in
+ *      `ALLOWLIST` exempts only as many occurrences as the REAL file legitimately has (today,
+ *      exactly one each, tracked as a spend-once budget). A SECOND occurrence of the SAME vetted
+ *      text at the SAME (function, marker) pair — plant N's and N2's own evasion — is a violation,
+ *      because that text's one legitimate occurrence already spent the budget.
+ * Self-tests "plant N" and "plant N2" below assert both are now caught. The header sentence about
+ * "the inverse" below is also corrected here — see that paragraph.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -86,29 +125,42 @@ interface Violation { marker: string; functionName: string; line: number; text: 
 // never widened just to make a NEW occurrence pass; a genuinely new line at an allowlisted
 // (function, marker) pair must be added here BY HAND, the same speed bump a brand-new function name
 // already gets for free.
-const ALLOWLIST: Readonly<Record<string, Readonly<Record<string, ReadonlySet<string>>>>> = {
+//
+// RULING M4 (round M): each vetted text now maps to its own BUDGET — the number of times that exact
+// text legitimately occurs in the real file today (verified by `grep -c` against the real source,
+// per-entry, at the time this map was last edited) — rather than an implicit "any number of times"
+// a plain `Set` gave it. `readability-clause-split-re` genuinely references the same module constant
+// three times inside `writerReadabilityVerdict` (the split-count, the relation-clause count and the
+// list-section count — all real, all legitimate); every OTHER entry occurs exactly once. A budget of
+// N is spent by the first N occurrences encountered; occurrence N+1 of the SAME text — plant N's and
+// N2's own evasion, reusing `judgeWriterArrangement`'s real `p.glue === ','` verbatim a second time
+// — is a violation, exactly like a hit in a brand-new function would be.
+const ALLOWLIST: Readonly<Record<string, Readonly<Record<string, ReadonlyMap<string, number>>>>> = {
   validateGrammar: {
-    'comma-glue-test': new Set([
-      "run[0].glue === ','",
-      "part.glue === ','",
-      "(prev as ArrangementGluePart).glue === ','",
-      "(next as ArrangementGluePart).glue === ','",
+    'comma-glue-test': new Map([
+      ["run[0].glue === ','", 1],
+      ["part.glue === ','", 1],
+      ["(prev as ArrangementGluePart).glue === ','", 1],
+      ["(next as ArrangementGluePart).glue === ','", 1],
     ]),
-    'relation-open-state': new Set(['relationOpenGlue = null']),
-    'glue-has-call': new Set(['RELATION_GLUE.has(part.glue)']),
+    'relation-open-state': new Map([['relationOpenGlue = null', 1]]),
+    'glue-has-call': new Map([['RELATION_GLUE.has(part.glue)', 1]]),
   },
   judgeWriterArrangement: {
-    'comma-glue-test': new Set(["p.glue === ','"]),
-    'glue-has-call': new Set(['RELATION_GLUE.has(next.glue)']),
+    'comma-glue-test': new Map([["p.glue === ','", 1]]),
+    'glue-has-call': new Map([['RELATION_GLUE.has(next.glue)', 1]]),
   },
   glueRole: {
-    'glue-has-call': new Set(['LIST_GLUE.has(part.glue)', 'RELATION_GLUE.has(part.glue)']),
+    'glue-has-call': new Map([['LIST_GLUE.has(part.glue)', 1], ['RELATION_GLUE.has(part.glue)', 1]]),
   },
   writerReadabilityVerdict: {
-    'readability-clause-split-re': new Set(['READABILITY_CLAUSE_SPLIT_RE']),
+    // RULING M4: 3 real references (the clause-count split, the relation-clause count and the
+    // list-section count all split the SAME line on the SAME constant) — was silently exempted
+    // without limit by the old plain-Set membership check; now stated as the real count instead.
+    'readability-clause-split-re': new Map([['READABILITY_CLAUSE_SPLIT_RE', 3]]),
   },
   writerReadabilityFidelitySentence: {
-    'readability-clause-split-re': new Set(['READABILITY_CLAUSE_SPLIT_RE']),
+    'readability-clause-split-re': new Map([['READABILITY_CLAUSE_SPLIT_RE', 1]]),
   },
 }
 // RULING L3, the INVERSE assertion's own closed list — every function this file has ever vetted as
@@ -191,6 +243,27 @@ function endsWithPartsProperty(node: ts.Expression): boolean {
   if (ts.isIdentifier(n)) return n.text === PARTS_PARAM_NAME
   if (ts.isPropertyAccessExpression(n)) return n.name.text === PARTS_PARAM_NAME
   return false
+}
+
+/** RULING M4 (plants N/N2): the SAME evidence as an outer reassignment (`findAssignments` below),
+ *  expressed instead as a MUTATION of a container declared OUTSIDE the loop — the exact idiom
+ *  `segmentClauses` itself uses (`current.push(idx)` at :1075, `clauses.push(...)` throughout, and
+ *  `current = []`'s sibling reset `n2Cur.length = 0`). A call to `.push`/`.pop`/`.splice`/`.shift`/
+ *  `.unshift` on an outer identifier, or an assignment to that identifier's own `.length`, counts.
+ */
+const MUTATING_ARRAY_METHODS: ReadonlySet<string> = new Set(['push', 'pop', 'splice', 'shift', 'unshift'])
+function isOuterContainerMutation(node: ts.Node, declaredInsideLoop: ReadonlySet<string>): ts.Node | null {
+  if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+    && MUTATING_ARRAY_METHODS.has(node.expression.name.text)) {
+    const obj = unwrapExpr(node.expression.expression)
+    if (ts.isIdentifier(obj) && !declaredInsideLoop.has(obj.text)) return node
+  }
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    && ts.isPropertyAccessExpression(node.left) && node.left.name.text === 'length') {
+    const obj = unwrapExpr(node.left.expression)
+    if (ts.isIdentifier(obj) && !declaredInsideLoop.has(obj.text)) return node
+  }
+  return null
 }
 
 function getEnclosingFunctionName(node: ts.Node): string {
@@ -333,8 +406,51 @@ export function scanClauseAuthorityRawHits(source: string): Violation[] {
         ts.forEachChild(n, findAssignments)
       }
       findAssignments(loopBody)
-      if (loopReadsGlue && outerAssignTargets.length && getEnclosingFunctionName(node) !== AUTHORITY_FUNCTION) {
-        record('relation-open-state', outerAssignTargets[0])
+      // RULING M4 (plants N/N2): the mutation idiom is the SAME evidence as a plain reassignment —
+      // checked independently, so either one alone is sufficient. BUT (false-positive fix,
+      // `renderArrangement`'s own `out.push(token)` — an UNCONDITIONAL output-buffer push in a loop
+      // that also happens to compare `p.glue` for the 'a'/'an' article — proved that "any outer
+      // mutation in a glue-reading loop" is too wide) a mutation only counts when it sits inside a
+      // branch GATED on a glue-vs-comma test or a `.has(glueLike)` call, i.e. the exact
+      // "if (glue-is-comma) { push/reset }" shape the real accumulator idiom always uses. This is
+      // the SAME two shapes `comma-glue-test`/`glue-has-call` already recognise, reused here as a
+      // STRUCTURAL gate rather than a standalone marker.
+      const exprGatesOnGlue = (expr: ts.Expression): boolean => {
+        const e = unwrapExpr(expr)
+        if (ts.isBinaryExpression(e)) {
+          const op = e.operatorToken.kind
+          if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
+            return exprGatesOnGlue(e.left) || exprGatesOnGlue(e.right)
+          }
+          const isEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken
+            || op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken
+          if (!isEq) return false
+          if (isGlueLike(e.left) && isCommaLiteralOrConstant(e.right)) return true
+          if (isGlueLike(e.right) && isCommaLiteralOrConstant(e.left)) return true
+          return false
+        }
+        if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === 'has'
+          && e.arguments.length === 1 && isGlueLike(unwrapExpr(e.arguments[0]))) return true
+        return false
+      }
+      const isInsideGlueGatedBranch = (node: ts.Node): boolean => {
+        let cur: ts.Node | undefined = node.parent
+        while (cur && cur !== loopBody) {
+          if (ts.isIfStatement(cur) && exprGatesOnGlue(cur.expression)) return true
+          if (ts.isSwitchStatement(cur) && isGlueLike(unwrapExpr(cur.expression))) return true
+          cur = cur.parent
+        }
+        return false
+      }
+      const outerMutationTargets: ts.Node[] = []
+      const findMutations = (n: ts.Node): void => {
+        const hit = isOuterContainerMutation(n, declaredInsideLoop)
+        if (hit && isInsideGlueGatedBranch(hit)) outerMutationTargets.push(hit)
+        ts.forEachChild(n, findMutations)
+      }
+      findMutations(loopBody)
+      if (loopReadsGlue && (outerAssignTargets.length || outerMutationTargets.length) && getEnclosingFunctionName(node) !== AUTHORITY_FUNCTION) {
+        record('relation-open-state', outerAssignTargets[0] ?? outerMutationTargets[0])
       }
     }
     // marker: readability-clause-split-re — any REFERENCE (not the one declaration) to the constant.
@@ -349,12 +465,30 @@ export function scanClauseAuthorityRawHits(source: string): Violation[] {
   return violations
 }
 
-/** The pin proper — RULING L3's shape filter: a hit at an already-allowlisted (function, marker)
- *  pair is exempt ONLY when its exact (whitespace-squished) text matches one of that pair's known-
- *  vetted occurrences; any OTHER text at the same (function, marker) pair — never seen before,
- *  however it got there — is a violation, exactly like a hit in a brand-new function would be. */
+/** The pin proper — RULING L3's shape filter, made POSITIONAL by RULING M4 (review
+ *  `phase-l1-review-truth.md` IMPORTANT 2): a hit at an already-allowlisted (function, marker) pair
+ *  is exempt only while its exact (whitespace-squished) text still has BUDGET remaining — one spend
+ *  per legitimately-vetted occurrence in the real file (the count `ALLOWLIST` states for that text,
+ *  today 1 for every entry except `readability-clause-split-re`'s real 3-in-one-function). Any
+ *  OTHER text at the same (function, marker) pair, or an occurrence of an already-vetted text once
+ *  its budget is spent — plant N's and N2's own evasion, reusing `judgeWriterArrangement`'s real
+ *  `p.glue === ','` verbatim a SECOND time — is a violation, exactly like a hit in a brand-new
+ *  function would be.
+ */
 export function scanClauseAuthorityViolations(source: string): Violation[] {
-  return scanClauseAuthorityRawHits(source).filter((v) => !(ALLOWLIST[v.functionName]?.[v.marker]?.has(v.text) ?? false))
+  const budget = new Map<string, number>()
+  for (const [fn, markers] of Object.entries(ALLOWLIST)) {
+    for (const [marker, texts] of Object.entries(markers)) {
+      for (const [text, count] of texts) budget.set(`${fn}\u0000${marker}\u0000${text}`, count)
+    }
+  }
+  return scanClauseAuthorityRawHits(source).filter((v) => {
+    const key = `${v.functionName}\u0000${v.marker}\u0000${v.text}`
+    const remaining = budget.get(key)
+    if (remaining === undefined || remaining <= 0) return true
+    budget.set(key, remaining - 1)
+    return false
+  })
 }
 
 describe('K3 (rebuilding I4 on the AST): segmentClauses is the ONLY clause/relation-scope walk over itemHighlightWriter.ts, structural on the AST — never a name or a quote style', () => {
@@ -487,12 +621,15 @@ describe('K3 (rebuilding I4 on the AST): segmentClauses is the ONLY clause/relat
     expect(planted).not.toBe(source) // the replace actually matched
     const violations = scanClauseAuthorityViolations(planted)
     const hits = violations.filter((v) => v.functionName === 'validateGrammar')
-    // `comma-glue-test` does NOT independently fire here: the planted `part.glue === ','` is
-    // byte-identical to validateGrammar's OWN real occurrence (both use the loop variable name
-    // `part`) — the documented, honest limit of a TEXT-shape allowlist (see the header comment).
-    // `relation-open-state` still fires because `secondRelationOpen` is a variable name the real
-    // file never uses, so its exact text is not in the known-good set.
-    expect(new Set(hits.map((v) => v.marker)), JSON.stringify(violations)).toEqual(new Set(['relation-open-state']))
+    // RULING M4: with the POSITIONAL budget, `comma-glue-test` and `glue-has-call` now ALSO fire —
+    // the planted `part.glue === ','` and `RELATION_GLUE.has(part.glue)` are byte-identical to
+    // validateGrammar's OWN real occurrences (both use the loop variable name `part`), but that
+    // real occurrence already spent the one legitimate use each text is budgeted for, so the
+    // PLANTED occurrence is a fresh violation rather than a free pass (the old, honest limit of a
+    // plain-membership `Set` allowlist — see the header comment above). `relation-open-state` still
+    // fires too, independently, because `secondRelationOpen` is a variable name the real file never
+    // uses.
+    expect(new Set(hits.map((v) => v.marker)), JSON.stringify(violations)).toEqual(new Set(['relation-open-state', 'comma-glue-test', 'glue-has-call']))
   })
 
   it('SELF-TEST plant L (a SECOND clause walk as a `parts.forEach` callback INSIDE the ALLOWLISTED judgeWriterArrangement, receiver `(raw as {parts}).parts`) is flagged as its OWN new occurrence, not absorbed by the real forEach\'s exemption', () => {
@@ -502,6 +639,39 @@ describe('K3 (rebuilding I4 on the AST): segmentClauses is the ONLY clause/relat
     expect(planted).not.toBe(source) // the replace actually matched
     const violations = scanClauseAuthorityViolations(planted)
     const hits = violations.filter((v) => v.functionName === 'judgeWriterArrangement')
+    expect(new Set(hits.map((v) => v.marker)), JSON.stringify(violations)).toEqual(new Set(['comma-glue-test', 'relation-open-state']))
+  })
+
+  // RULING M4 (round M, phase-m1-rulings.md, Important — review phase-l1-review-truth.md
+  // IMPORTANT 1/2): plants N and N2, reproduced verbatim from the review, evaded RULING L3's pin
+  // entirely (zero violations, either marker) because neither one REASSIGNS an outer identifier —
+  // both use only `.push`/`.length = 0` mutation, `segmentClauses`' OWN idiom.
+
+  it('SELF-TEST plant N (a push-accumulated walk INSIDE the ALLOWLISTED judgeWriterArrangement, reusing its own VETTED comma text `p.glue === \',\'`, with NO outer reassignment) is flagged — REVIEW phase-l1-review-truth.md IMPORTANT 1, evaded RULING L3\'s reassignment-only pin', () => {
+    const anchor = 'export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUnit[], ctx: JudgeWriterLineCtx): JudgeWriterLineResult {'
+    const inject = anchor + "\n  const nOpen: number[] = []\n  ;(raw as { parts: readonly ArrangementPart[] }).parts.forEach((p, nIdx) => {\n    if (!('unit' in p) && p.glue === ',') { nOpen.push(nIdx) }\n  })\n  void nOpen"
+    const planted = source.replace(anchor, inject)
+    expect(planted).not.toBe(source) // the replace actually matched
+    const violations = scanClauseAuthorityViolations(planted)
+    const hits = violations.filter((v) => v.functionName === 'judgeWriterArrangement')
+    // `comma-glue-test` fires because the real occurrence already spent `p.glue === ','`'s one
+    // legitimate use (RULING M4's positional budget). `relation-open-state` fires independently
+    // because `nOpen.push(nIdx)` mutates a container declared OUTSIDE the loop, inside a branch
+    // gated on the SAME comma-equality test — the array-mutation idiom RULING M4 adds.
+    expect(new Set(hits.map((v) => v.marker)), JSON.stringify(violations)).toEqual(new Set(['comma-glue-test', 'relation-open-state']))
+  })
+
+  it('SELF-TEST plant N2 (a COMPLETE second clause PARTITION inside judgeWriterArrangement, `segmentClauses`\' own push/length-0 idiom verbatim, NO outer reassignment anywhere) is flagged — REVIEW phase-l1-review-truth.md IMPORTANT 1\'s worst-case evasion, verbatim', () => {
+    const anchor = 'export function judgeWriterArrangement(raw: unknown, units: readonly AdmittedUnit[], ctx: JudgeWriterLineCtx): JudgeWriterLineResult {'
+    const inject = anchor + "\n  const n2Clauses: number[][] = []\n  const n2Cur: number[] = []\n  ;(raw as { parts: readonly ArrangementPart[] }).parts.forEach((p, n2Idx) => {\n    if ('unit' in p) { n2Cur.push(n2Idx); return }\n    if (p.glue === ',') { n2Clauses.push([...n2Cur]); n2Cur.length = 0 }\n  })\n  n2Clauses.push([...n2Cur])\n  void n2Clauses"
+    const planted = source.replace(anchor, inject)
+    expect(planted).not.toBe(source) // the replace actually matched
+    const violations = scanClauseAuthorityViolations(planted)
+    const hits = violations.filter((v) => v.functionName === 'judgeWriterArrangement')
+    // Caught TWICE, independently: `comma-glue-test` (the planted `p.glue === ','` is a second,
+    // budget-exhausted occurrence of judgeWriterArrangement's own vetted text) AND
+    // `relation-open-state` (`n2Clauses.push(...)` / `n2Cur.length = 0`, both mutating containers
+    // declared outside the loop, both inside the SAME `if (p.glue === ',')` branch).
     expect(new Set(hits.map((v) => v.marker)), JSON.stringify(violations)).toEqual(new Set(['comma-glue-test', 'relation-open-state']))
   })
 
