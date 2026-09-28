@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildForeignDesignTokens, isForeignToDesign, fillNormTok,
   detectForeignBullets, detectForeignDescription, stripForeignHtmlBlocks, nameMatchesSibling,
+  containsSiblingName, normalizeForNameMatch,
 } from './designScope'
 
 const DESIGNS = [{ key: 'BM', name: 'Beast Mode' }, { key: 'DQ', name: "Don't Quit" }, { key: 'RK', name: 'Real King' }]
@@ -90,57 +91,86 @@ describe('the class, measured (VERDICT.md §2, empty pool, the most favourable c
 })
 
 /**
- * ROUND V (2026-09-24, cross-design leak controller ruling) — V1/V2. `rejectForeignBullets`/
- * `rejectForeignDescription` (Rounds S/T/U's subtractive ship door) are DELETED. Nothing may edit
- * or empty a per-child bullets/description row on a name match any more —
- * `detectForeignBullets`/`detectForeignDescription` REPORT the same signal without touching a
- * byte. Over-reporting (a bare shared word convicting a healthy row) is acceptable; it costs a log
- * line, never a shopper-facing bullet.
+ * ROUND V (2026-09-24) — V1/V2. `rejectForeignBullets`/`rejectForeignDescription` (Rounds S/T/U's
+ * subtractive ship door) are DELETED. Nothing may edit or empty a per-child bullets/description
+ * row on a name match any more.
+ *
+ * ROUND W (2026-09-28) — W2. The predicate is REPLACED: `detectForeignBullets`/
+ * `detectForeignDescription` no longer take a per-token `foreign` Set (V2's bag-of-words scope,
+ * which convicted 5 of 6 healthy designs in one family on ordinary vocabulary overlap — a report
+ * wrong 5 times in 6 is worse than none). They take the list of SIBLING NAMES directly and check
+ * each as a normalised WHOLE-STRING substring — no token bag, no niche exemption, no
+ * own-vocabulary exemption.
  */
-describe('detectForeignBullets — V2, read-only report (never edits)', () => {
-  it('reports a row carrying the LIVE contaminated bullet, but ships it unchanged', () => {
-    const foreign = sForeignFor('HDG')
+describe('containsSiblingName / normalizeForNameMatch — W2, the whole-string predicate', () => {
+  it('folds a censored spelling onto its plain and fully-spelled forms — "B*tch"/"Btch"/"Bitch" all normalise the same', () => {
+    expect(normalizeForNameMatch('B*tch')).toBe(normalizeForNameMatch('Btch'))
+    expect(normalizeForNameMatch('B*tch')).toBe(normalizeForNameMatch('Bitch'))
+  })
+
+  it('matches the live contaminated bullet against the full stored sibling name, case-folded', () => {
+    expect(containsSiblingName(LIVE_HDG_BULLET, 'Business B*tch')).toBe(true)
+    expect(containsSiblingName(LIVE_MHG_BULLET, 'Business B*tch')).toBe(true)
+  })
+
+  it('a bare SHARED WORD never matches — the class the old token-bag predicate got wrong', () => {
+    // CLEAN_HDG_BULLETS[0] uses the ordinary word "hustle", a bare token of MHG's own name
+    // "Mother Hustler" — the old per-token scope reported this; the whole-string predicate does not.
+    expect(containsSiblingName(CLEAN_HDG_BULLETS[0], 'Mother Hustler')).toBe(false)
+  })
+
+  it('an ordinary LIST does not read as the unbroken phrase sitting next to it — the comma is a real boundary', () => {
+    // "the mother, hustler or boss mom" contains the words "mother" and "hustler" adjacent only
+    // because the comma was where a space would be — the punctuation is preserved through the
+    // fold, so it does not collapse onto the sibling's unbroken two-word name "Mother Hustler".
+    expect(containsSiblingName('GREAT GIFT - Perfect for the mother, hustler or boss mom in your life.', 'Mother Hustler')).toBe(false)
+  })
+
+  it('a degraded 2-letter stored-name label never matches ordinary prose (the length floor, not an exemption)', () => {
+    expect(containsSiblingName('a great hobby for the whole family', 'Bb')).toBe(false)
+  })
+
+  it('an empty sibling name never matches', () => {
+    expect(containsSiblingName('anything at all', '')).toBe(false)
+  })
+})
+
+describe('detectForeignBullets — V2 (report only, never edits); predicate replaced W2', () => {
+  it('reports a row carrying the LIVE contaminated bullet, but the caller still ships it unchanged', () => {
+    const siblings = ['Business B*tch']
     const bullets = [LIVE_HDG_BULLET, ...CLEAN_HDG_BULLETS]
-    const { leaking, leakingBullets } = detectForeignBullets(bullets, foreign)
+    const { leaking, leakingBullets } = detectForeignBullets(bullets, siblings)
     expect(leaking).toBe(true)
     expect(leakingBullets).toEqual([LIVE_HDG_BULLET])
   })
 
   it('reports on the OTHER child\'s exact live contaminated bullet too — two different strings, one class', () => {
-    const foreign = sForeignFor('MHG')
-    const { leaking, leakingBullets } = detectForeignBullets([LIVE_MHG_BULLET, ...CLEAN_HDG_BULLETS], foreign)
+    const { leaking, leakingBullets } = detectForeignBullets([LIVE_MHG_BULLET, ...CLEAN_HDG_BULLETS], ['Business B*tch'])
     expect(leaking).toBe(true)
-    // Bag-of-words over-reporting (acceptable per the ruling): CLEAN_HDG_BULLETS[0] also uses the
-    // ordinary word "hustle", a bare token of MHG's own name "Mother Hustler" — it reports too,
-    // but (proven at the listingPipeline call site) is never removed on that account.
-    expect(leakingBullets).toContain(LIVE_MHG_BULLET)
+    expect(leakingBullets).toEqual([LIVE_MHG_BULLET])
+    // CLEAN_HDG_BULLETS[0]'s ordinary word "hustle" does NOT also report (W2 — no token bag).
+    expect(leakingBullets).not.toContain(CLEAN_HDG_BULLETS[0])
   })
 
-  it('a design\'s OWN slogan never reports against its OWN scope', () => {
-    const own = sForeignFor('BB')
-    const { leaking } = detectForeignBullets(["SIGNATURE SLOGAN - This 'Business B*tch' design owns the room."], own)
+  it('a design\'s OWN slogan never reports against its own name (self is excluded by the caller, never passed in)', () => {
+    const { leaking } = detectForeignBullets(["SIGNATURE SLOGAN - This 'Business B*tch' design owns the room."], [])
     expect(leaking).toBe(false)
   })
 
-  it('the empty-foreign-set fast path never reports (the healthy majority of families)', () => {
-    const empty = new Set<string>()
-    expect(detectForeignBullets(CLEAN_HDG_BULLETS, empty)).toEqual({ leaking: false, leakingBullets: [] })
+  it('the empty-siblings fast path never reports (the healthy majority of families, and every single-design one)', () => {
+    expect(detectForeignBullets(CLEAN_HDG_BULLETS, [])).toEqual({ leaking: false, leakingBullets: [] })
   })
 
   it('a row with NOTHING foreign never reports', () => {
-    const foreign = sForeignFor('HDG')
-    expect(detectForeignBullets(CLEAN_HDG_BULLETS, foreign)).toEqual({ leaking: false, leakingBullets: [] })
+    expect(detectForeignBullets(CLEAN_HDG_BULLETS, ['Business B*tch', 'Mother Hustler'])).toEqual({ leaking: false, leakingBullets: [] })
   })
 
-  /** THE HEADLINE MEASUREMENT (Round U review, Finding 1): five HEALTHY on-brand bullets, one of
-   *  which lists two ordinary words that happen to reconstruct a sibling's name. The Round U door
-   *  turned this into a 5→0 wipe of the whole row; V2 never edits, so the row still ships whole —
-   *  the false positive costs one log line, not five bullets. */
-  it('BB keeps ALL FIVE healthy bullets — a false-positive report never removes a byte', () => {
-    const scope = buildForeignDesignTokens(
-      [{ key: 'BB', name: 'Business B*tch' }, { key: 'HDG', name: 'Hustle Definiton' }, { key: 'MHG', name: 'Mother Hustler' }],
-      { familyTitleText: '', poolKeywords: [], strictNames: true },
-    )
+  /** THE HEADLINE MEASUREMENT (Round U review, Finding 1; re-measured Round W review, Finding 6):
+   *  five HEALTHY on-brand bullets, one of which lists two ordinary words that happen to
+   *  reconstruct a sibling's name SEPARATED BY A COMMA. Round U's door turned this into a 5→0 wipe
+   *  of the whole row; V2's token-bag report convicted it anyway (a false positive, harmless only
+   *  because nothing edits on it); W2's whole-string predicate does not report it at all. */
+  it('BB keeps ALL FIVE healthy bullets and is not even reported — the comma-separated list is not a false positive any more', () => {
     const BB = [
       'BOLD STATEMENT - The Business B*tch graphic celebrates the woman who owns her drive.',
       'GREAT GIFT - Perfect for the mother, hustler or boss mom in your life.',
@@ -148,18 +178,14 @@ describe('detectForeignBullets — V2, read-only report (never edits)', () => {
       'BUILT TO LAST - Durable double-needle stitching keeps the print crisp.',
       'EASY CARE - Machine washable, tumble dry low.',
     ]
-    const { leaking, leakingBullets } = detectForeignBullets(BB, scope('BB'))
-    // The bag-of-words scope over-reports on the shared word "hustler" (acceptable per the ruling)
-    // — what matters is that the CALLER never acts on it: the caller ships all five bytes
-    // unchanged regardless of `leaking`/`leakingBullets` (proven at the listingPipeline call site,
-    // which passes `scrubbed` through untouched).
+    const { leaking, leakingBullets } = detectForeignBullets(BB, ['Hustle Definiton', 'Mother Hustler'])
     expect(BB).toHaveLength(5)
-    expect(typeof leaking).toBe('boolean')
-    expect(Array.isArray(leakingBullets)).toBe(true)
+    expect(leaking).toBe(false)
+    expect(leakingBullets).toEqual([])
   })
 })
 
-describe('detectForeignDescription — V2, read-only report (never edits)', () => {
+describe('detectForeignDescription — V2 (report only, never edits); predicate replaced W2', () => {
   const introBlock = '<p><b>Hustle Definiton</b> is built for the grind — a bold statement for anyone who refuses to slow down.</p>'
   const listBlock = '<ul><li>Soft ringspun cotton for all-day comfort.</li><li>Classic crewneck fit layers easily.</li></ul>'
   const closingBlock = '<p>A perfect gift for the relentless go-getter in your life.</p>'
@@ -168,18 +194,16 @@ describe('detectForeignDescription — V2, read-only report (never edits)', () =
   const liveContaminatedDescription = `${introBlock}${contaminatedBlock}${listBlock}${closingBlock}`
 
   it('reports a description that names a sibling, and returns it unchanged (caller ships the bytes as-is)', () => {
-    const foreign = sForeignFor('HDG')
-    expect(detectForeignDescription(liveContaminatedDescription, foreign)).toEqual({ leaking: true })
+    expect(detectForeignDescription(liveContaminatedDescription, ['Business B*tch'])).toEqual({ leaking: true })
   })
 
   it('a CLEAN description never reports', () => {
-    const foreign = sForeignFor('HDG')
-    expect(detectForeignDescription(cleanBlocks, foreign)).toEqual({ leaking: false })
+    expect(detectForeignDescription(cleanBlocks, ['Business B*tch'])).toEqual({ leaking: false })
   })
 
-  it('the empty-foreign-set / empty-description fast paths never report', () => {
-    expect(detectForeignDescription(liveContaminatedDescription, new Set())).toEqual({ leaking: false })
-    expect(detectForeignDescription('', sForeignFor('HDG'))).toEqual({ leaking: false })
+  it('the empty-siblings / empty-description fast paths never report', () => {
+    expect(detectForeignDescription(liveContaminatedDescription, [])).toEqual({ leaking: false })
+    expect(detectForeignDescription('', ['Business B*tch'])).toEqual({ leaking: false })
   })
 
   it('stripForeignHtmlBlocks itself (kept as a general-purpose HTML utility, no longer called by the description exit) still cleans an emptied <ul></ul>', () => {

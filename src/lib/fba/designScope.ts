@@ -151,25 +151,66 @@ export function isForeignToDesign(keyword: string, foreign: Set<string>): boolea
  * no additive producer always ships something short (this repo's own rule, #630/#631), and detecting
  * "this sentence names a sibling" well enough to EDIT on is a spelling problem this repo's own
  * memory says a lexicon cannot solve. V1 deletes the door entirely: nothing here may edit or empty a
- * per-child bullets/description row on the strength of a name match. The cure moves upstream — the
- * generator must never be handed a sibling's name in the first place (see listingPipeline.ts's
- * `sanitizeReferenceTitle`, V4) — and this file's job on this exit narrows to REPORTING, never
- * editing: `detectForeignBullets`/`detectForeignDescription` below answer "does this row still name
- * a sibling?" without touching a byte, so a false positive costs nothing but a log line and an
- * operator surface, never a shopper-facing bullet.
+ * per-child bullets/description row on the strength of a name match. This file's job on this exit is
+ * REPORTING, never editing: `detectForeignBullets`/`detectForeignDescription` below answer "does this
+ * row still name a sibling?" without touching a byte, so a false positive costs nothing but a log
+ * line and an operator surface, never a shopper-facing bullet.
+ *
+ * ROUND W (2026-09-28) — W2. V4/V5 tried to move the cure upstream into a brief sanitizer
+ * (`sanitizeReferenceTitle`) and, separately, had this REPORT reuse `isForeignToDesign`'s per-TOKEN
+ * scope (`perChildDesignScope`) — the same bag-of-words rule the title door needs (a single bare
+ * word IS enough to flag a title). On the report, that rule convicted 5 of 6 healthy designs in one
+ * family on ORDINARY vocabulary overlap (a shared word like "hustle"), which made the operator
+ * surface worthless — a report wrong 5 times in 6 is worse than none. Both the sanitizer and the
+ * per-token report are deleted this round (the fix moves fully operational: regenerate the titles,
+ * push, then regenerate bullets/description against a now-clean stored title — see the runbook).
+ * What replaces the report is the SIMPLEST thing that is actually true: does this child's copy
+ * contain ANOTHER design's stored name as a normalised WHOLE-STRING substring? No token bag (a
+ * shared word alone never convicts), no niche exemption, no own-vocabulary exemption — `siblingName`
+ * is checked in full, in its own word order. The ONE normalisation this round allows folds a
+ * censored spelling onto its plain form ("B*tch"/"Btch"/"Bitch" all → "btch") by (a) collapsing an
+ * in-WORD censor mark — a punctuation character with a letter on BOTH sides and no surrounding
+ * space, e.g. the "*" in "B*tch" or the "'" in "don't" — and then (b) dropping vowels from what's
+ * left. Punctuation that separates two WORDS (a comma, a full stop) is never folded away, so an
+ * ordinary list ("...the mother, hustler or boss mom...") is not mistaken for the unbroken phrase
+ * "Mother Hustler" sitting right next to it — only real, unbroken adjacency matches.
  */
 
-/** Read-only report for the per-child BULLETS exit (V2, Round V). Never edits `bullets` — the
- *  caller ships them byte-identical regardless of the verdict. `leakingBullets` names the exact
- *  candidate(s) that carried a sibling's vocabulary, for the log line and the operator surface.
- *  Over-reporting is acceptable (per the ruling); editing on this signal is not. Byte-identical
- *  read on an empty `foreign` set (the overwhelming majority of families). */
+/** Case-fold + the one censored-spelling fold W2 allows: an in-WORD punctuation mark (letter on
+ *  both sides, no space) collapses away, then vowels drop, so "B*tch"/"Btch"/"Bitch" converge on
+ *  ONE token ("btch") while a comma or full stop between two separate WORDS is left alone — it is
+ *  the only thing telling "Mother Hustler" (unbroken) apart from "...mother, hustler..." (a list). */
+export const normalizeForNameMatch = (s: string): string =>
+  (s || '')
+    .toLowerCase()
+    .replace(/([a-z0-9])[^a-z0-9\s]+(?=[a-z0-9])/g, '$1')
+    .replace(/[aeiou]/g, '')
+
+/** TRUE when `text` contains `siblingName` as a normalised whole-string substring. A floor on the
+ *  normalised needle (not a word list, not a niche list — just a minimum length) keeps a degraded
+ *  2-letter stored-name label ("Bb") from matching ordinary prose by accident; it does not exempt
+ *  any real design name. */
+export function containsSiblingName(text: string, siblingName: string): boolean {
+  const needle = normalizeForNameMatch(siblingName)
+  if (needle.length < 4) return false
+  const hay = normalizeForNameMatch(text)
+  return hay.includes(needle)
+}
+
+/** Read-only report for the per-child BULLETS exit (V2, Round V; predicate replaced W2, Round W).
+ *  Never edits `bullets` — the caller ships them byte-identical regardless of the verdict.
+ *  `leakingBullets` names the exact candidate(s) that carried a sibling's full stored name, for the
+ *  log line and the operator surface. Over-reporting is acceptable (per the ruling); editing on
+ *  this signal is not. Byte-identical read on an empty `siblingNames` list (the overwhelming
+ *  majority of families, and every single-design one). */
 export function detectForeignBullets(
   bullets: readonly string[],
-  foreign: Set<string>,
+  siblingNames: readonly string[],
 ): { leaking: boolean; leakingBullets: string[] } {
-  if (!foreign.size) return { leaking: false, leakingBullets: [] }
-  const leakingBullets = bullets.map((b) => (b ?? '').trim()).filter((b) => b && isForeignToDesign(b, foreign))
+  if (!siblingNames.length) return { leaking: false, leakingBullets: [] }
+  const leakingBullets = bullets
+    .map((b) => (b ?? '').trim())
+    .filter((b) => b && siblingNames.some((n) => containsSiblingName(b, n)))
   return { leaking: leakingBullets.length > 0, leakingBullets }
 }
 
@@ -189,12 +230,12 @@ export function stripForeignHtmlBlocks(html: string, isForeign: (segment: string
   return out
 }
 
-/** Read-only report for the per-child DESCRIPTION exit (V2, Round V). Never edits `description` —
- *  see `detectForeignBullets` above for why. Byte-identical read on an empty `foreign` set or an
- *  empty description. */
-export function detectForeignDescription(description: string, foreign: Set<string>): { leaking: boolean } {
-  if (!foreign.size || !description) return { leaking: false }
-  return { leaking: isForeignToDesign(description, foreign) }
+/** Read-only report for the per-child DESCRIPTION exit (V2, Round V; predicate replaced W2, Round
+ *  W). Never edits `description` — see `detectForeignBullets` above for why. Byte-identical read
+ *  on an empty `siblingNames` list or an empty description. */
+export function detectForeignDescription(description: string, siblingNames: readonly string[]): { leaking: boolean } {
+  if (!siblingNames.length || !description) return { leaking: false }
+  return { leaking: siblingNames.some((n) => containsSiblingName(description, n)) }
 }
 
 /** S4 — the identity ratchet. TRUE when `name` carries EVERY token of one of `siblingNames` (a

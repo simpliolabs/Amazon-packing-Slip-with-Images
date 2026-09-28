@@ -421,10 +421,10 @@ export interface PipelineResult {
    *  'title' added (title-floor-baseline task): MEASURE-ONLY, unlike the two above — see the `mark`
    *  call site's comment for why the route does NOT (yet) auto-preserve on it. 'cross_design_leak'
    *  added (Round V, cross-design leak controller ruling): a per-child bullets/description row
-   *  still named a sibling design after the V4 brief sanitizer — REPORT-ONLY (V2), the bytes ship
-   *  unchanged; route.ts surfaces it as an SSE warning, same shape as the two flags above, never a
-   *  persist-skip (there is nothing degraded to preserve a prior over — see designScope.ts's Round
-   *  V comment above `detectForeignBullets`). */
+   *  still names a sibling design's STORED NAME as a whole-string substring (W2, Round W) —
+   *  REPORT-ONLY (V2), the bytes ship unchanged; route.ts surfaces it as an SSE warning, same shape
+   *  as the two flags above, never a persist-skip (there is nothing degraded to preserve a prior
+   *  over — see designScope.ts's Round V/W comment above `detectForeignBullets`). */
   degradedSections?: ('backend_keywords' | 'description' | 'title' | 'cross_design_leak')[]
 }
 
@@ -10479,10 +10479,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * it in the title branch (:10678), and the section-regen rebuild (below, :11370ish) populates it
    * from stored per-child titles BEFORE the bullets/description stages run — never from an output one
    * path does not produce. */
-  // `vocabNameFor`/`allVocabKeys` (U3, hoisted to the OUTER scope by V4 — see the comment above
-  // their definition, next to `sanitizeReferenceTitle`) are captured here by closure: this arrow
-  // is not CALLED until `scrubPublished` itself is, well after both are initialized.
+  // `vocabNameFor`/`allVocabKeys` (U3) are captured here by closure: this arrow is not CALLED until
+  // `scrubPublished` itself is, well after both are initialized.
   const perChildDesignVocab = designGroupContexts.map((c) => ({ key: c.key, name: vocabNameFor(c) }))
+  // W2 (Round W) — the per-child bullets/description REPORT's sibling-name list, read from the SAME
+  // resolved-name source everything else in this scope uses (`vocabNameFor`), never the raw
+  // nullable `designName` column. `detectForeignBullets`/`detectForeignDescription` (designScope.ts)
+  // check each name as a normalised WHOLE-STRING substring — no token bag.
+  const siblingNamesFor = (key: string): string[] =>
+    perChildDesignVocab.filter((d) => d.key !== key && d.name.trim()).map((d) => d.name)
   // This scope's Set feeds `titleScopeFor` below (the per-child TITLE ship door, unchanged by
   // Round V — see designScope.ts's Round V comment above `detectForeignBullets`), which hands it
   // out as `foreignTokens` to callers that do their OWN raw per-token `Set.has()` membership check
@@ -10606,21 +10611,23 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }),
     // V1/V2 (Round V, cross-design leak controller ruling) — per_child_bullets/per_child_descriptions
     // NEVER edit or empty a row on a sibling-name match any more. Rounds S/T/U each built, armed and
-    // re-shaped that door and each shape failed a different way (see designScope.ts's Round V
+    // re-shaped that door and each shape failed a different way (see designScope.ts's Round V/W
     // comment above `detectForeignBullets` for the measured outcomes) — a subtractive net with no
     // additive producer always ships something short, and a refused row was written straight over
     // the STORED good copy with no emptiness guard downstream (route.ts's partial-persist branch).
     // The bytes below are the SAME `scrubPub`-only bytes this exit shipped before Round S ever
-    // started; `perChildDesignScope` (the title door's own, unchanged, per-token scope — no phrase
-    // twin any more) is used ONLY to DETECT and REPORT a sibling mention, via
+    // started; `siblingNamesFor` (W2, Round W — another design's STORED name, whole-string, no
+    // token bag) is used ONLY to DETECT and REPORT a sibling mention, via
     // `detectForeignBullets`/`detectForeignDescription` (designScope.ts), which read but never edit.
-    // Over-reporting is acceptable; editing on this signal is not — the cure for the leak itself is
-    // upstream, at the brief the writer is handed (`sanitizeReferenceTitle`, V4, below).
+    // Over-reporting is acceptable; editing on this signal is not. Round W deleted the brief
+    // sanitizer this comment used to point at — the cure for the leak itself is operational now
+    // (regenerate the contaminated stored titles, push, then regenerate bullets/description against
+    // a clean title — see the runbook), not a string-surgery net in this file.
     per_child_bullets: r.per_child_bullets?.map((c) => {
       const key = c.designKey || c.sku || c.asin || ''
-      const foreign = key ? perChildDesignScope(key) : new Set<string>()
+      const siblings = key ? siblingNamesFor(key) : []
       const scrubbed = c.bullets.map((b) => scrubPub(b, 'per-child-bullets'))
-      const { leaking, leakingBullets } = detectForeignBullets(scrubbed, foreign)
+      const { leaking, leakingBullets } = detectForeignBullets(scrubbed, siblings)
       if (leaking) {
         console.warn(JSON.stringify({ tag: 'DESIGN_SCOPE_REPORT', field: 'bullets', design: key, sku: c.sku, asin: c.asin, leaking: leakingBullets }))
         crossDesignLeakReports.push({ design: key, sku: c.sku, asin: c.asin, field: 'bullets', sample: leakingBullets[0] })
@@ -10629,9 +10636,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }),
     per_child_descriptions: r.per_child_descriptions?.map((c) => {
       const key = c.designKey || c.sku || c.asin || ''
-      const foreign = key ? perChildDesignScope(key) : new Set<string>()
+      const siblings = key ? siblingNamesFor(key) : []
       const scrubbedDesc = scrubPub(c.description, 'per-child-description')
-      const { leaking } = detectForeignDescription(scrubbedDesc, foreign)
+      const { leaking } = detectForeignDescription(scrubbedDesc, siblings)
       if (leaking) {
         console.warn(JSON.stringify({ tag: 'DESIGN_SCOPE_REPORT', field: 'description', design: key, sku: c.sku, asin: c.asin }))
         crossDesignLeakReports.push({ design: key, sku: c.sku, asin: c.asin, field: 'description' })
@@ -11591,9 +11598,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Raw per-design name tokens — the backend fan-out's SIBLING-DESIGN BLEED ban reads this directly
   // (stricter than the partition: no niche exemption there; its own groupHay corroboration is the exemption).
   const groupNameToks = new Map(designGroupContexts.map((c) => [c.key, new Set(designScopeTokens(c.designName))]))
-  /* U3 (Round U, cross-design leak), hoisted here by V4 (Round V) so BOTH `vocabNameFor` and
-   * `sanitizeReferenceTitle` below can read it: BOTH documented degraded values of the stored
-   * `designName` column make it useless on its own — `''` (S4/T4's own refusal) and the
+  /* U3 (Round U, cross-design leak) — `vocabNameFor` below reads this: BOTH documented degraded
+   * values of the stored `designName` column make it useless on its own — `''` (S4/T4's own refusal)
+   * and the
    * designKey-derived LABEL the FULL regen itself stores whenever `extractDesignName` comes back
    * empty (e.g. "Bb", :10886-ish below). Recover a vocabulary phrase FROM the title with the SAME
    * deterministic, no-vision/no-LLM heuristic the T4 rebuild already uses as its own last resort
@@ -11615,75 +11622,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const fromTitle = leadingDesignPhrase(spacedTitle, input.brandName || '')
     return fromTitle || stored
   }
-  /* V4 (Round V, cross-design leak controller ruling) — "THE REAL CURE, properly this time".
-   * Keeps U6's intent (the bullets/description brief tells the writer "The title is FINAL (do not
-   * change it)... its design is ONLY what the title above says", handing it `ctx.title` VERBATIM —
-   * on a section regen that title is the STORED live one, and a title that once literally carried
-   * a sibling's slogan keeps instructing the writer that the slogan IS this design) and fixes the
-   * four defects the u1-source review measured in U6's own version:
-   *  1. Resolves the sibling's name through `vocabNameFor` — the SAME source `perChildDesignVocab`
-   *     uses — never the raw nullable `designName` column, which U3 (two commits earlier in this
-   *     same file) had ALREADY declared unreliable. U6 read the raw column anyway, so it was
-   *     inert on exactly the two populations U3 exists to cover (measured, sanitize.probe.test.ts
-   *     / brief3.probe.test.ts: both degraded arms left "Business B*tch" in HDG's brief).
-   *  2. EXEMPTS this design's own vocabulary: a sibling's stored name can be a SUBSTRING of this
-   *     design's own name ("Hustle" vs "Hustle Definiton") — U6 had no own-vocabulary exemption at
-   *     all and would strip a design's own identity out of the one line its brief calls FINAL.
-   *  3. Anchors every strip on WORD BOUNDARIES: U6's literal, unanchored replace turned "Ribbed"
-   *     into "Ri ed" the moment a sibling's stored name (or label) was the 2-letter run "Bb".
-   *  4. Refuses to strip below a LENGTH FLOOR: a title mangled past a minimum length is a worse
-   *     brief than one that rarely still carries a sibling's word the writer's own accuracy rule
-   *     will discount anyway.
-   * A no-op on the FULL-regen path's freshly-resolved, already-clean per-group titles (unchanged
-   * from U6). */
-  const REFERENCE_TITLE_LENGTH_FLOOR = 20
-  const sanitizeReferenceTitle = (title: string, ownKey: string): string => {
-    let out = title || ''
-    if (!out.trim()) return out
-    const ownName = designGroupContexts.find((c) => c.key === ownKey)?.designName ?? ''
-    const ownToks = new Set(designScopeTokens(ownName))
-    // The family's OWN niche vocabulary (canonical + prior title) is never stripped — mirrors
-    // designScope.ts's own family-title niche exemption, so a shared category word ("Fishing" on
-    // a fishing family) is never mistaken for a sibling's distinguishing name.
-    const nicheToks = new Set(designScopeTokens(`${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`))
-    for (const c of designGroupContexts) {
-      if (c.key === ownKey) continue
-      const sibName = vocabNameFor(c)
-      if (!sibName.trim()) continue
-      const words = sibName.split(/\s+/).filter(Boolean)
-      // Strip only the WORDS that are neither this design's own vocabulary nor the family niche —
-      // a sibling's stored name that happens to be (or contain) one of THIS design's own words
-      // must never cost this design its own identity in the one line its own brief calls FINAL.
-      const strippable = words.filter((w) => {
-        const tok = fillNormTok(w.toLowerCase().replace(/[^a-z0-9']/g, ''))
-        return tok.length > 0 && !ownToks.has(tok) && !nicheToks.has(tok)
-      })
-      for (const w of strippable) {
-        const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-        const candidate = out.replace(new RegExp(`\\b${esc}\\b`, 'gi'), ' ')
-        if (candidate === out) continue
-        // LENGTH FLOOR: never let a strip mangle the title past a minimum — a rare surviving word
-        // is a smaller defect than a brief the writer cannot make sense of at all.
-        if (candidate.replace(/\s{2,}/g, ' ').trim().length < REFERENCE_TITLE_LENGTH_FLOOR) continue
-        out = candidate
-      }
-    }
-    return out.replace(/\s{2,}/g, ' ').replace(/\s*\|\s*\|\s*/g, ' | ').replace(/^\s*\|\s*/, '').replace(/\s*\|\s*$/, '').trim()
-  }
-  /* V5 (Round V, cross-design leak controller ruling, Important) — `ctx.groupInput.canonicalTitle`
-   * carries the SAME potentially-contaminated per-group title `ctx.title` does (both are set from
-   * the group's own child's stored title — `groupRepTitle` above), but reaches several consumers
-   * RAW: the per-design motif trust haystack (`groupMotif`, both bullets and description
-   * fan-outs), the backend fan-out's `groupHay` trust haystack, and `fillBackendToBudget`'s own
-   * reference-title argument. A contaminated title there would make a sibling's slogan a
-   * "grounded" motif for THIS design (the exact thing `stripUngroundedMotifs` exists to catch) or
-   * feed the backend filler a false reference — sanitize from the SAME source `sanitizeReferenceTitle`
-   * already uses, at every one of those raw reads, below. (The multi-design LLM editorial audit's
-   * OWN raw read, gated `!input.onlySection`, runs only on the full-regen path, where — per U6/V4's
-   * own established reasoning above — the per-group titles are freshly resolved and already clean;
-   * left unsanitized there rather than duplicating that reasoning at a fourth call site.) */
-  const sanitizedGroupCanonicalTitle = (ctx: { groupInput: { canonicalTitle?: string | null }; key: string }): string =>
-    sanitizeReferenceTitle(ctx.groupInput.canonicalTitle ?? '', ctx.key)
+  /* ROUND W (2026-09-28) — DELETED: the U6/V4/V5 brief sanitizer (`sanitizeReferenceTitle` and its
+   * `sanitizedGroupCanonicalTitle` wrapper). Four rounds (S/T/U's subtractive ship door, then V's
+   * sanitizer) tried to cure this class with string surgery on the WRITER'S BRIEF, and every source
+   * that surgery could consult for "what is this design's name" was itself contaminated: the live
+   * per-child TITLES carry the sibling's slogan, the stored `designName` column has two documented
+   * degraded values, and `input.canonicalTitle`/`priorTitle` are themselves one child's own —
+   * possibly contaminated — title, so the sanitizer's own niche exemption was inversely coupled to
+   * the defect it existed to remove (measured, phase-v1-review-source.md Blocking 1/2/5: a
+   * cleanly-resolved sibling name stripped nothing when it was ALSO family-niche vocabulary, which
+   * on the live population it always was). There is no sound string-level fix while the input is
+   * wrong. `settleTitle`/#640 plus the per-child TITLE ship door (unchanged, still `titleScopeFor`
+   * below) already cure new titles; the fix for ALREADY-LIVE contaminated titles is operational —
+   * regenerate the title, push it, THEN regenerate bullets/description against the now-clean stored
+   * title (see the runbook) — not a net in this file. What stays here is read-only: the report just
+   * below (`detectForeignBullets`/`detectForeignDescription`, W2) still tells the operator when a
+   * sibling's name ships, without ever touching a byte. */
   // NON-EMPTY-FAMILY-TITLE-TEXT-OK (S1, Round S): a CANDIDATE-FILTER on the INPUT keyword pool, not
   // a ship exit — the family's niche vocabulary must stay available to every design (same
   // reasoning as the title candidate filter above). Circularity does not apply: the produced
@@ -11750,12 +11704,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
             // Group-scoped pools (#2): foreign-design keywords out, own-title-covered keywords out.
             const groupRemaining = scopeKwsToGroup(ctx, remainingForBullets, (k) => k.keyword)
             const groupTopOpp = scopeKwsToGroup(ctx, topOpportunityKwsForBullets, (k) => k)
-            const raw = await runBulletsAgent(ctx.groupInput, sanitizeReferenceTitle(ctx.title, ctx.key), groupRemaining, bulletAttrs, groupTopOpp, capacityFamilyTokens, compatibilityBrands, ctx.designName)
+            const raw = await runBulletsAgent(ctx.groupInput, ctx.title, groupRemaining, bulletAttrs, groupTopOpp, capacityFamilyTokens, compatibilityBrands, ctx.designName)
             // Mirror the broadcast strip chain EXACTLY, but ground motif-stripping on THIS group's own
             // design (parity with per-design titles, which recompute a group-scoped motifTrust in
             // buildTitleFor) — so a motif legit for THIS design isn't judged against the parent/other-
             // design grounding.
-            const groupMotif = `${sanitizedGroupCanonicalTitle(ctx)} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
+            const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
             let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? ''))
             if (lean === 'female' || lean === 'male') gb = gb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
             gb = gb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
@@ -12017,7 +11971,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       try {
         // dropTitleCovered=false — the PO-chosen backend HYBRID keeps title keyphrases in the core.
         const groupPool = scopeKwsToGroup(ctx, backendPool, (k) => k.keyword, false)
-        const groupHay = `${sanitizedGroupCanonicalTitle(ctx)} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName} ${(input.productType ?? '').replace(/_/g, ' ')}`.toLowerCase()
+        const groupHay = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName} ${(input.productType ?? '').replace(/_/g, ' ')}`.toLowerCase()
         // S6 (Round S, 2026-09-24, live B0DSCDZC6K) — the SIBLING-NAME ban below corroborates a hit
         // against `groupHay`, which carries `ctx.groupInput.canonicalTitle`/`repTitle`: THIS
         // group's own STORED/live title — the exact input the August title defect could (and did)
@@ -12073,7 +12027,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // garment-noun candidate against the title (which stably indexes the product type), not against
         // bullets — bullets are transient prose and their "graphic"/"gift"/etc. would wrongly block
         // high-volume opportunity phrases from ever landing in backend where Content step 2 needs them.
-        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), sanitizedGroupCanonicalTitle(ctx), groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(groupBan, input.customizable === true), groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : []), backendTruthOk) }))
+        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), ctx.groupInput.canonicalTitle ?? '', groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(groupBan, input.customizable === true), groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : []), backendTruthOk) }))
         return rows
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -12119,8 +12073,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // useCouncil:false — runs once PER design group inside a Promise.all; N parallel GPT-5
         // councils would be cost/latency-prohibitive. Only the broadcast description gets the council.
         // descAttrs (real facts, no search phrases) + [] opportunity kws — same clean-prose rule as broadcast.
-        const raw = await runDescriptionAgent(ctx.groupInput, sanitizeReferenceTitle(ctx.title, ctx.key), groupBullets, descAttrs, compatibilityBrands, [], false, descTruthCtx)
-        const groupMotif = `${sanitizedGroupCanonicalTitle(ctx)} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
+        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, descAttrs, compatibilityBrands, [], false, descTruthCtx)
+        const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
         // 3rd arg = sellerGarmentText (parity-audit #8: it was missing, so the heavy-garment-
         // stuffing guard never fired for per-design descriptions).
         let gd = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(raw, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? '')
