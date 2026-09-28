@@ -1,0 +1,1204 @@
+{
+  "C0 top child HDG [bullets]": {
+    "plans": {
+      "BB": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "BCSG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "DQG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "EDG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "HDG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "MHG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C1 top child BB [bullets]": {
+    "plans": {
+      "BB": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "BCSG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "DQG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "EDG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "HDG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "MHG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C2 top child HDG, pool >=10% business [bullets]": {
+    "plans": {
+      "BB": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "BCSG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "DQG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "EDG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "HDG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "MHG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C3 recorded family title [bullets]": {
+    "plans": {
+      "BB": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "BCSG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "DQG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "EDG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "HDG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "MHG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C3b recorded family title as stored parent priorTitle too [bullets]": {
+    "plans": {
+      "BB": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "entrepreneur sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck"
+      ],
+      "BCSG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "entrepreneur sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck"
+      ],
+      "DQG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "entrepreneur sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck"
+      ],
+      "EDG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck"
+      ],
+      "HDG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "entrepreneur sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck"
+      ],
+      "MHG": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "entrepreneur sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C4 every sibling full name in top-10 pool [bullets]": {
+    "plans": {
+      "BB": [
+        "business bitch sweatshirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "inspirational crewneck"
+      ],
+      "BCSG": [
+        "business bitch sweatshirt",
+        "billionaire coming soon shirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "inspirational crewneck",
+        "Business B tch Sweatshirt"
+      ],
+      "DQG": [
+        "business bitch sweatshirt",
+        "dont quit sweatshirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "inspirational crewneck",
+        "Business B tch Sweatshirt"
+      ],
+      "EDG": [
+        "business bitch sweatshirt",
+        "entrepreneur definition shirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "inspirational crewneck",
+        "Business B tch Sweatshirt"
+      ],
+      "HDG": [
+        "business bitch sweatshirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "inspirational crewneck",
+        "Business B tch Sweatshirt"
+      ],
+      "MHG": [
+        "business bitch sweatshirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "inspirational crewneck",
+        "Business B tch Sweatshirt"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C0 top child HDG [description]": {
+    "plans": {
+      "BB": [],
+      "BCSG": [],
+      "DQG": [],
+      "EDG": [],
+      "HDG": [],
+      "MHG": []
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C1 top child BB [description]": {
+    "plans": {
+      "BB": [],
+      "BCSG": [],
+      "DQG": [],
+      "EDG": [],
+      "HDG": [],
+      "MHG": []
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C2 top child HDG, pool >=10% business [description]": {
+    "plans": {
+      "BB": [],
+      "BCSG": [],
+      "DQG": [],
+      "EDG": [],
+      "HDG": [],
+      "MHG": []
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C3 recorded family title [description]": {
+    "plans": {
+      "BB": [],
+      "BCSG": [],
+      "DQG": [],
+      "EDG": [],
+      "HDG": [],
+      "MHG": []
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C3b recorded family title as stored parent priorTitle too [description]": {
+    "plans": {
+      "BB": [],
+      "BCSG": [],
+      "DQG": [],
+      "EDG": [],
+      "HDG": [],
+      "MHG": []
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "C4 every sibling full name in top-10 pool [description]": {
+    "plans": {
+      "BB": [],
+      "BCSG": [],
+      "DQG": [],
+      "EDG": [],
+      "HDG": [],
+      "MHG": []
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "T1 stored per-child HDG contaminated [bullets]": {
+    "plans": {
+      "BB": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "BCSG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "DQG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "EDG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "HDG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "MHG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "T2 live HDG title contaminated [bullets]": {
+    "plans": {
+      "BB": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "BCSG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "DQG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "EDG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "HDG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "MHG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "T3 both contaminated [bullets]": {
+    "plans": {
+      "BB": [
+        "business bitch sweatshirt",
+        "business bitch shirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "BCSG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "DQG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "EDG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "HDG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ],
+      "MHG": [
+        "boss lady sweatshirt",
+        "motivational sweatshirt women",
+        "hustle sweatshirt",
+        "grind sweatshirt",
+        "gifts for entrepreneurs",
+        "boss mom gift",
+        "inspirational crewneck",
+        "funny work sweatshirt"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "niche vocab: real six names, entrepreneur pool [bullets]": {
+    "plans": {
+      "BB": [
+        "gifts for entrepreneurs",
+        "entrepreneur gifts for women",
+        "motivational entrepreneur shirt",
+        "small business owner gifts",
+        "business owner sweatshirt",
+        "side hustle gift",
+        "hustle sweatshirt women",
+        "hustle sweatshirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women"
+      ],
+      "BCSG": [
+        "gifts for entrepreneurs",
+        "entrepreneur gifts for women",
+        "motivational entrepreneur shirt",
+        "small business owner gifts",
+        "business owner sweatshirt",
+        "side hustle gift",
+        "hustle sweatshirt women",
+        "hustle sweatshirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women"
+      ],
+      "DQG": [
+        "gifts for entrepreneurs",
+        "entrepreneur gifts for women",
+        "motivational entrepreneur shirt",
+        "small business owner gifts",
+        "business owner sweatshirt",
+        "side hustle gift",
+        "hustle sweatshirt women",
+        "hustle sweatshirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women"
+      ],
+      "EDG": [
+        "gifts for entrepreneurs",
+        "entrepreneur gifts for women",
+        "motivational entrepreneur shirt",
+        "small business owner gifts",
+        "business owner sweatshirt",
+        "side hustle gift",
+        "hustle sweatshirt women",
+        "hustle sweatshirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women"
+      ],
+      "HDG": [
+        "gifts for entrepreneurs",
+        "entrepreneur gifts for women",
+        "motivational entrepreneur shirt",
+        "small business owner gifts",
+        "business owner sweatshirt",
+        "side hustle gift",
+        "hustle sweatshirt women",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women"
+      ],
+      "MHG": [
+        "gifts for entrepreneurs",
+        "entrepreneur gifts for women",
+        "motivational entrepreneur shirt",
+        "small business owner gifts",
+        "business owner sweatshirt",
+        "side hustle gift",
+        "hustle sweatshirt women",
+        "hustle sweatshirt",
+        "boss lady sweatshirt",
+        "motivational sweatshirt women"
+      ]
+    },
+    "names": [
+      {
+        "key": "BB",
+        "name": "Business B*tch"
+      },
+      {
+        "key": "BCSG",
+        "name": "Billionare Coming Soon"
+      },
+      {
+        "key": "DQG",
+        "name": "Don't Quit"
+      },
+      {
+        "key": "EDG",
+        "name": "Entrepreneur Definition"
+      },
+      {
+        "key": "HDG",
+        "name": "Hustle Definiton"
+      },
+      {
+        "key": "MHG",
+        "name": "Mother Hustler"
+      }
+    ]
+  },
+  "fishing family: FT/BM/RCD/HLS [bullets]": {
+    "plans": {
+      "FT": [
+        "funny fishing shirts for men",
+        "fishing tshirt men",
+        "fly fishing gift",
+        "fisherman gift",
+        "lake life shirt",
+        "outdoor graphic tee",
+        "dad gift fishing"
+      ],
+      "BM": [
+        "funny fishing shirts for men",
+        "fishing tshirt men",
+        "bass fishing shirt",
+        "fly fishing gift",
+        "fisherman gift",
+        "lake life shirt",
+        "outdoor graphic tee",
+        "dad gift fishing"
+      ],
+      "RCD": [
+        "funny fishing shirts for men",
+        "fishing tshirt men",
+        "fly fishing gift",
+        "fisherman gift",
+        "lake life shirt",
+        "outdoor graphic tee",
+        "dad gift fishing"
+      ],
+      "HLS": [
+        "funny fishing shirts for men",
+        "fishing tshirt men",
+        "fly fishing gift",
+        "fisherman gift",
+        "lake life shirt",
+        "outdoor graphic tee",
+        "dad gift fishing"
+      ]
+    },
+    "names": [
+      {
+        "key": "FT",
+        "name": "Fishing Trip"
+      },
+      {
+        "key": "BM",
+        "name": "Bass Master"
+      },
+      {
+        "key": "RCD",
+        "name": "Reel Cool Dad"
+      },
+      {
+        "key": "HLS",
+        "name": "Hook Line Sinker"
+      }
+    ]
+  }
+}
