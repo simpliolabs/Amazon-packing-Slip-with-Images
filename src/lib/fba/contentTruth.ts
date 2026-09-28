@@ -1113,17 +1113,85 @@ function scrubMoneyPhrase(
   // (designScope.ts's STRICT-NAMES partition); tokenizing each chunk with `designScopeTokens` keeps
   // the two in agreement (a "Business B*tch" foreign entry folds to the tokens that "Business" and
   // "B*tch" each resolve to, so both chunks strike even though "b*tch" splits on the star).
-  if (foreignTokens && foreignTokens.size) {
-    s = s.split(/(\s+)/).map((chunk) => {
-      if (!chunk.trim()) return chunk
-      const toks = designScopeTokens(chunk)
-      if (toks.length === 0) return chunk
-      const foreign = toks.some((t) => foreignTokens.has(t))
-      const protectedTok = toks.some((t) => protectedWords.has(t))
-      return foreign && !protectedTok ? '' : chunk
-    }).join('')
-  }
+  // Extracted to `stripForeignNameTokens` (RULING Z5) so the SAME word-strike also runs when no
+  // truth `ctx` resolves — see that function's doc.
+  s = stripForeignNameTokens(s, protectedWords, foreignTokens)
   return { text: s.replace(/\s{2,}/g, ' ').replace(/^[\s,]+|[\s,]+$/g, '').trim(), primaryClass }
+}
+
+/** The foreign-design-name word-strike, rule (c) of `scrubMoneyPhrase`, extracted so it can run
+ *  WITHOUT a `PhraseTruthCtx` (see `rejectForeignNameSegments`, RULING Z5). Never touches a token
+ *  that is also in `protectedWords` (this design's own name). Behavior-preserving extraction —
+ *  byte-identical to the inline block it replaced. */
+function stripForeignNameTokens(seg: string, protectedWords: ReadonlySet<string>, foreignTokens?: ReadonlySet<string>): string {
+  if (!foreignTokens || !foreignTokens.size) return seg
+  return seg.split(/(\s+)/).map((chunk) => {
+    if (!chunk.trim()) return chunk
+    const toks = designScopeTokens(chunk)
+    if (toks.length === 0) return chunk
+    const foreign = toks.some((t) => foreignTokens.has(t))
+    const protectedTok = toks.some((t) => protectedWords.has(t))
+    return foreign && !protectedTok ? '' : chunk
+  }).join('')
+}
+
+/**
+ * RULING Z5 (phase-z1-rulings.md, 2026-09-24). `titleTruthDoor` (listingPipeline.ts) only ever
+ * calls `applyTitleTruthNet` when a garment truth `ctx` resolves (`ctx ? applyTitleTruthNet(...) :
+ * stripped`) — so on the ctx-null branch, the SIBLING-NAME reject (`opts.rejectSegment`/
+ * `opts.foreignTokens`, the per-child title ship door's own scope) never ran either, even though
+ * neither half of it needs `ctx`: `rejectSegment` is a caller-supplied predicate over segment TEXT,
+ * and rule (c)'s word-strike above tests only `foreignTokens`/`protectedWords`. This is the source
+ * of the T1/T3 residual (phase-y1-report.md) and the R1 title-regen LEAK 268 (phase-y1-rulings.md):
+ * a STORED per-child title that already names a sibling design ships through the door unexamined
+ * whenever this minimal a fixture (or a family whose blank never resolves) never builds a truth ctx.
+ *
+ * Runs the SAME two foreign-name mechanisms `applyTitleTruthNet` uses — the segment sweep's
+ * `rejectSegment`/`carriesSoleDesignWord` fail-open (mirrored here, not re-implemented from scratch:
+ * identical segment split, identical never-drop-segment-0 rule, identical protected-word rail) and
+ * `stripForeignNameTokens` for segment 0 — MINUS every TRUTH check, which genuinely requires `ctx`
+ * and is correctly still skipped when none resolved. No new detector, sanitiser or lexicon: both
+ * halves are the pre-existing foreign-name predicate, made reachable on the branch that used to skip
+ * it entirely. A no-op (returns `title` unchanged) when the caller passes neither `rejectSegment`
+ * nor `foreignTokens` — byte-identical to the pre-Z5 behavior for every single-design call.
+ */
+export function rejectForeignNameSegments(
+  title: string,
+  protectHay: string,
+  opts: { rejectSegment?: (seg: string) => boolean; foreignTokens?: ReadonlySet<string> },
+): string {
+  if (!title || !title.trim()) return title
+  if (!opts.rejectSegment && !(opts.foreignTokens && opts.foreignTokens.size)) return title
+  const t = title.trim()
+  const words = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) ?? []
+  const protectedWords = new Set(words(protectHay).filter((w) => w.length > 2))
+  const parts = t.split(/\s*([|,])\s*/)
+  if (parts.length <= 1) {
+    return stripForeignNameTokens(t, protectedWords, opts.foreignTokens).replace(/\s{2,}/g, ' ').replace(/^[\s,]+|[\s,]+$/g, '').trim()
+  }
+  const seg0 = stripForeignNameTokens(parts[0], protectedWords, opts.foreignTokens)
+  const kept: string[] = [seg0]
+  let carried: string | null = null
+  for (let i = 1; i + 1 < parts.length; i += 2) {
+    const sep = parts[i]
+    let seg = parts[i + 1]
+    if (sep === undefined || seg === undefined || !seg.trim()) continue
+    if (opts.rejectSegment?.(seg) === true) {
+      const rest = [parts[0], ...kept.slice(1), ...parts.slice(i + 2)].join(' ')
+      const restWords = new Set(words(rest))
+      const soleDesignWord = words(seg).some((w) => protectedWords.has(w) && !restWords.has(w))
+      if (!soleDesignWord) {
+        carried = carried === '|' || sep === '|' ? '|' : (carried ?? sep)
+        continue // drop the untrue/foreign phrase
+      }
+      // A protected design word survives NOWHERE ELSE — keep the segment verbatim (fail-open,
+      // same rail `applyTitleTruthNet` gives every dropped segment).
+    }
+    const useSep = carried === '|' || sep === '|' ? '|' : sep
+    carried = null
+    kept.push(useSep === '|' ? ` | ${seg}` : `, ${seg}`)
+  }
+  return kept.join('').replace(/\s{2,}/g, ' ').replace(/[\s,|]+$/g, '').trim()
 }
 
 /**

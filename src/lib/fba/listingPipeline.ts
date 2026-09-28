@@ -85,6 +85,7 @@ import { ihWriterMode, ihWriterMaxCallsBudget, ihWriterDeadlineMs, runWriterForD
 import {
   phraseTruthVerdict,
   applyTitleTruthNet,
+  rejectForeignNameSegments,
   audienceOfGarmentFamily,
   normalizeAudienceLean,
   garmentNounConstraint,
@@ -10366,7 +10367,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           // `protect` is THAT design's own name, where a match IS genuine and must stay verbatim.
           scrubProtectedOverlap: !scope,
         })
-      : stripped
+      // RULING Z5 (phase-z1-rulings.md): no garment truth ctx resolved (T1/T3's own residual, and
+      // R1's title-regen LEAK — phase-y1-report.md), but the SIBLING-NAME reject never needed one.
+      // Run it here instead of letting the whole door no-op.
+      : rejectForeignNameSegments(stripped, scope?.protect ?? protectHay, { rejectSegment: scope?.reject, foreignTokens: scope?.foreignTokens })
   }
   /* CROSS-DESIGN SCOPE FOR THE PER-CHILD EXIT (PO 2026-08-21, live B0DSCDZC6K). The "Business
    * B*tch" DESIGN NAME shipped inside THREE other designs' titles, and the truth net's own
@@ -10831,9 +10835,36 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // `gLean === lean` (groupAudienceFor falls back to the family value), so `preferredAudienceFor`
         // returns the SAME string `preferredAudience` already holds — no behavior change there.
         const groupPreferredAudience = gLean ? preferredAudienceFor(gLean) : preferredAudience
-        const r = await buildTitleFor(groupInput, scoped, attrs.searchKeyphrases, titleMustInclude, groupPreferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, gLean, apparelProduct, brandName, season, groupTruthCtx ?? titleTruthCtx)
-        // groupInput is returned so the bullets/description stages can reuse the resolved per-group
-        // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
+        /* RULING Z4 (phase-z1-rulings.md, 2026-09-24): the PO gold corpus (`input.poGolds`) is
+         * FAMILY-WIDE and read straight into every per-design brief — so a gold whose OWN identity
+         * happens to be a SIBLING design of THIS family (measured live: B0DSCDZC6K's "Don't Quit"
+         * gold shown, verbatim, to the other five designs' title councils) is an exemplar teaching
+         * this design to write a sibling's name. Filter with the SAME phrase-unit matcher the
+         * keyword pool above is already scoped with (`namePhrases`/`isForeignNamePhrase`) — no new
+         * detector. The corpus itself (`SEED_GOLD_TITLES`/`ctx.poGolds`) and `measureGoldShape` are
+         * untouched; only the LOCAL, per-design copy of `groupInput` handed to THIS call is scoped,
+         * with its `shape` recomputed (via the same, unmodified `measureGoldShape`) over the
+         * filtered set so the brief's own "SELLER-APPROVED TITLES (N)" count matches what it prints.
+         * Fails open: filtering never empties the set to zero in practice (only a sibling's own
+         * gold is dropped), and if it somehow did, the ORIGINAL unfiltered poGolds ships rather than
+         * leaving the council with no few-shot at all. */
+        // `groupInput.poGolds` is often ABSENT (no live seller corpus loaded yet) — buildApparelTitleBrief
+        // then falls back to the static `SEED_GOLD_TITLES`, which itself carries a real seller gold
+        // ("Don't Quit") that is ALSO a live design name in some families. The filter must see that
+        // fallback set too, or it only ever protects a corpus that happens to already be loaded.
+        const goldTitles = groupInput.poGolds?.titles?.length ? groupInput.poGolds.titles : [...SEED_GOLD_TITLES]
+        const scopedGroupInput = (namePhrases.length && goldTitles.length)
+          ? (() => {
+              const filteredGolds = goldTitles.filter((t) => !isForeignNamePhrase(t, namePhrases))
+              if (!filteredGolds.length || filteredGolds.length === goldTitles.length) return groupInput
+              console.log(JSON.stringify({ tag: 'TITLE_GOLD_SCOPE', design: group.key, name: groupDesignName, golds: goldTitles.length, scoped: filteredGolds.length }))
+              return { ...groupInput, poGolds: { titles: filteredGolds, shape: measureGoldShape(filteredGolds) } }
+            })()
+          : groupInput
+        const r = await buildTitleFor(scopedGroupInput, scoped, attrs.searchKeyphrases, titleMustInclude, groupPreferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, gLean, apparelProduct, brandName, season, groupTruthCtx ?? titleTruthCtx)
+        // groupInput (UNSCOPED — the gold filter above is a title-council-only, local copy) is
+        // returned so the bullets/description stages can reuse the resolved per-group design name +
+        // vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
         return { group, groupInput, groupDesignName, groupIdentityPhrases, ...r }
       }))
       const allDesignNames: string[] = []
