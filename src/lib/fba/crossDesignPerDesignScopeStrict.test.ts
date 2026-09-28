@@ -191,14 +191,19 @@ describe('X2/X3 — bullets keyword-plan scoper: sibling names closed, own/share
     }
   }, 60_000)
 
-  it("THE PIN (mutation-provable): reverting familyTitleText/strictNames at :11334's call reproduces the leak", async () => {
-    // A structural pin, not a byte-diff: the fix is that `foreignToksFor`'s options object is
-    // `{ familyTitleText: '', poolKeywords: ..., strictNames: true }` — not the family's own
-    // canonicalTitle/priorTitle, and not soft (strictNames absent/false). `phase-x1-report.md`
-    // records this test failing (RED) against a copy with the pre-fix literal restored.
+  it("THE PIN (mutation-provable): reverting familyTitleText/strictNames or the Y2 name-phrase call reproduces the leak", async () => {
+    // A structural pin, not a byte-diff. RULING Y2 (phase-y1-rulings.md) moved a sibling's NAME
+    // off this token-level set (which is now IDENTITY-ONLY — `name: ''`, never a sibling's own
+    // name token) onto a separate PHRASE-UNIT check (`buildForeignNamePhrases` /
+    // `isForeignNamePhrase`, designScope.ts) — a single shared word ("entrepreneur"/"hustle"/
+    // "fishing") no longer bans a genuinely shared or niche keyword for every OTHER design (the
+    // regression `crossDesignScopeLeakLoss.test.ts`'s niche-vocab and fishing-family arms pin at
+    // LOSS=0). Both halves must still be present: the identity-token partition (unchanged
+    // `familyTitleText: ''`/`strictNames: true` shape, name blanked) AND the phrase-unit call.
     const src = (await import('node:fs')).readFileSync(
       (await import('node:path')).join(process.cwd(), 'src', 'lib', 'fba', 'listingPipeline.ts'), 'utf8',
     )
-    expect(src).toMatch(/const foreignToksFor = buildForeignDesignTokens\(\s*designGroupContexts\.map\(\(c\) => \(\{ key: c\.key, name: c\.designName \}\)\),\s*\{ familyTitleText: '', poolKeywords: analysis\.map\(\(k\) => k\.keyword\), strictNames: true \},/)
+    expect(src).toMatch(/const foreignToksFor = buildForeignDesignTokens\(\s*designGroupContexts\.map\(\(c\) => \(\{ key: c\.key, name: '' \}\)\),\s*\{ familyTitleText: '', poolKeywords: analysis\.map\(\(k\) => k\.keyword\), strictNames: true \},/)
+    expect(src).toMatch(/const foreignNamePhrasesFor = buildForeignNamePhrases\(designGroupContexts\.map\(\(c\) => \(\{ key: c\.key, name: c\.designName \}\)\)\)/)
   })
 })

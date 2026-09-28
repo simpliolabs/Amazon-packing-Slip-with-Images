@@ -97,7 +97,7 @@ import {
   type TruthGarmentFamily,
   type TruthAudienceLean,
 } from '@/lib/fba/contentTruth'
-import { buildForeignDesignTokens, designScopeTokens, fillNormTok, isForeignToDesign } from '@/lib/fba/designScope'
+import { buildForeignDesignTokens, buildForeignNamePhrases, designScopeTokens, fillNormTok, isForeignNamePhrase, isForeignToDesign } from '@/lib/fba/designScope'
 import { IH_HOLD_MESSAGES, type IhHoldReason, type PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 // Re-exported for every existing importer (buildItemHighlights callers, tests) — the type + message
 // map now LIVE in perDesignItemHighlights.ts (pure, no OpenAI import) so the client-side listing page
@@ -7289,6 +7289,15 @@ async function runBulletsMetricLoops(
   perChildBullets: { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[] | undefined,
   ctx: { title: string; brandName: string; designName: string; fit: string; onProgress?: (m: string) => void },
   enableLoop: boolean,
+  /** RULING Y3 (phase-y1-rulings.md): designKey -> THAT design's own title. Without this, every
+   *  per-child group was judged against `ctx.title` — the FAMILY title (the stored parent
+   *  `recommended_title`, which on a multi-design family can carry the top child's OWN slogan) —
+   *  handed to the judge as "PRODUCT TITLE" for every OTHER design too (captured verbatim,
+   *  phase-x1-review-channels.md Blocking 3, C3b: MHG's judge prompt read "PRODUCT TITLE: THE CEO
+   *  Motivational Entrepreneur | Business B*tch Sweatshirt for Men" / "DESIGN IDENTITY: Hustle
+   *  Definiton"). Falls back to `ctx.title` when a group's own title is unknown (single-design, or
+   *  a stale section-regen whose fan-out never ran) — the pre-existing fail-open direction. */
+  groupTitleByKey?: Map<string, string>,
 ): Promise<string[]> {
   if (!enableLoop) return broadcastBullets
   if (perChildBullets && perChildBullets.length) {
@@ -7297,8 +7306,9 @@ async function runBulletsMetricLoops(
       for (const pcb of perChildBullets) {
         const gkey = pcb.designKey || pcb.designName || pcb.sku
         if (!loopedByGroup.has(gkey)) {
+          const ownTitle = (pcb.designKey && groupTitleByKey?.get(pcb.designKey)) || ctx.title
           loopedByGroup.set(gkey, await metricGatedBulletsLoop(openai, pcb.bullets, {
-            title: ctx.title, brandName: ctx.brandName,
+            title: ownTitle, brandName: ctx.brandName,
             designName: pcb.designName || ctx.designName, fit: ctx.fit,
             onProgress: ctx.onProgress, label: `design:${pcb.designName || gkey}`,
           }, true))
@@ -10785,23 +10795,24 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
        * the titles in a second parallel pass against the SCOPED pool. Same total work, same
        * parallelism, and the terminal net at the ship door stays the backstop rather than the cure. */
       const resolvedGroups = await Promise.all(designGroupInfo.groups.map((group) => resolveGroupDesignName(group)))
+      // RULING Y2 (phase-y1-rulings.md): IDENTITY (vision) vocabulary stays on the ORIGINAL
+      // token-level partition (`name: ''` below — a candidate filter must still respect the
+      // family-title / pool-frequency niche exemptions for broad vision tokens, X3). A sibling's
+      // NAME is banned separately, as a PHRASE UNIT, so "entrepreneur"/"hustle"/"fishing" alone
+      // never convicts a candidate of naming "Entrepreneur Definition"/"Hustle Definiton"/"Fishing
+      // Trip" — see designScope.ts's `buildForeignNamePhrases` doc for the measured regression.
       const titleForeignFor = buildForeignDesignTokens(
-        resolvedGroups.map((rg) => ({ key: rg.group.key, name: rg.groupDesignName, identity: rg.groupIdentityPhrases })),
-        // RULING X1/X2: `familyTitleText` is '', not `${canonicalTitle} ${priorTitle}` — the family
-        // title is sourced from the TOP CHILD's own title, and on a family whose best seller IS one
-        // of these designs, that design's own name would exempt itself from every SIBLING's foreign
-        // set via `titleToks` in designScope.ts (checked BEFORE `strictNames`, so `strictNames: true`
-        // alone does not close it — see designScope.ts's `buildForeignDesignTokens`). `poolKeywords`
-        // stays populated: the pool-frequency exemption still applies to broad IDENTITY (vision)
-        // tokens, which is the genuinely-shared-niche-vocabulary case this candidate filter must
-        // keep (X3) — only NAME tokens are made strict, via `strictNames: true` below, exactly as
-        // the ship door already does (`perChildDesignScope`).
+        resolvedGroups.map((rg) => ({ key: rg.group.key, name: '', identity: rg.groupIdentityPhrases })),
         { familyTitleText: '', poolKeywords: candidates.map((c) => c.keyword), strictNames: true },
       )
+      const titleForeignNamePhrasesFor = buildForeignNamePhrases(resolvedGroups.map((rg) => ({ key: rg.group.key, name: rg.groupDesignName })))
       const groupResults = await Promise.all(resolvedGroups.map(async (rg) => {
         const { group, groupInput, groupDesignName, groupIdentityPhrases, groupTruthCtx } = rg
         const foreign = titleForeignFor(group.key)
-        const scoped = foreign.size ? candidates.filter((c) => !isForeignToDesign(c.keyword, foreign)) : candidates
+        const namePhrases = titleForeignNamePhrasesFor(group.key)
+        const scoped = (foreign.size || namePhrases.length)
+          ? candidates.filter((c) => !isForeignToDesign(c.keyword, foreign) && !isForeignNamePhrase(c.keyword, namePhrases))
+          : candidates
         if (scoped.length !== candidates.length) {
           console.log(JSON.stringify({ tag: 'TITLE_DESIGN_SCOPE', design: group.key, name: groupDesignName, pool: candidates.length, scoped: scoped.length, foreign: [...foreign].slice(0, 12) }))
         }
@@ -11041,9 +11052,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (auditBudget > 0 && (gb.length === 5 || gd.trim().length > 0)) {
         auditBudget--
         try {
+          // RULING Y3 (phase-y1-rulings.md): this group's OWN secondary phrase, from its OWN title
+          // — never the family-level `secondaryPhrases` above, which is derived from the FAMILY
+          // title (the top child's own title/slogan). The prior code handed every design group the
+          // SAME family phrase as "the joke/angle is: …" in this audit's prompt, so on a FULL regen
+          // every sibling's rewrite prompt named the top child's slogan verbatim (measured, 6 of 6
+          // designs: `phase-x1-review-cost.md` Blocking B2). `onlySection` regens never reach this
+          // branch (`gatePerChildMultiDesign` returns above when set), so this call is FULL-regen
+          // only and `ctx.groupInput.canonicalTitle` is always populated by the per-group fan-out.
+          const groupSecondaryPhrases = apparelProduct ? secondaryDesignPhrases(ctx.groupInput.canonicalTitle ?? ctx.title, brandName) : []
           const ar = await runFinalEditorialAudit(input.openai, ctx.title, gb, gd, '', {
             design: ctx.designName || effectiveDesignName || '',
-            designPhrases: secondaryPhrases,
+            designPhrases: groupSecondaryPhrases,
             garment: input.productType ?? '',
             audience: preferredAudience || lean || '',
             referenceTitle: ctx.groupInput.canonicalTitle ?? ctx.title ?? '',
@@ -11339,25 +11359,36 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (designScope.ts), and (2) the pool being >=10% "business" keywords exempted it via pool
   // frequency. Both are the family-TITLE / pool-frequency circularity the ship door's own comment
   // names ("an exemption sourced from the family TITLE would be circular — the title is the thing
-  // on trial"); a pool-frequency exemption is that same circularity from a different source. Only
-  // genuinely-shared vocabulary (identity/vision tokens, or a name token shared by >=50% of the
-  // family's names — designScope's OWN niche rule) may still survive; see X3's before/after count.
+  // on trial"); a pool-frequency exemption is that same circularity from a different source.
+  //
+  // RULING Y2 (phase-y1-rulings.md): `strictNames: true` here turned out to be TOKEN-level — any
+  // keyword sharing ONE word with a sibling's name ("entrepreneur", "hustle", "fishing") was struck
+  // from every OTHER design too, deleting the family's own niche vocabulary and, on a fishing
+  // family, a design's OWN rows (`designScope.test.ts:15`'s SOFT-mode case, now reachable through a
+  // STRICT caller). `foreignToksFor` therefore carries IDENTITY (vision) tokens ONLY now — genuinely
+  // broad vocabulary that still deserves the niche exemptions below — and a sibling's NAME is
+  // banned separately, as a PHRASE UNIT (`buildForeignNamePhrases`/`isForeignNamePhrase`,
+  // designScope.ts): every one of that name's own tokens must occur TOGETHER in the keyword, so one
+  // shared word never convicts a genuinely-shared or niche keyword of naming a sibling.
   const foreignToksFor = buildForeignDesignTokens(
-    designGroupContexts.map((c) => ({ key: c.key, name: c.designName })),
+    designGroupContexts.map((c) => ({ key: c.key, name: '' })),
     { familyTitleText: '', poolKeywords: analysis.map((k) => k.keyword), strictNames: true },
   )
+  const foreignNamePhrasesFor = buildForeignNamePhrases(designGroupContexts.map((c) => ({ key: c.key, name: c.designName })))
   // dropTitleCovered: bullets/description pools dedupe against the group's OWN title (token
   // coverage, not raw substring — "gator" inside "alligator" is NOT coverage; review-caught).
   // The BACKEND pool must NOT drop title-covered keywords: the PO-chosen hybrid deliberately
   // keeps the best title keyphrases in the backend core (review-caught).
   const scopeKwsToGroup = <T>(ctx: { key: string; title: string }, kws: T[], kwOf: (k: T) => string, dropTitleCovered = true): T[] => {
     const foreign = foreignToksFor(ctx.key)
+    const namePhrases = foreignNamePhrasesFor(ctx.key)
     const titleToks = new Set(bulletTokens(ctx.title || '').map(fillNormTok))
     return kws.filter((k) => {
       const kw = kwOf(k)
       const ts = bulletTokens(kw).map(fillNormTok)
       if (dropTitleCovered && ts.length > 0 && ts.every((t) => titleToks.has(t))) return false
-      return !ts.some((t) => foreign.has(t))
+      if (ts.some((t) => foreign.has(t))) return false
+      return !isForeignNamePhrase(kw, namePhrases)
     })
   }
 
@@ -11373,6 +11404,59 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const broadcastDesignAnchor = unifiedSet && coupleConcept ? coupleConcept : (apparelMultiDesign ? effectiveDesignName : designName)
   const broadcastMotifTrust = unifiedSet && coupleConcept ? `${motifTrust} ${coupleConcept.toLowerCase()}` : motifTrust
   let bullets: string[]
+  // RULING Y3 (phase-y1-rulings.md): a per-design group's FALLBACK — bullets OR description — must
+  // never ship the broadcast bullets verbatim. The broadcast writer is handed the UNSCOPED family
+  // plan (`remainingForBullets`/`topOpportunityKwsForBullets`, no design-scope filter at all), so a
+  // design whose own call failed inherited every sibling's slogan straight through (measured,
+  // phase-x1-review-channels.md Blocking 2: a quota outage on one design shipped 2 of 5 bullets
+  // carrying BB's slogan; the description fan-out reuses this same broadcast set as its 3rd-arg
+  // anchor, so the leak reaches description too). Build ONE safe fallback set instead, hoisted above
+  // both the bullets AND description fan-outs (a description-only regen never runs the bullets
+  // branch at all) and lazily memoized: the SAME broadcast writer, but with the pool scoped to
+  // names shared by EVERY design — a keyword is dropped when it carries ANY design's own name as a
+  // phrase unit (`isForeignNamePhrase`) — and no single design's anchor, so the retry's own prompt
+  // cannot itself leak (it never names a design at all). Cheap on the healthy path (0 extra calls,
+  // never invoked); at most ONE extra call total on the rare failure path (never per failing group).
+  let safeFallbackBullets: string[] | null = null
+  const getSafeFallbackBullets = async (): Promise<string[]> => {
+    if (safeFallbackBullets) return safeFallbackBullets
+    if (!designGroupContexts.length) { safeFallbackBullets = bullets; return safeFallbackBullets }
+    try {
+      const sharedForeign = new Set<string>()
+      const sharedNamePhrases: string[][] = []
+      for (const g of designGroupContexts) {
+        for (const t of foreignToksFor(g.key)) sharedForeign.add(t)
+        sharedNamePhrases.push(...foreignNamePhrasesFor(g.key))
+      }
+      const notAnySiblingName = (kw: string) => !isForeignNamePhrase(kw, sharedNamePhrases)
+      const safeRemaining = remainingForBullets.filter((k) => !bulletTokens(k.keyword).map(fillNormTok).some((t) => sharedForeign.has(t)) && notAnySiblingName(k.keyword))
+      const safeTopOpp = topOpportunityKwsForBullets.filter((k) => !bulletTokens(k).map(fillNormTok).some((t) => sharedForeign.has(t)) && notAnySiblingName(k))
+      const raw = await runBulletsAgent(input, finalTitle, safeRemaining, bulletAttrs, safeTopOpp, capacityFamilyTokens, compatibilityBrands, '')
+      let sb = apparelProduct
+        ? raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase(), broadcastMotifTrust), attributePinFinal ?? ''))
+        : raw
+      if (lean === 'female' || lean === 'male') sb = sb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
+      sb = sb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
+      safeFallbackBullets = sb.some((b) => b && b.trim()) ? sb : bullets
+    } catch (e) {
+      console.warn('[pipeline] safe fallback bullets failed — falling back to the (unscoped) broadcast set:', e instanceof Error ? e.message : e)
+      safeFallbackBullets = bullets
+    }
+    return safeFallbackBullets
+  }
+  let safeFallbackDescription: string | null = null
+  const getSafeFallbackDescription = async (broadcastDesc: string): Promise<string> => {
+    if (safeFallbackDescription) return safeFallbackDescription
+    try {
+      const sb = await getSafeFallbackBullets()
+      const raw = await runDescriptionAgent(input, finalTitle, sb, descAttrs, compatibilityBrands, [], false, descTruthCtx)
+      safeFallbackDescription = raw && raw.trim() ? capDescriptionVisible(polishDescription(fixDoubledArticleBeforeBrand(raw, brandName), '', brandName)) : broadcastDesc
+    } catch (e) {
+      console.warn('[pipeline] safe fallback description failed — falling back to the (unscoped) broadcast description:', e instanceof Error ? e.message : e)
+      safeFallbackDescription = broadcastDesc
+    }
+    return safeFallbackDescription
+  }
   if (!only || only === 'bullets') {
     onProgress('Writing bullets...')
     const rawBullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, broadcastDesignAnchor)
@@ -11415,13 +11499,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
             // per-design set would persist over the approved one (the same persist-empty class the
             // broadcast gate closes, one level down). Treat empty exactly like a thrown failure.
             if (!gb.some((b) => b && b.trim())) {
-              console.warn(`[pipeline] per-design bullets came back EMPTY for "${ctx.designName}" — this group falls back to broadcast`)
-              return { skus: ctx.skus, bullets, designName: ctx.designName, designKey: ctx.key }
+              console.warn(`[pipeline] per-design bullets came back EMPTY for "${ctx.designName}" — this group falls back to a SCOPED safe set`)
+              return { skus: ctx.skus, bullets: await getSafeFallbackBullets(), designName: ctx.designName, designKey: ctx.key }
             }
             return { skus: ctx.skus, bullets: gb, designName: ctx.designName, designKey: ctx.key }
           } catch (e) {
-            console.warn(`[pipeline] per-design bullets failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
-            return { skus: ctx.skus, bullets, designName: ctx.designName, designKey: ctx.key }
+            console.warn(`[pipeline] per-design bullets failed for "${ctx.designName}" — this group falls back to a SCOPED safe set:`, e instanceof Error ? e.message : e)
+            return { skus: ctx.skus, bullets: await getSafeFallbackBullets(), designName: ctx.designName, designKey: ctx.key }
           }
         }))
         perChildBullets = []
@@ -11455,7 +11539,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     bullets = await runBulletsMetricLoops(input.openai, bullets, perChildBullets, {
       title: finalTitle, brandName: brandName || 'THE CEO', designName: effectiveDesignName || '',
       fit: truthFitEarly, onProgress,
-    }, enableBulletsLoop)
+    }, enableBulletsLoop, new Map(designGroupContexts.map((c) => [c.key, c.title])))
     // CONTENT_SPINE Step 3: the FULL path runs the terminal 150-floor bullets expander after the metric
     // loop; the bullets-only path never did, so a section-regen could ship broadcast bullets < 150. Wire
     // the SAME terminal net here. apparel-gated to match the full-path guard.
@@ -11770,8 +11854,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // This leg throws on a hard error today (useCouncil:false), but an empty string slipping
         // through post-processing must fall back to broadcast, never persist.
         if (!gd.trim()) {
-          console.warn(`[pipeline] per-design description came back EMPTY for "${ctx.designName}" — this group falls back to broadcast`)
-          return { skus: ctx.skus, description: broadcastDesc, designName: ctx.designName, designKey: ctx.key }
+          console.warn(`[pipeline] per-design description came back EMPTY for "${ctx.designName}" — this group falls back to a SCOPED safe description`)
+          return { skus: ctx.skus, description: await getSafeFallbackDescription(broadcastDesc), designName: ctx.designName, designKey: ctx.key }
         }
         // Floor net + cap on the per-design bytes (Phase 6; live 2026-07-31 B0F6QZ34B1: the strips
         // above took designs 2/3 to 889/877 under the 900 floor while the broadcast passed at 955 —
@@ -11783,8 +11867,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         gd = capDescriptionVisible(gd)
         return { skus: ctx.skus, description: gd, designName: ctx.designName, designKey: ctx.key }
       } catch (e) {
-        console.warn(`[pipeline] per-design description failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
-        return { skus: ctx.skus, description: broadcastDesc, designName: ctx.designName, designKey: ctx.key }
+        console.warn(`[pipeline] per-design description failed for "${ctx.designName}" — this group falls back to a SCOPED safe description:`, e instanceof Error ? e.message : e)
+        return { skus: ctx.skus, description: await getSafeFallbackDescription(broadcastDesc), designName: ctx.designName, designKey: ctx.key }
       }
     }))
     const out: NonNullable<typeof perChildDescriptions> = []
@@ -12543,7 +12627,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   bullets = await runBulletsMetricLoops(input.openai, bullets, perChildBullets, {
     title: finalTitle, brandName: brandName || 'THE CEO', designName: effectiveDesignName || '',
     fit: truthFit, onProgress,
-  }, enableBulletsLoop)
+  }, enableBulletsLoop, new Map(designGroupContexts.map((c) => [c.key, c.title])))
 
   // TERMINAL broadcast bullets expander (INVARIANT 2 + 3 — Item C, 2026-07-21). MUST run AFTER
   // runBulletsMetricLoops (which enforces <80 dock only per Fork 3) — first live regen showed the

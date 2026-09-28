@@ -122,3 +122,76 @@ export function isForeignToDesign(keyword: string, foreign: Set<string>): boolea
   if (foreign.size === 0) return false
   return designScopeTokens(keyword).some((t) => foreign.has(t))
 }
+
+/**
+ * RULING Y2 (phase-y1-rulings.md, 2026-09-28). `buildForeignDesignTokens` with `strictNames: true`
+ * bans a sibling's NAME at the single-TOKEN level — so ANY keyword sharing even one word with a
+ * sibling's name is foreign to every OTHER sibling too. Measured on the six real B0DSCDZC6K names:
+ * "entrepreneur" (one token of "Entrepreneur Definition") struck "gifts for entrepreneurs" from
+ * every OTHER design's plan; "hustle" (one token of "Hustle Definiton") struck "hustle sweatshirt"
+ * even with nothing else contaminated. On a fishing family, "fishing" (one token of "Fishing
+ * Trip") struck the family's own niche word from Bass Master and Reel Cool Dad's OWN rows. This is
+ * the exact regression designScope.ts:17-19's SOFT-mode doc warns about, now happening on NAMES.
+ *
+ * THE FIX: a sibling's name is foreign only as a PHRASE — every one of its own tokens must occur
+ * TOGETHER in the same keyword. "entrepreneur" alone is not "Entrepreneur Definition"; "hustle
+ * sweatshirt" does not carry "Hustle Definiton" (missing "definit"); "fishing gifts for dad" does
+ * not carry "Fishing Trip" (missing "trip"). A keyword is short (a search query), so testing it as
+ * one unit is well-behaved here in a way it was not for free-form bullet prose (designScope.ts's
+ * SOFT/STRICT split is unaffected — this is a THIRD mode, phrase-level, additive to neither).
+ *
+ * Scope: the keyword-plan scoper (bullets/description/backend) and the title candidate filter —
+ * both test discrete KEYWORD STRINGS. The per-child title ship door and the Item Highlight composer
+ * are untouched (separate, already-ruled channels — PO 2026-08-21 — that test assembled TITLE
+ * SEGMENTS, not a raw keyword pool); identity/vision vocabulary is untouched (it still flows
+ * through `buildForeignDesignTokens`, token-level, exactly as designScope.ts's own doc describes).
+ *
+ * ONE fold, not a lexicon: the censored spelling of a slogan (`b*tch` / `btch` / `bitch`) collapses
+ * to a single canonical token so a design's own slogan and a plainly-spelled market keyword compare
+ * as the SAME phrase — without this, "business bitch sweatshirt" would stop matching "Business
+ * B*tch" once matching moves from any-shared-token to every-token-together (bulletTokens drops the
+ * lone "b" and never stems "bitch"/"btch" toward each other on its own).
+ */
+const foldCensoredSlogan = (s: string): string => (s || '').replace(/b\W?i?\W?tch/gi, 'btch')
+
+/** Per-design NAME token sequence for phrase matching (censor-folded, empty/short tokens dropped).
+ *  Never fed through the family-title / pool-frequency niche exemptions — a sibling's own distinct
+ *  name is never the family's "niche word" by construction; only a genuinely single shared WORD
+ *  (which the phrase-unit test itself already lets through) is. */
+export function buildForeignNamePhrases(designs: { key: string; name: string }[]): (key: string) => string[][] {
+  const phrases = new Map(designs.map((d) => [d.key, designScopeTokens(foldCensoredSlogan(d.name))] as const))
+  const cache = new Map<string, string[][]>()
+  return (key: string): string[][] => {
+    const hit = cache.get(key)
+    if (hit) return hit
+    const out = [...phrases.entries()].filter(([k, toks]) => k !== key && toks.length > 0).map(([, toks]) => toks)
+    cache.set(key, out)
+    return out
+  }
+}
+
+/** Typo-tolerant token equality. The recorded LIVE design names in this family carry their own
+ *  one-letter misspellings ("Billionare Coming Soon", "Hustle Definiton" — K4 fixture), while the
+ *  market keyword pool naturally spells them correctly ("billionaire", "definition"). A strict
+ *  token-equality phrase test would let a plainly-spelled market keyword for a sibling's own
+ *  slogan back through simply because ITS name is misspelled — reopening exactly the leak this
+ *  fix exists to close. Two tokens match when equal, or when they share a >=6-char prefix and
+ *  differ in length by at most 2 (one inserted/omitted/substituted letter) — long enough to never
+ *  fold unrelated short words together ("hustle" vs "husband" shares only 3 chars). */
+const typoTolerant = (a: string, b: string): boolean => {
+  if (a === b) return true
+  if (Math.abs(a.length - b.length) > 2) return false
+  const n = Math.min(a.length, b.length)
+  let i = 0
+  while (i < n && a[i] === b[i]) i++
+  return i >= 6
+}
+
+/** TRUE when `keyword` carries ANOTHER design's full name as a token-sequence UNIT — every token of
+ *  that name present (typo-tolerant) in the keyword, censor-folded on both sides. A single shared
+ *  word is never enough (RULING Y2). */
+export function isForeignNamePhrase(keyword: string, namePhrases: string[][]): boolean {
+  if (!namePhrases.length) return false
+  const kToks = designScopeTokens(foldCensoredSlogan(keyword))
+  return namePhrases.some((toks) => toks.every((t) => kToks.some((kt) => typoTolerant(t, kt))))
+}
