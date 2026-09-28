@@ -2576,7 +2576,14 @@ export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput
     // never foreign to itself. Calling it PER DESIGN below — instead of unioning every design's
     // result into ONE shared set, which is what made every design's own vocabulary foreign to the
     // (single) shared line — is the fix.
-    { familyTitleText: input.familyTitleText, poolKeywords: pool.map((k) => k.keyword), strictNames: true },
+    // RULING X1/X2: `input.familyTitleText` is intentionally UNUSED here — a family title is
+    // sourced from the TOP CHILD's own live/canonical title (route.ts / the multi-design branch
+    // below), so an exemption built from it would let that child's OWN design name (e.g. "Business
+    // B*tch" as the best-seller) re-license itself into every sibling's line — the same circularity
+    // the per-child title ship door refuses (`perChildDesignScope`, `familyTitleText: ''`). Measured
+    // (ih2.probe.test.ts): the contaminated value leaked "business" into 5 of 6 non-owner designs;
+    // '' leaks into none. The field stays on the type for callers that may still read it elsewhere.
+    { familyTitleText: '', poolKeywords: pool.map((k) => k.keyword), strictNames: true },
   )
 
   const perDesign: PerDesignItemHighlight[] = groups.map((g) => {
@@ -10780,11 +10787,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const resolvedGroups = await Promise.all(designGroupInfo.groups.map((group) => resolveGroupDesignName(group)))
       const titleForeignFor = buildForeignDesignTokens(
         resolvedGroups.map((rg) => ({ key: rg.group.key, name: rg.groupDesignName, identity: rg.groupIdentityPhrases })),
-        // Candidate-FILTER semantics (unlike the ship door): the family's niche vocabulary must stay
-        // available to every design, so the family title + pool-frequency exemptions apply exactly as
-        // they do for the bullets/description partition. STRICT on NAMES — another design's name is
-        // foreign however full of it the shared pool is.
-        { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: candidates.map((c) => c.keyword), strictNames: true },
+        // RULING X1/X2: `familyTitleText` is '', not `${canonicalTitle} ${priorTitle}` — the family
+        // title is sourced from the TOP CHILD's own title, and on a family whose best seller IS one
+        // of these designs, that design's own name would exempt itself from every SIBLING's foreign
+        // set via `titleToks` in designScope.ts (checked BEFORE `strictNames`, so `strictNames: true`
+        // alone does not close it — see designScope.ts's `buildForeignDesignTokens`). `poolKeywords`
+        // stays populated: the pool-frequency exemption still applies to broad IDENTITY (vision)
+        // tokens, which is the genuinely-shared-niche-vocabulary case this candidate filter must
+        // keep (X3) — only NAME tokens are made strict, via `strictNames: true` below, exactly as
+        // the ship door already does (`perChildDesignScope`).
+        { familyTitleText: '', poolKeywords: candidates.map((c) => c.keyword), strictNames: true },
       )
       const groupResults = await Promise.all(resolvedGroups.map(async (rg) => {
         const { group, groupInput, groupDesignName, groupIdentityPhrases, groupTruthCtx } = rg
@@ -11317,9 +11329,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Raw per-design name tokens — the backend fan-out's SIBLING-DESIGN BLEED ban reads this directly
   // (stricter than the partition: no niche exemption there; its own groupHay corroboration is the exemption).
   const groupNameToks = new Map(designGroupContexts.map((c) => [c.key, new Set(designScopeTokens(c.designName))]))
+  // RULING X2 (phase-x1-rulings.md): this is the bullets/description/backend keyword-plan scoper —
+  // the SAME caller class as the Item Highlight composer and the title candidate filter, and it
+  // gets the SAME treatment the per-child title ship door already has (`perChildDesignScope`,
+  // `familyTitleText: '', strictNames: true`). Measured (pool.probe.test.ts, before this fix): with
+  // `familyTitleText` sourced from the family's own top-child title (`canonicalTitle`/`priorTitle`)
+  // and NO `strictNames`, a sibling design's full name survived into THIS design's plan two ways —
+  // (1) the top child IS that sibling, so its own title exempted its own name via `titleToks`
+  // (designScope.ts), and (2) the pool being >=10% "business" keywords exempted it via pool
+  // frequency. Both are the family-TITLE / pool-frequency circularity the ship door's own comment
+  // names ("an exemption sourced from the family TITLE would be circular — the title is the thing
+  // on trial"); a pool-frequency exemption is that same circularity from a different source. Only
+  // genuinely-shared vocabulary (identity/vision tokens, or a name token shared by >=50% of the
+  // family's names — designScope's OWN niche rule) may still survive; see X3's before/after count.
   const foreignToksFor = buildForeignDesignTokens(
     designGroupContexts.map((c) => ({ key: c.key, name: c.designName })),
-    { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: analysis.map((k) => k.keyword) },
+    { familyTitleText: '', poolKeywords: analysis.map((k) => k.keyword), strictNames: true },
   )
   // dropTitleCovered: bullets/description pools dedupe against the group's OWN title (token
   // coverage, not raw substring — "gator" inside "alligator" is NOT coverage; review-caught).
@@ -12344,7 +12369,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           identityPhrases: c.identityPhrases ?? [],
         })),
         pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow,
-        familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`,
+        // RULING X1: was the TOP CHILD's own title (`canonicalTitle`+`priorTitle`) — circular.
+        familyTitleText: '',
         // TASK 5 (2026-09-06): same family/per-design lean source the title path reads
         // (input.audienceLean / input.audienceLeanByDesign) — resolved per design INSIDE
         // buildItemHighlightsPerDesign via the SAME resolveDesignAudienceLean call.
